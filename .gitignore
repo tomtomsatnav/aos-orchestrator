@@ -1,0 +1,11 @@
+# runtime data and logs (contain session ids, folder paths, activity): never commit
+live/*
+!live/.gitkeep
+*.log
+*.ndjson.bak
+*.bak
+.DS_Store
+node_modules/
+# local scratch
+.playwright-mcp/
+tmp/

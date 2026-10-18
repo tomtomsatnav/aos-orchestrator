@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aos.dev/schemas/task.schema.json",
+  "title": "AOS-1 Task",
+  "type": "object",
+  "required": ["id", "goal_id", "title", "assignee", "status", "depends_on", "attempts", "max_attempts", "output_contract", "acceptance", "created_at", "updated_at"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^.+$" },
+    "goal_id": { "type": "string" },
+    "title": { "type": "string" },
+    "assignee": { "type": ["string", "null"] },
+    "status": { "enum": ["pending", "ready", "running", "needs_review", "done", "failed", "cancelled", "stalled"] },
+    "depends_on": { "type": "array", "items": { "type": "string" } },
+    "attempts": { "type": "integer", "minimum": 0 },
+    "max_attempts": { "type": "integer", "minimum": 1 },
+    "inputs": { "type": "object" },
+    "output_contract": { "type": "string", "pattern": "\\S" },
+    "acceptance": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "\\S" } },
+    "artifacts": { "type": "array" },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" }
+  }
+}

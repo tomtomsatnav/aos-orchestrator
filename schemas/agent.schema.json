@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aos.dev/schemas/agent.schema.json",
+  "title": "AOS-1 Agent",
+  "type": "object",
+  "required": ["id", "role", "capabilities", "can_delegate", "status", "current_task", "last_event_at"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^.+$" },
+    "role": { "type": "string" },
+    "capabilities": { "type": "array", "items": { "type": "string" } },
+    "can_delegate": { "type": "boolean" },
+    "status": { "enum": ["idle", "running", "errored", "stalled"] },
+    "current_task": { "type": ["string", "null"] },
+    "last_event_at": { "type": ["string", "null"] }
+  }
+}

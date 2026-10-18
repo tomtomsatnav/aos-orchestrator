@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aos.dev/schemas/heartbeat.schema.json",
+  "title": "AOS-1 Heartbeat",
+  "type": "object",
+  "required": ["seq", "ts", "interval_s", "status"],
+  "properties": {
+    "seq": { "type": "integer", "minimum": 0 },
+    "ts": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T" },
+    "interval_s": { "type": "number", "minimum": 1 },
+    "status": { "enum": ["running", "paused", "stopped"] },
+    "liveness": { "enum": ["alive", "late", "dead"] },
+    "last_tick_ms": { "type": "number", "minimum": 0 },
+    "consecutive_errors": { "type": "integer", "minimum": 0 }
+  }
+}
