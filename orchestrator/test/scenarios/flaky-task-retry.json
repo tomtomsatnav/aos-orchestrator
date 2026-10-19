@@ -1,0 +1,11 @@
+{
+  "_comment": "t1 writes the wrong content on attempt 1 (checks fail), the right content on attempt 2. Other tasks succeed.",
+  "default": { "behavior": "success" },
+  "tasks": {
+    "t1": [
+      { "behavior": "fail_checks", "edits": [{ "path": "a.txt", "content": "WRONG\n" }], "message": "Created a.txt." },
+      { "behavior": "success", "edits": [{ "path": "a.txt", "content": "alpha\n" }], "message": "Fixed a.txt." }
+    ],
+    "t2": [{ "behavior": "success", "edits": [{ "path": "b.txt", "content": "beta\n" }] }]
+  }
+}

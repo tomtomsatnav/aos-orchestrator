@@ -1,0 +1,14 @@
+{
+  "_comment": "t1 tries to write ../escape.txt (outside the worktree) and run `git push origin main`, then writes a.txt. With the engine's policy hook registered via --settings, the first two are denied (not applied, listed in permission_denials) and the run still exits 0.",
+  "tasks": {
+    "t1": [{
+      "behavior": "denied_tool",
+      "edits": [
+        { "path": "../escape.txt", "content": "x\n" },
+        { "path": "a.txt", "content": "alpha\n" }
+      ],
+      "commands": [{ "command": "git push origin main" }],
+      "message": "Some calls were denied; a.txt was written."
+    }]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "_comment": "t1 keeps failing its checks on haiku and sonnet and only passes on the third attempt (the opus rung of the ladder). Use with always-wrong content for the 'escalation cap' test by dropping the last step.",
+  "tasks": {
+    "t1": [
+      { "behavior": "fail_checks", "edits": [{ "path": "a.txt", "content": "wrong 1\n" }], "usage": { "input_tokens": 5, "output_tokens": 300 } },
+      { "behavior": "fail_checks", "edits": [{ "path": "a.txt", "content": "wrong 2\n" }], "usage": { "input_tokens": 5, "output_tokens": 600 } },
+      { "behavior": "success", "edits": [{ "path": "a.txt", "content": "alpha\n" }], "usage": { "input_tokens": 5, "output_tokens": 1200 }, "cost_usd": 0.05 }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "_comment": "t1 succeeds but reports 85% five-hour utilisation (reserve threshold). t2's first attempt is rejected by the plan limit (not a counted attempt), the retry succeeds.",
+  "tasks": {
+    "t1": [{ "behavior": "success", "edits": [{ "path": "a.txt", "content": "alpha\n" }],
+             "rate_limit": { "five_hour_utilization": 0.85, "seven_day_utilization": 0.4 } }],
+    "t2": [
+      { "behavior": "rate_limit", "message": "5-hour limit reached ∙ resets 3pm",
+        "rate_limit": { "five_hour_utilization": 1.0, "seven_day_utilization": 0.5, "five_hour_resets_at": 1900000000 } },
+      { "behavior": "success", "edits": [{ "path": "b.txt", "content": "beta\n" }] }
+    ]
+  }
+}

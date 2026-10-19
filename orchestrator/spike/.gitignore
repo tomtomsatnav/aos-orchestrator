@@ -1,0 +1,3 @@
+# Raw spike output holds local paths, session ids and the full list of the author's MCP servers/plugins.
+# The README quotes everything that matters; re-run the scripts to regenerate.
+out/
