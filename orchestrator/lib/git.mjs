@@ -33,6 +33,36 @@ export async function repoInfo(repo, baseBranch) {
 export const branchNames = (goalId, taskId) => ({ task: `aos/${goalId}/${taskId}`, integration: `aos/${goalId}/integration` });
 export const worktreeRootFor = (repoRoot, goalId) => path.join(`${repoRoot}-aos-worktrees`, goalId);
 
+/** True when p lies strictly inside <repo>-aos-worktrees/ (lexically, after normalisation). Guards every recursive delete. */
+export function isUnderWorktreeRoot(repo, p) {
+  const root = `${path.resolve(`${repo}-aos-worktrees`)}${path.sep}`;
+  const abs = path.resolve(p);
+  return abs.startsWith(root) && abs.length > root.length;
+}
+
+/**
+ * Before the engine runs git in a task worktree, make sure the worktree still belongs to this repo and branch.
+ * The worker can rewrite <wt>/.git (a one-line "gitdir:" file); a forged one would make the engine's
+ * `git add -A && git commit` land on another branch (e.g. the base branch via the main .git), or run a forged
+ * config's core.fsmonitor / filter drivers. Pure fs reads: no git process touches the untrusted worktree first.
+ */
+export async function assertWorktreeIntegrity(repo, wt, branch) {
+  const commonOut = (await git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).stdout.trim();
+  const common = fs.realpathSync(commonOut);
+  const dotgit = path.join(wt, '.git');
+  const st = fs.lstatSync(dotgit);
+  if (!st.isFile()) throw new Error(`worktree ${wt}: .git is not a gitdir file`);
+  const m = /^gitdir: (.+)\n?$/.exec(fs.readFileSync(dotgit, 'utf8'));
+  if (!m) throw new Error(`worktree ${wt}: malformed .git file`);
+  const gitdir = fs.realpathSync(path.resolve(wt, m[1]));
+  if (path.dirname(gitdir) !== path.join(common, 'worktrees')) throw new Error(`worktree ${wt}: .git points outside ${common}/worktrees`);
+  const back = fs.readFileSync(path.join(gitdir, 'gitdir'), 'utf8').trim(); // written by git, lives outside the worktree
+  if (fs.realpathSync(path.dirname(back)) !== fs.realpathSync(wt)) throw new Error(`worktree ${wt}: gitdir ${gitdir} belongs to another worktree`);
+  const headRef = fs.readFileSync(path.join(gitdir, 'HEAD'), 'utf8').trim();
+  if (headRef !== `ref: refs/heads/${branch}`) throw new Error(`worktree ${wt}: HEAD is "${headRef}", expected ${branch}`);
+  return true;
+}
+
 function assertOwnBranch(goalId, branch) {
   if (!branch.startsWith(`aos/${goalId}/`)) throw new Error(`refusing to touch branch ${branch}: not an aos/${goalId}/ branch`);
 }
@@ -54,6 +84,7 @@ export async function worktreeAdd(repo, goalId, wtPath, branch, startPoint) {
 /** Remove one of OUR worktrees (force: dirty trees are ours to discard). */
 export async function worktreeRemove(repo, wtPath) {
   if (!fs.existsSync(wtPath)) { await git(repo, ['worktree', 'prune'], { allowFail: true }); return false; }
+  if (!isUnderWorktreeRoot(repo, wtPath)) throw new Error(`refusing to remove ${wtPath}: not under ${repo}-aos-worktrees/`);
   const r = await git(repo, ['worktree', 'remove', '--force', wtPath], { allowFail: true });
   if (r.code !== 0) { fs.rmSync(wtPath, { recursive: true, force: true }); await git(repo, ['worktree', 'prune'], { allowFail: true }); }
   return true;

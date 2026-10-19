@@ -14,7 +14,7 @@ export const DEFAULT_POLICY = {
     allow: ['ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'find -name', 'diff', 'git status', 'git diff', 'git log', 'node --check', 'node --test'],
     deny: ['git push', 'git remote', 'git config', 'git reset --hard', 'sudo', 'curl', 'wget', 'nc', 'ssh', 'scp', 'rsync',
       'npm install', 'pip install', 'brew', 'eval', 'exec'],
-    deny_patterns: ['\\|\\s*(sh|bash|zsh|python3?|node|perl)\\b', 'rm\\s+-[a-z]*r[a-z]*f?\\s+(/|~|\\.\\.)'],
+    deny_patterns: ['\\|\\s*(sh|bash|zsh|python3?|node|perl)\\b', 'rm\\s+-(?=[a-z]*r)[a-z]*\\s+(/|~|\\.\\.)'],
     ask_on: ['substitution', 'unparsed', 'unknown_command'],
   },
   approval: { wait_in_hook_s: 20, ttl_s: 86400, on_timeout: 'deny' },
@@ -30,6 +30,19 @@ const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'python', 'python3', 'node', 
 const BUILTIN_DENY_GLOBS = ['~/.zshrc', '~/.bashrc', '~/.bash_profile', '~/.profile', '~/.zprofile', '~/.zshenv'];
 const GIT_DENY_SUB = new Set(['push', 'remote', 'config', 'filter-branch', 'update-ref', 'worktree', 'clone', 'fetch', 'pull', 'submodule', 'gc', 'prune', 'reflog']);
 const WRITE_CMDS = new Set(['mkdir', 'touch', 'mv', 'cp', 'rm', 'rmdir', 'tee', 'ln', 'truncate', 'chmod', 'install', 'dd']);
+// commands that run another command given as arguments: the policy cannot see what they run
+const WRAPPERS = new Set(['env', 'xargs', 'nohup', 'timeout', 'gtimeout', 'nice', 'time', 'command', 'builtin', 'exec', 'caffeinate', 'script', 'watch', 'parallel', 'sudo', 'doas', 'stdbuf', 'unbuffer']);
+// flags that make an otherwise allowlisted command run code or write files (always ask, even when allowlisted)
+const EXEC_FLAGS = {
+  node: /^(-e|--eval|-p|--print|-r|--require|--import|--loader|--experimental-loader|-i|--interactive|--test-reporter-destination)(=|$)/,
+  rg: /^--pre(-glob)?(=|$)/,
+  git: /^--(output|ext-diff|exec|upload-pack|receive-pack)(=|$)/,
+  find: /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/,
+};
+const INLINE_CODE = /^-(c|e|E|-eval|-command|-exec)$/;
+const MAX_COMMAND = 16384;
+/** Deny globs match case- and compatibility-insensitively: APFS (macOS default) treats .CLAUDE, .Git or .ſsh as the protected name. */
+const fold = (s) => String(s).normalize('NFKC').toLowerCase();
 
 export function mergePolicy(...layers) {
   const out = JSON.parse(JSON.stringify(DEFAULT_POLICY));
@@ -61,7 +74,7 @@ function denyGlobs(policy, ctx) {
   const g = [...(policy.paths?.deny || []), ...BUILTIN_DENY_GLOBS].map((x) => expandHome(x, ctx.home));
   return g;
 }
-const pathDenied = (policy, ctx, ...ps) => denyGlobs(policy, ctx).some((g) => ps.some((p) => globToRegex(g).test(p) || matchGlob(g, p)));
+const pathDenied = (policy, ctx, ...ps) => denyGlobs(policy, ctx).map(fold).some((g) => ps.map(fold).some((p) => globToRegex(g).test(p) || matchGlob(g, p)));
 
 /** mode: 'read' | 'write'. Returns null when the path is acceptable, else a result. */
 function checkPath(policy, ctx, R, arg, mode, base) {
@@ -88,9 +101,11 @@ const worst = (a, b) => {
   return rank[b.decision] > rank[a.decision] ? b : a;
 };
 
-function prefixMatch(entry, argv) {
+const SYSTEM_BIN = /^\/(usr\/(local\/)?)?s?bin\/[^/]+$|^\/opt\/homebrew\/bin\/[^/]+$/;
+function prefixMatch(entry, argv, { strictName = false } = {}) {
   const e = tokenize(entry);
   if (!e.length || argv.length < e.length) return false;
+  if (strictName && argv[0].includes('/') && !SYSTEM_BIN.test(argv[0])) return false;
   for (let i = 0; i < e.length; i++) {
     const a = i === 0 ? path.basename(argv[0]) : argv[i];
     if (e[i] !== a) return false;
@@ -131,6 +146,7 @@ function dangerous(policy, ctx, argv) {
 function evaluateBash(policy, command, ctx) {
   const R = makeResolver(ctx);
   const cwd = ctx.cwd || ctx.worktree;
+  if (command.length > MAX_COMMAND) return res('deny', `command longer than ${MAX_COMMAND} characters`, 'unparsed');
   const p = parseShell(command);
   const askOn = new Set(policy.bash?.ask_on || []);
   let out = res('allow', 'all commands match the allowlist', 'bash_allow');
@@ -146,7 +162,7 @@ function evaluateBash(policy, command, ctx) {
   if (p.flags.substitution) askOrDeny('substitution', 'command or process substitution');
   if (p.flags.expansion || p.flags.heredoc || p.flags.subshell || p.flags.unterminated) askOrDeny('unparsed', 'shell construct the policy cannot analyse');
 
-  for (const c of p.commands) {
+  for (const [ci, c] of p.commands.entries()) {
     if (!c.argv.length) {
       for (const rd of c.redirects) { const r = redirectCheck(policy, ctx, R, rd, cwd); if (r) note(r); }
       continue;
@@ -156,6 +172,11 @@ function evaluateBash(policy, command, ctx) {
     if (why) return res('deny', why, 'dangerous');
     if (c.ops === '|' && INTERPRETERS.has(name)) return res('deny', 'piping into an interpreter is not allowed', 'pipe_into_interpreter');
     if (/^[A-Za-z_]\w*=/.test(c.argv[0]) || c.argv[0].includes('$')) { askOrDeny('unparsed', 'variable assignment or expanded command name'); continue; }
+    // after cd/pushd/popd the rest of the line runs in another directory than the one paths are resolved against
+    if (['cd', 'pushd', 'popd'].includes(name) && ci < p.commands.length - 1) askOrDeny('unparsed', `${name} followed by more commands`);
+    if (WRAPPERS.has(name)) askOrDeny('unknown_command', `${name} runs another command`);
+    if (INTERPRETERS.has(name) && c.argv.slice(1).some((a) => INLINE_CODE.test(a) || /^-[a-zA-Z]*c$/.test(a) && name.endsWith('sh'))) askOrDeny('unknown_command', `${name} with inline code`);
+    if (EXEC_FLAGS[name] && c.argv.slice(1).some((a) => EXEC_FLAGS[name].test(a))) askOrDeny('unknown_command', `${name} with an option that runs code or writes files`);
 
     for (const rd of c.redirects) { const r = redirectCheck(policy, ctx, R, rd, cwd); if (r) note(r); }
 
@@ -176,13 +197,15 @@ function evaluateBash(policy, command, ctx) {
     }
     for (const f of flagsV) {
       const m = /^--?[\w-]+=(.+)$/.exec(f);
-      if (m && (m[1].startsWith('/') || m[1].startsWith('~') || m[1].includes('..'))) { const r = checkPath(policy, ctx, R, m[1], 'read', cwd); if (r) note(r); }
+      // --opt=/path and attached short options like -f/etc/passwd
+      const v = m ? m[1] : (/^-[A-Za-z]./.test(f) ? f.slice(2) : null);
+      if (v && (v.startsWith('/') || v.startsWith('~') || v.split('/').includes('..'))) { const r = checkPath(policy, ctx, R, v, 'read', cwd); if (r) note(r); }
     }
     if (name === 'find' && c.argv.some((a) => ['-exec', '-execdir', '-delete', '-ok', '-okdir', '-fprint'].includes(a))) { note(res('ask', 'find with an action', 'unknown_command')); continue; }
     if (name === 'cd') { if (!operands.length) note(res('deny', 'cd without target', 'outside_read_root')); continue; }
 
     const granted = (ctx.grants || []).some((g) => g.kind === 'command' && (g.command === p.raw.trim() || (Array.isArray(g.argv) && prefixMatch(g.argv.join(' '), c.argv))));
-    const allowed = [...(policy.bash?.allow || []), ...(ctx.allowed_commands || [])].some((e) => prefixMatch(e, c.argv));
+    const allowed = [...(policy.bash?.allow || []), ...(ctx.allowed_commands || [])].some((e) => prefixMatch(e, c.argv, { strictName: true }));
     if (!granted && !allowed) askOrDeny('unknown_command', `command not on the allowlist: ${name}`);
   }
   if (out.decision === 'allow' && p.commands.every((c) => c.argv.length === 0)) return res('deny', 'nothing to run', 'unparsed');
@@ -218,7 +241,16 @@ export function evaluate(policy, toolCall, ctx) {
     }
     if (READ_TOOLS.has(tool)) {
       const target = input.file_path || input.path || input.notebook_path || '.';
-      return checkPath(pol, c, R, String(target), 'read', c.cwd) || res('allow', 'read inside worktree', 'read_in_worktree');
+      const r = checkPath(pol, c, R, String(target), 'read', c.cwd);
+      if (r) return r;
+      // Glob: an absolute, ~ or .. pattern ("/home/u/.ssh/*", "../../**/*.pem") lists files outside the search path
+      if (tool === 'Glob' && typeof input.pattern === 'string' && (/^[/~]/.test(input.pattern) || input.pattern.split('/').includes('..'))) {
+        const segs = input.pattern.split('/'); const k = segs.findIndex((x) => /[*?[{]/.test(x));
+        const prefix = (k < 0 ? segs : segs.slice(0, k)).join('/') || '/';
+        const g = checkPath(pol, c, R, prefix, 'read', path.resolve(c.cwd, String(input.path || '.')));
+        if (g) return g;
+      }
+      return res('allow', 'read inside worktree', 'read_in_worktree');
     }
     if (tool === 'Bash') {
       if (typeof input.command !== 'string') return res('deny', 'missing command', 'unparsed');
@@ -228,6 +260,16 @@ export function evaluate(policy, toolCall, ctx) {
   } catch (e) {
     return res('deny', `policy error: ${e.message}`, 'policy_error');
   }
+}
+
+/**
+ * Worktree-relative path (as `git status` prints it) hit by a protected-path rule (.git, .claude/settings*.json, ...)?
+ * Used on the engine's snapshot so files written without a tool call (e.g. by code a test run executed) cannot be committed.
+ */
+export function isProtectedRel(policy, rel) {
+  const pol = mergePolicy(policy);
+  const p = fold(`/${rel}`);
+  return (pol.paths?.deny || []).filter((g) => g.startsWith('**/')).map(fold).some((g) => globToRegex(g).test(p));
 }
 
 /** Stable short key identifying a tool call (used to de-duplicate approval requests). */

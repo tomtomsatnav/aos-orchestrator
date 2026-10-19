@@ -14,8 +14,9 @@ export function audit(dir, entry, clock) {
   try { fs.appendFileSync(path.join(dir, 'audit.ndjson'), `${JSON.stringify({ ts: iso(nowMs(clock)), ...entry })}\n`, { mode: 0o600 }); } catch { /* best effort */ }
 }
 
-export const requestKey = ({ goal_id, task_id, attempt, tool, input }) =>
-  crypto.createHash('sha256').update(JSON.stringify([goal_id, task_id, attempt, tool, input])).digest('hex').slice(0, 16);
+// cwd is part of the request: `rm -r build` approved in one directory must not be replayed in another
+export const requestKey = ({ goal_id, task_id, attempt, tool, input, cwd = null }) =>
+  crypto.createHash('sha256').update(JSON.stringify([goal_id, task_id, attempt, tool, input, cwd])).digest('hex').slice(0, 16);
 
 export function readApproval(dir, id) { return readJSON(file(dir, id), null); }
 
@@ -42,7 +43,7 @@ export function createApproval(dir, req, { clock, ttl_s = 86400 } = {}) {
   const t = nowMs(clock);
   for (let n = listApprovals(dir).length + 1; n < 100000; n++) {
     const id = `A-${n}`;
-    const rec = { id, key, goal_id: req.goal_id, task_id: req.task_id, attempt: req.attempt, tool: req.tool, input: req.input,
+    const rec = { id, key, goal_id: req.goal_id, task_id: req.task_id, attempt: req.attempt, tool: req.tool, input: req.input, cwd: req.cwd ?? null,
       reason: req.reason, rule: req.rule, requested_at: iso(t), expires_at: iso(t + ttl_s * 1000), status: 'pending' };
     try {
       const fd = fs.openSync(file(dir, id), 'wx', 0o600);

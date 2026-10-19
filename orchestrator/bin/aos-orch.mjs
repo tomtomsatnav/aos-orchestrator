@@ -68,7 +68,7 @@ async function main() {
       out(engineAlive(d) ? `${cmd}: queued; the running engine applies it at its next tick` : `${cmd}: queued, but no engine is running for this goal; it applies on the next \`aos-orch run ${arg1}\``);
       break;
     }
-    case 'approvals': { out(listApprovals(paths(resolveGoalDir(arg1)).approvals).map((a) => ({ id: a.id, task: a.task_id, tool: a.tool, status: a.status, reason: a.reason, expires_at: a.expires_at, input: a.tool === 'Bash' ? a.input?.command : a.input?.file_path }))); break; }
+    case 'approvals': { out(listApprovals(paths(resolveGoalDir(arg1)).approvals).map((a) => ({ id: a.id, task: a.task_id, tool: a.tool, status: a.status, reason: a.reason, expires_at: a.expires_at, input: a.tool === 'Bash' ? a.input?.command : a.input?.file_path, cwd: a.cwd ?? null }))); break; }
     case 'approve': case 'deny': {
       const d = resolveGoalDir(arg1); if (!arg2) die(`usage: aos-orch ${cmd} <goal-id> <A-n>`);
       out(decide(paths(d).approvals, arg2, { decision: cmd, scope: flags['for-task'] ? 'task' : 'once', by: 'cli' }));

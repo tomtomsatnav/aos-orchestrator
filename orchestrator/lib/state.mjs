@@ -8,7 +8,9 @@ import { validateGoal, validateTask } from './schema.mjs';
 
 export const VERSION = 1;
 export const TERMINAL = new Set(['achieved', 'failed', 'cancelled']);
-export const ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
+// Ids become path components and git ref components: no leading dot/dash ('.', '..' would make the worktree root
+// <repo>-aos-worktrees/.. = the repo's PARENT, which _finalize removes recursively), no '..', no trailing '.' or '.lock'.
+export const ID_RE = /^(?!.*\.\.)(?!.*\.lock$)[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?<!\.)$/;
 
 export function orchRoot(env = process.env) {
   if (env.AOS_ORCH_DIR) return path.resolve(env.AOS_ORCH_DIR);

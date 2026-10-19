@@ -12,7 +12,7 @@ import {
 import * as G from './git.mjs';
 import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
 import { matchAny, scopesOverlap } from './glob.mjs';
-import { mergePolicy, DEFAULT_POLICY } from './policy.mjs';
+import { mergePolicy, DEFAULT_POLICY, isProtectedRel } from './policy.mjs';
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
 import { Governor, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
@@ -43,6 +43,7 @@ export class Engine {
     this.pid = o.pid ?? process.pid;
     this.spawnFn = o.spawnFn;
     this.hookScript = o.hookScript || HOOK_SCRIPT; // tests may substitute a stub hook
+    this.lockRefreshMs = o.lockRefreshMs ?? null; // default: a third of the lock TTL
     this.bin = o.claudeBin || W.claudeBin(this.env);
     this.workers = new Map(); // task id -> live worker record (in memory; rebuilt from pid files after a crash)
     this.gov = null;
@@ -64,6 +65,11 @@ export class Engine {
     const l = acquireLock(this.dir, { pid: this.pid, ttlMs: this.lockTtlMs(), now: Date.now() });
     if (!l.ok) throw new Error(`goal ${this.goalId} is already owned by engine pid ${l.holder?.pid}`);
     this.started = true;
+    // keep the lock fresh while a long tick (checks up to 3600 s, merges, kills) is in progress: a stale-looking lock
+    // would let a second engine take the goal over and verify/merge/dispatch the same tasks concurrently
+    clearInterval(this._lockTimer);
+    this._lockTimer = setInterval(() => { if (!this.dead && this.started) touchLock(this.dir, { pid: this.pid, now: Date.now() }); }, this.lockRefreshMs ?? Math.floor(this.lockTtlMs() / 3));
+    this._lockTimer.unref?.();
     for (const d of [this.P.approvals, this.P.workers, this.P.commands, this.P.tmp]) ensureDir(d);
     this.gov = new Governor(this.orchDir, readJSON(this.P.goal)?.orch?.governor || {});
     atomicWrite(path.join(this.P.workers, 'settings.json'), W.buildSettings(this.hookScript));
@@ -73,10 +79,10 @@ export class Engine {
   }
 
   /** Release the lock; workers keep running (a later engine re-adopts them). */
-  async stop() { this.stopped = true; this._wake(); await this._chain.catch(() => {}); releaseLock(this.dir, { pid: this.pid }); this.started = false; }
+  async stop() { this.stopped = true; this._wake(); await this._chain.catch(() => {}); clearInterval(this._lockTimer); releaseLock(this.dir, { pid: this.pid }); this.started = false; }
 
   /** Simulate a hard crash: stop everything in this process, leave lock + workers + files exactly as they are. */
-  crash() { this.dead = true; this.stopped = true; this.workers.clear(); this._wake(); }
+  crash() { this.dead = true; this.stopped = true; clearInterval(this._lockTimer); this.workers.clear(); this._wake(); }
 
   isDone() {
     const g = readJSON(this.P.goal);
@@ -242,7 +248,7 @@ export class Engine {
     this.ev('human.cancel', 'human', null, { by, kind });
     const pgids = new Set();
     for (const r of this.workers.values()) pgids.add(r.pgid);
-    for (const t of S.tasks) if (t.status === 'running') { const pf = readJSON(this.wpath(t.id, t.orch.worker_seq, 'pid.json')); if (pf?.pgid) pgids.add(pf.pgid); }
+    for (const t of S.tasks) if (t.status === 'running' && !this.workers.has(t.id)) { const pf = readJSON(this.wpath(t.id, t.orch.worker_seq, 'pid.json')); if (this._pidFileIsOurs(pf)) pgids.add(pf.pgid); }
     await Promise.all([...pgids].map((g) => W.killGroup(g, { graceMs: kind === 'kill' ? Math.min(this.killGraceMs, 2000) : this.killGraceMs })));
     for (const t of S.tasks) {
       if (['done', 'failed', 'cancelled'].includes(t.status)) continue;
@@ -309,6 +315,12 @@ export class Engine {
     this.ev('orch.worker.killed', 'orchestrator', rec.task, { reason, pgid: rec.pgid, seq: rec.seq });
   }
 
+  /** A pid file's process is still OUR worker (pid reuse after a crash/reboot must never get an unrelated group killed). */
+  _pidFileIsOurs(pf) {
+    if (!pf?.pgid || !pf.pid || !pf.session_id) return false;
+    return pidAlive(pf.pid) && !!W.processCommand(pf.pid)?.includes(pf.session_id);
+  }
+
   _pidMatches(rec) {
     const cmd = W.processCommand(rec.pid);
     return cmd != null && (!rec.session_id || cmd.includes(rec.session_id));
@@ -365,6 +377,9 @@ export class Engine {
     const a = S.agents.find((x) => x.id === task.assignee); if (a) { a.status = 'idle'; a.current_task = null; a.last_event_at = entry.ended_at; }
     this.ev('orch.worker.exited', 'orchestrator', task.id, { exit_code: collected.exit_code, signal: collected.signal, subtype: res?.subtype ?? null, new_tokens: u.new_tokens, kill_reason: rec.killReason, denials: denials.length });
     this.workers.delete(task.id);
+    // the leader is gone; anything left in its process group (background jobs the worker started) is ours to stop
+    // (only while the leader pid is dead: a live pid that failed the identity check is someone else's process)
+    if (rec.pgid && !pidAlive(rec.pid) && W.groupAlive(rec.pgid)) W.signalGroup(rec.pgid, 'SIGKILL');
     saveState(this.dir, S);
     await this._decide(S, task, entry, collected);
   }
@@ -439,9 +454,17 @@ export class Engine {
     const goal = S.goal;
     const wt = task.orch.worktree;
     task.orch.phase = 'checking'; saveState(this.dir, S);
+    try { await G.assertWorktreeIntegrity(S.goal.orch.repo, wt, task.orch.branch); } catch (e) {
+      // never run git in (or commit from) a worktree whose .git the worker replaced; drop it and start over
+      this.ev('orch.check.failed', 'orchestrator', task.id, { reason: 'worktree_tampered', error: String(e.message).slice(0, 300) });
+      await this._dropWorktree(S, task, true).catch(() => {});
+      return this._failAttempt(S, task, entry, 'worktree_tampered', { escalate: true, note: 'the worktree git metadata was modified; never touch .git' });
+    }
     const changed = await G.changedPaths(wt);
     const granted = task.orch.grants.filter((g) => g.kind === 'path').map((g) => path.relative(realpathDeepest(wt), g.path).split(path.sep).join('/')).filter((r) => r && !r.startsWith('..'));
-    const outside = changed.filter((p) => !matchAny([...task.orch.path_scope, ...granted], p)); // an approved path grant extends the scope
+    const pol = this._policy(goal);
+    // an approved path grant extends the scope; protected files (.git, .claude/settings*.json) never pass, whatever the scope
+    const outside = changed.filter((p) => !matchAny([...task.orch.path_scope, ...granted], p) || isProtectedRel(pol, p));
     if (outside.length) {
       await G.discardChanges(wt);
       this.ev('orch.check.failed', 'orchestrator', task.id, { reason: 'scope_violation', paths: outside.slice(0, 20) });
@@ -574,7 +597,7 @@ export class Engine {
     let plan; let source;
     if (o.plan_state === 'supplied') { plan = readJSON(this.P.plan)?.plan; source = 'supplied'; } else {
       const old = readJSON(this.wpath('planner', 1, 'pid.json'));
-      if (old?.pgid && W.groupAlive(old.pgid)) await W.killGroup(old.pgid, { graceMs: this.killGraceMs }); // orphan from a crashed engine
+      if (this._pidFileIsOurs(old)) await W.killGroup(old.pgid, { graceMs: this.killGraceMs }); // orphan from a crashed engine
       o.plan_state = 'planning'; saveState(this.dir, S);
       await this._ensureIntegration(S);
       const r = await this._runPlanner(S);
@@ -758,7 +781,13 @@ export class Engine {
     try {
       const diffStat = o.worktree_root ? await G.diffStat(o.repo, o.base_commit, o.integration_branch) : '';
       for (const t of S.tasks) if (t.orch.worktree) { try { await this._dropWorktree(S, t); } catch { /* best effort */ } }
-      if (o.worktree_root) { await G.worktreeRemove(o.repo, this._integrationWt(goal)).catch(() => {}); try { fs.rmSync(o.worktree_root, { recursive: true, force: true }); fs.rmdirSync(path.dirname(o.worktree_root)); } catch { /* not empty / gone */ } }
+      if (o.worktree_root) {
+        await G.worktreeRemove(o.repo, this._integrationWt(goal)).catch(() => {});
+        // only ever the exact <repo>-aos-worktrees/<goal> directory this engine computed (never a parent)
+        if (o.worktree_root === G.worktreeRootFor(o.repo, goal.id) && G.isUnderWorktreeRoot(o.repo, o.worktree_root)) {
+          try { fs.rmSync(o.worktree_root, { recursive: true, force: true }); fs.rmdirSync(path.dirname(o.worktree_root)); } catch { /* not empty / gone */ }
+        }
+      }
       const decisions = (() => { try { return fs.readFileSync(path.join(this.P.workers, 'decisions.ndjson'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((d) => d.decision === 'deny'); } catch { return []; } })();
       const criteria = readJSON(path.join(this.dir, 'criteria.json'), {});
       const md = buildReport({ goal, tasks: S.tasks, approvals: listApprovals(this.P.approvals), denials: decisions, diffStat, criteriaResults: criteria, events: readEvents(this.dir), governor: this.gov.load() });

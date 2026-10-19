@@ -9,13 +9,30 @@ import { fileURLToPath } from 'node:url';
 import { evaluate, callSummary, safeLabel } from './policy.mjs';
 import { createApproval, waitForDecision } from './approvals.mjs';
 
-/** realpath of the deepest existing ancestor, so symlinks cannot escape and not-yet-created files resolve. */
-export function realpathDeepest(abs) {
+/** Where an unresolvable path (symlink loop) is reported: outside every worktree, so it is always denied. */
+export const UNRESOLVABLE = '/dev/null/aos-unresolvable-path';
+
+/**
+ * realpath of the deepest existing ancestor, so symlinks cannot escape and not-yet-created files resolve.
+ * A DANGLING symlink is followed too: writing to it creates its target, which may lie outside the worktree.
+ */
+export function realpathDeepest(abs, depth = 0) {
+  if (depth > 40) return UNRESOLVABLE;
   for (let d = abs; ; d = path.dirname(d)) {
-    try { return path.join(fs.realpathSync(d), path.relative(d, abs)); } catch { /* try parent */ }
+    try { return path.join(fs.realpathSync(d), path.relative(d, abs)); } catch { /* missing, dangling or looping */ }
+    let link = null;
+    try { if (fs.lstatSync(d).isSymbolicLink()) link = fs.readlinkSync(d); } catch { /* does not exist */ }
+    if (link !== null) {
+      const target = path.resolve(realpathDeepest(path.dirname(d), depth + 1), link);
+      return realpathDeepest(path.join(target, path.relative(d, abs)), depth + 1);
+    }
     if (d === path.dirname(d)) return abs;
   }
 }
+
+/** The hook is registered with a 30 s timeout (worker.buildSettings); waiting longer gets it killed mid-wait. */
+export const MAX_HOOK_WAIT_S = 25;
+export const hookWaitMs = (policy) => Math.max(0, Math.min(Number(policy?.approval?.wait_in_hook_s ?? 20) || 0, MAX_HOOK_WAIT_S)) * 1000;
 
 export function shapeOutput(event, decision, reason) {
   if (event === 'PermissionRequest') {
@@ -46,9 +63,9 @@ export async function decideForPayload(payload, env = process.env) {
   const dir = env.AOS_APPROVALS_DIR;
   if (!dir) return { event, decision: 'deny', reason: 'AOS policy: approval needed but no inbox configured', rule: 'policy_error' };
   const rec = createApproval(dir, { goal_id: env.AOS_GOAL_ID || null, task_id: env.AOS_TASK_ID || null, attempt: Number(env.AOS_ATTEMPT) || 0,
-    tool: call.tool_name, input: call.tool_input, reason: v.reason, rule: v.rule }, { ttl_s: ap.ttl_s || 86400 });
+    tool: call.tool_name, input: call.tool_input, cwd: call.cwd || null, reason: v.reason, rule: v.rule }, { ttl_s: ap.ttl_s || 86400 });
   const pollMs = Number(env.AOS_APPROVAL_POLL_MS) || 100;
-  const done = rec.status !== 'pending' ? rec : await waitForDecision(dir, rec.id, { timeoutMs: (ap.wait_in_hook_s ?? 20) * 1000, pollMs });
+  const done = rec.status !== 'pending' ? rec : await waitForDecision(dir, rec.id, { timeoutMs: hookWaitMs(cfg.policy), pollMs });
   if (done && done.status === 'approved') {
     logDecision(env, { event, decision: 'allow', rule: 'approved', approval: rec.id, label: safeLabel(call) });
     return { event, decision: 'allow', reason: `AOS policy: approved (${rec.id})`, rule: 'approved', approval: rec.id };

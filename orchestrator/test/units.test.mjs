@@ -245,3 +245,31 @@ test('git helpers: worktree layout, branch naming, never touch the base branch, 
     assert.equal(await G.deleteOwnBranch(sb.repo, 'g1', 'aos/g1/t1'), true);
   } finally { sb.cleanup(); }
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// Security review (phase 1)
+import * as STATE from '../lib/state.mjs';
+import * as GIT from '../lib/git.mjs';
+
+test('review: goal/task ids cannot be "." / ".." (worktree root would become the repo parent, removed recursively at finalize)', () => {
+  for (const bad of ['.', '..', '.x', '-x', 'a..b', 'x.lock', 'x.']) {
+    assert.ok(!STATE.ID_RE.test(bad), bad);
+    assert.throws(() => normalizeGoalSpec({ id: bad, title: 't', success_criteria: [{ text: 'x' }], orch: { repo: '/tmp/r' } }), /invalid goal id/, bad);
+  }
+  for (const ok of ['g-test', 't1', 'a.b', 'A_1-2.3']) assert.ok(STATE.ID_RE.test(ok), ok);
+  const v = validatePlan({ tasks: [{ ...ptask('..', 'a.txt', 'alpha') }] }, { max_tasks: 5, check_allowlist: ['node'] });
+  assert.equal(v.ok, false);
+});
+
+test('review: worktreeRemove refuses any path outside <repo>-aos-worktrees/ (no recursive delete elsewhere)', async () => {
+  const sb = mkSandbox();
+  try {
+    const victim = path.join(sb.root, 'victim'); fs.mkdirSync(victim); fs.writeFileSync(path.join(victim, 'keep.txt'), 'x');
+    await assert.rejects(GIT.worktreeRemove(sb.repo, victim), /refusing/);
+    await assert.rejects(GIT.worktreeRemove(sb.repo, path.join(`${sb.repo}-aos-worktrees`, '..')), /refusing/);
+    assert.ok(fs.existsSync(path.join(victim, 'keep.txt')));
+    assert.ok(GIT.isUnderWorktreeRoot(sb.repo, path.join(`${sb.repo}-aos-worktrees`, 'g', 't1')));
+    assert.ok(!GIT.isUnderWorktreeRoot(sb.repo, `${sb.repo}-aos-worktrees`));
+    assert.ok(!GIT.isUnderWorktreeRoot(sb.repo, `${sb.repo}-aos-worktrees-evil/x`));
+  } finally { sb.cleanup(); }
+});
