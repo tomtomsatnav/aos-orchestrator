@@ -191,6 +191,12 @@ export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
   }
   const budget = { max_ticks: 500, max_usd: 5, max_wall_clock_s: 7200, ...(spec.budget || {}) };
   if (!(budget.max_ticks >= 1) || !(budget.max_wall_clock_s >= 1) || !(budget.max_usd >= 0)) throw new Error('goal.budget is invalid (mandatory per SPEC section 7)');
+  const ports = o.check_localhost_ports ?? [];
+  if (!Array.isArray(ports) || ports.length > 16 || ports.some((x) => !Number.isInteger(x) || x < 1 || x > 65535)) throw new Error('goal.orch.check_localhost_ports must be an array of up to 16 ports (1-65535)');
+  for (const k of ['trust_repo_config', 'unsandboxed_checks']) if (o[k] !== undefined && typeof o[k] !== 'boolean') throw new Error(`goal.orch.${k} must be a boolean`);
+  const approval = { plan: 'required', outside_allowlist: 'ask', dangerous: 'deny', ...(o.approval_policy || {}) };
+  if (o.plan_approval !== undefined) approval.plan = o.plan_approval; // documented alias: orch.plan_approval
+  if (!['required', 'auto'].includes(approval.plan)) throw new Error('goal plan approval must be "required" or "auto"');
   const goal = {
     id, title: spec.title, description: spec.description || '', status: 'draft', success_criteria: criteria, budget,
     created_at: ts, updated_at: ts,
@@ -198,7 +204,8 @@ export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
       repo: o.repo, base_branch: o.base_branch || 'main', base_commit: o.base_commit || null,
       integration_branch: `aos/${id}/integration`, worktree_root: null,
       budgets: { ...DEFAULT_BUDGETS, ...(o.budgets || {}) },
-      approval_policy: { plan: 'required', outside_allowlist: 'ask', dangerous: 'deny', ...(o.approval_policy || {}) },
+      approval_policy: approval,
+      trust_repo_config: o.trust_repo_config === true, unsandboxed_checks: o.unsandboxed_checks === true, check_localhost_ports: ports,
       policy: o.policy || 'policy.default.json',
       check_allowlist: o.check_allowlist || null,
       governor: o.governor || {},

@@ -37,6 +37,7 @@ export function mkSandbox(name = 'aos-orch') {
     },
     engine(goalDir, opts = {}) {
       const e = new Engine({ goalDir, orchDir: orch, env: opts.env || sb.env(), intervalMs: 200, killGraceMs: 300, budgetGraceMs: 400, plannerTimeoutMs: 30000, ...opts });
+      if (opts.humanApproves !== false) humanApproves(e);
       sb.engines.push(e); return e;
     },
     cleanup() {
@@ -47,6 +48,25 @@ export function mkSandbox(name = 'aos-orch') {
     },
   };
   return sb;
+}
+
+/**
+ * Plans with commands can no longer auto-approve (security review condition 3). The pre-existing engine tests were written
+ * for `plan: auto`; to keep them meaningful this stands in for the HUMAN: when a goal whose spec says plan "auto" parks at
+ * awaiting_approval, it queues exactly what `aos-orch approve-plan` queues (a command carrying the reviewed hashes).
+ * Tests of the approval gate itself pass { humanApproves: false }.
+ */
+export function humanApproves(engine) {
+  const orig = engine.tick.bind(engine);
+  engine.tick = async () => {
+    const r = await orig();
+    const g = readJSON(engine.P.goal);
+    if (g && g.status === 'draft' && g.orch.plan_state === 'awaiting_approval' && g.orch.approval_policy.plan === 'auto') {
+      engine.dir && (await engine.command({ cmd: 'approve-plan', by: 'test-human', reviewed: engine._fingerprint(loadState(engine.dir)) }));
+    }
+    return r;
+  };
+  return engine;
 }
 
 /** Tick until `pred(summary)` or timeout. Returns the last tick result. */

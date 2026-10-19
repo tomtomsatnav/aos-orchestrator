@@ -10,7 +10,7 @@ import { decideForPayload, shapeOutput, realpathDeepest } from '../lib/policy-ho
 import { listApprovals, decide, createApproval, expireDue, readApproval } from '../lib/approvals.mjs';
 
 const HOOK = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'lib', 'policy-hook.mjs');
-const ctx = { worktree: '/w/t1', path_scope: ['a.txt', 'src/**'], allowed_tools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'], allowed_commands: ['make test', 'node heartbeat/test.mjs'], grants: [], home: '/home/u', base_branch: 'main' };
+const ctx = { worktree: '/w/t1', path_scope: ['a.txt', 'src/**'], allowed_tools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'], allowed_commands: ['sort', 'uniq -c'], grants: [], home: '/home/u', base_branch: 'main' };
 const ev = (tool, input, c = ctx, pol = DEFAULT_POLICY) => evaluate(pol, { tool_name: tool, tool_input: input, cwd: '/w/t1' }, c);
 
 const TABLE = [
@@ -34,9 +34,11 @@ const TABLE = [
   ['tool not allowed', 'WebFetch', { url: 'http://x' }, 'deny', 'tool_not_allowed'],
   ['unknown tool name', 'Mystery', {}, 'deny', 'tool_not_allowed'],
   ['bash allowlisted', 'Bash', { command: 'ls -la' }, 'allow'],
-  ['bash task command', 'Bash', { command: 'make test' }, 'allow'],
+  ['bash task command', 'Bash', { command: 'sort a.txt' }, 'allow'],
+  ['bash make test -> deny (executes worker code)', 'Bash', { command: 'make test' }, 'deny', 'dangerous'],
+  ['bash node --test -> deny', 'Bash', { command: 'node --test' }, 'deny', 'dangerous'],
   ['bash chain all allowed', 'Bash', { command: 'git status && git diff | head -5' }, 'allow'],
-  ['bash prefix must match', 'Bash', { command: 'make install' }, 'ask', 'unknown_command'],
+  ['bash prefix must match', 'Bash', { command: 'uniq -d a.txt' }, 'ask', 'unknown_command'],
   ['bash unknown -> ask', 'Bash', { command: 'sed -i s/a/b/ a.txt' }, 'ask', 'unknown_command'],
   ['git push', 'Bash', { command: 'git push origin main' }, 'deny'],
   ['git push with option', 'Bash', { command: 'git -C /w/t1 push' }, 'deny'],
@@ -69,7 +71,7 @@ const TABLE = [
   ['cat outside', 'Bash', { command: 'cat /etc/passwd' }, 'deny', 'outside_read_root'],
   ['cat ..', 'Bash', { command: 'cat ../secret' }, 'deny'],
   ['cat ssh key', 'Bash', { command: 'cat ~/.ssh/id_rsa' }, 'deny'],
-  ['find -exec -> ask', 'Bash', { command: 'find . -name x -exec rm {} ;' }, 'ask'],
+  ['find -exec -> deny', 'Bash', { command: 'find . -name x -exec rm {} ;' }, 'deny'],
   ['env assignment -> ask', 'Bash', { command: 'FOO=1 ls' }, 'ask'],
   ['empty command', 'Bash', { command: '   ' }, 'deny'],
   ['missing command', 'Bash', {}, 'deny'],
@@ -262,7 +264,7 @@ test('review: allowlisted commands cannot be used to run other code, write files
   ]) assert.notEqual(ev('Bash', { command: cmd }, c).decision, 'allow', cmd);
   assert.equal(ev('Bash', { command: 'grep -f/etc/passwd a.txt' }).decision, 'deny', 'attached short option value is a path');
   assert.equal(ev('Bash', { command: '/bin/cat a.txt' }).decision, 'allow', 'system binaries by absolute path still match');
-  assert.equal(ev('Bash', { command: 'node --test' }).decision, 'allow');
+  assert.equal(ev('Bash', { command: 'node --test' }).decision, 'deny', 'node --test executes worker-written code: no longer allowlisted');
 });
 
 test('review: pathological commands are decided fast (hook timeout = fail open for read-only calls)', () => {

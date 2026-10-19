@@ -143,3 +143,10 @@ export async function listWorktrees(repo) {
   const r = await git(repo, ['worktree', 'list', '--porcelain']);
   return r.stdout.split('\n').filter((l) => l.startsWith('worktree ')).map((l) => l.slice(9));
 }
+
+/** Raw bytes of <ref>:<rel> (null when absent). Used to hash the committed CLAUDE.md a worktree will contain. */
+export function showBlob(repo, ref, rel) {
+  return new Promise((resolve) => {
+    execFile('git', [...IDENT, 'show', `${ref}:${rel}`], { cwd: repo, env: gitEnv(), encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout));
+  });
+}

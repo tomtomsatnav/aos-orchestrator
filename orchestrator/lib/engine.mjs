@@ -16,7 +16,9 @@ import { mergePolicy, DEFAULT_POLICY, isProtectedRel } from './policy.mjs';
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
 import { Governor, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
-import { buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS } from './plan.mjs';
+import { buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHash, reviewView } from './plan.mjs';
+import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
+import { sandboxAvailable, SANDBOX_EXEC } from './sandbox.mjs';
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
 import { buildReport } from './report.mjs';
 
@@ -42,6 +44,7 @@ export class Engine {
     this.plannerTimeoutMs = o.plannerTimeoutMs ?? 300000;
     this.pid = o.pid ?? process.pid;
     this.spawnFn = o.spawnFn;
+    this.sandboxBin = o.sandboxBin || SANDBOX_EXEC; // tests may point this at a missing binary
     this.hookScript = o.hookScript || HOOK_SCRIPT; // tests may substitute a stub hook
     this.lockRefreshMs = o.lockRefreshMs ?? null; // default: a third of the lock TTL
     this.bin = o.claudeBin || W.claudeBin(this.env);
@@ -74,6 +77,7 @@ export class Engine {
     this.gov = new Governor(this.orchDir, readJSON(this.P.goal)?.orch?.governor || {});
     atomicWrite(path.join(this.P.workers, 'settings.json'), W.buildSettings(this.hookScript));
     if (!fs.existsSync(this.P.policyDefault)) { try { atomicWrite(this.P.policyDefault, DEFAULT_POLICY); } catch { /* read-only orch dir */ } }
+    if (readJSON(this.P.goal)?.orch?.unsandboxed_checks) this.ev('orch.sandbox.disabled', 'orchestrator', null, { warning: 'unsandboxed_checks is set: acceptance checks run worker-written code WITHOUT the OS sandbox' });
     if (l.takeover) this.ev('orch.lock.broken', 'orchestrator', null, { note: 'stale engine lock taken over' });
     return this;
   }
@@ -220,7 +224,7 @@ export class Engine {
           atomicWrite(this.P.hb, { ...hb, status: 'running' }); this.gov.resume(this.now());
           this.ev('human.resume', 'human', null, { by: c.by || 'cli' }); break;
         case 'approve-plan':
-          if (goal.orch.plan_state === 'awaiting_approval') { this._activate(S, 'human'); saveState(this.dir, S); }
+          if (goal.orch.plan_state === 'awaiting_approval') { this._activate(S, 'human', c.reviewed); saveState(this.dir, S); }
           break;
         case 'reject-plan':
           if (goal.orch.plan_state === 'awaiting_approval') {
@@ -235,12 +239,38 @@ export class Engine {
     }
   }
 
-  _activate(S, who) {
+  /** Current fingerprint of what a human approves: the stored plan and the engine's task commands/scopes. */
+  _fingerprint(S) { return { plan_hash: planHash(readJSON(this.P.plan)?.plan ?? null), tasks_hash: tasksHash(S.tasks) }; }
+
+  /** Activate the goal. The approval record stores the plan hash; a human approval of an edited plan is refused. */
+  _activate(S, who, reviewed = null) {
     const goal = S.goal;
+    const cur = this._fingerprint(S); const pending = goal.orch.plan_fingerprint;
+    const stale = !pending || pending.plan_hash !== cur.plan_hash || pending.tasks_hash !== cur.tasks_hash
+      || (reviewed && (reviewed.plan_hash !== cur.plan_hash || reviewed.tasks_hash !== cur.tasks_hash));
+    if (stale) {
+      this.ev('orch.plan.approval_refused', 'orchestrator', null, { by: who, reason: 'the plan changed since it was proposed or reviewed; re-review it', current: cur.plan_hash.slice(0, 12) });
+      return false;
+    }
+    goal.orch.plan_approval = { by: who, at: iso(this.now()), ...cur, has_commands: !!humanReviewReason(S.tasks) };
     goal.status = 'active'; goal.orch.plan_state = 'approved'; goal.orch.started_ms ??= this.now();
-    this.ev('orch.plan.approved', who === 'human' ? 'human' : 'orchestrator', null, { by: who });
+    this.ev('orch.plan.approved', who === 'human' ? 'human' : 'orchestrator', null, { by: who, plan_hash: cur.plan_hash.slice(0, 12) });
     if (who === 'human') this.ev('human.approve', 'human', null, { what: 'plan' });
     this.ev('goal.updated', 'orchestrator', null, { status: 'active' });
+    return true;
+  }
+
+  /** Every dispatch/verify re-checks that the approved plan is still the plan on disk. Fail closed: no approval record = no dispatch. */
+  _planIntact(S) {
+    const o = S.goal.orch; const a = o.plan_approval;
+    const cur = this._fingerprint(S);
+    const ok = !!a && a.plan_hash === cur.plan_hash && a.tasks_hash === cur.tasks_hash;
+    if (!ok && !o.halt_reason) {
+      o.halt_reason = a ? 'plan modified after approval: dispatch refused (plan.json or the task commands/scopes changed)' : 'no plan approval record: dispatch refused';
+      o.halt_at_ms = this.now();
+      this.ev('orch.plan.tampered', 'orchestrator', null, { approved: a ? a.plan_hash.slice(0, 12) : null, current: cur.plan_hash.slice(0, 12), tasks_match: !!a && a.tasks_hash === cur.tasks_hash });
+    }
+    return ok;
   }
 
   async _cancel(S, kind, by) {
@@ -453,6 +483,7 @@ export class Engine {
   async _verifyAttempt(S, task, entry, c) {
     const goal = S.goal;
     const wt = task.orch.worktree;
+    if (!this._planIntact(S)) return this._failAttempt(S, task, entry, 'plan_tampered', { escalate: false, note: 'the approved plan changed on disk' });
     task.orch.phase = 'checking'; saveState(this.dir, S);
     try { await G.assertWorktreeIntegrity(S.goal.orch.repo, wt, task.orch.branch); } catch (e) {
       // never run git in (or commit from) a worktree whose .git the worker replaced; drop it and start over
@@ -471,10 +502,10 @@ export class Engine {
       return this._failAttempt(S, task, entry, 'scope_violation', { escalate: true, note: `changed files outside path_scope: ${outside.slice(0, 5).join(', ')}` });
     }
     await G.commitAll(wt, `aos: ${task.id} attempt ${entry.n} (${entry.tier})`);
-    const checks = await runChecks(task.orch.checks, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp(task.id) }), allowlist: this._checkAllowlist(goal) });
+    const checks = await runChecks(task.orch.checks, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp(task.id) }), allowlist: this._checkAllowlist(goal), ...this._sandboxOpts(goal, wt, task.id) });
     entry.checks_ok = checks.ok;
     const last = checks.results.at(-1);
-    this.ev(checks.ok ? 'orch.check.passed' : 'orch.check.failed', 'orchestrator', task.id, { attempt: entry.n, checks: checks.results.map((r) => ({ argv: r.argv.join(' '), ok: r.ok, exit_code: r.exit_code, timed_out: r.timed_out })) });
+    this.ev(checks.ok ? 'orch.check.passed' : 'orch.check.failed', 'orchestrator', task.id, { attempt: entry.n, checks: checks.results.map((r) => ({ argv: r.argv.join(' '), ok: r.ok, exit_code: r.exit_code, timed_out: r.timed_out, sandboxed: r.sandboxed ?? null })) });
     if (c.denials.length) { // permission_denials in a success exit = failed attempt (denials without an approval request)
       task.orch.last_denials = c.denials.map((d) => `${d.tool_name}${d.tool_input_label ? ` ${d.tool_input_label}` : ''}`);
       this.ev('orch.policy.denied', 'orchestrator', task.id, { attempt: entry.n, denials: task.orch.last_denials });
@@ -483,6 +514,11 @@ export class Engine {
     if (!checks.ok) return this._failAttempt(S, task, entry, 'check_failed', { escalate: true, check_output: tail(last?.output || '', 4096) });
 
     task.orch.phase = 'integrating'; saveState(this.dir, S);
+    const pre = await this._repoGuard(S, this._integrationWt(goal));
+    if (pre) { // someone but the engine changed the repo instructions / config on the integration branch: do not merge on top of it
+      this.ev('orch.repo_instructions.changed', 'orchestrator', task.id, { msg: pre.msg.slice(0, 300), phase: 'pre-merge' });
+      return this._failAttempt(S, task, entry, 'repo_instructions_changed', { escalate: false, note: pre.msg });
+    }
     const m = await G.mergeNoFf(this._integrationWt(goal), task.orch.branch, `aos: merge ${task.id}`);
     if (!m.ok) {
       this.ev('orch.integrate.conflict', 'orchestrator', task.id, { files: m.files, error: m.error?.slice(0, 300) });
@@ -493,6 +529,7 @@ export class Engine {
     task.status = 'done'; task.orch.phase = null; task.orch.result_summary = (c.result?.result || '').slice(0, 400); task.artifacts = [{ type: 'commit', sha: m.sha, branch: task.orch.branch }];
     task.updated_at = iso(this.now());
     task.orch.grants = task.orch.grants.filter((g) => !g.once);
+    goal.orch.instructions = await this._hashInstructions(goal.orch.integration_branch); // the engine's own integration commit is sanctioned
     this.ev('orch.integrate.merged', 'orchestrator', task.id, { sha: m.sha, branch: task.orch.branch });
     this.ev('task.completed', task.assignee, task.id, { result: task.orch.result_summary.slice(0, 200), tier: entry.tier, attempts: task.attempts });
     await this._dropWorktree(S, task);
@@ -508,7 +545,7 @@ export class Engine {
     const results = {};
     for (const c of goal.success_criteria) {
       let met;
-      if (c.check) { const r = await runCheck(c.check, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('criteria') }) }); results[c.id] = r; met = r.ok; }
+      if (c.check) { const r = await runCheck(c.check, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('criteria') }), ...this._sandboxOpts(goal, wt, 'criteria') }); results[c.id] = r; met = r.ok; }
       else if (Array.isArray(c.requires) && c.requires.length) met = c.requires.every((id) => S.tasks.find((t) => t.id === id)?.status === 'done');
       else met = allDone;
       if (met !== !!c.met) { c.met = met; this.ev('goal.updated', 'orchestrator', null, { criterion: c.id, met }); }
@@ -611,8 +648,12 @@ export class Engine {
     atomicWrite(this.P.plan, { source, plan });
     for (const t of S.tasks) this.ev('task.created', 'orchestrator', t.id, { depends_on: t.depends_on, tier: t.orch.model_tier });
     this.ev('orch.plan.created', 'orchestrator', null, { tasks: S.tasks.length, source, risks: Array.isArray(plan.risks) ? plan.risks.slice(0, 10) : [] });
-    if (o.approval_policy.plan === 'auto') this._activate(S, 'auto');
-    else { o.plan_state = 'awaiting_approval'; this.ev('goal.updated', 'orchestrator', null, { status: 'draft', plan_state: 'awaiting_approval' }); }
+    o.plan_fingerprint = this._fingerprint(S);
+    const review = humanReviewReason(S.tasks);
+    if (o.approval_policy.plan === 'auto' && !review && this._activate(S, 'auto')) { /* only plans without commands may auto-approve */ } else {
+      if (o.approval_policy.plan === 'auto' && review) this.ev('orch.plan.approval_required', 'orchestrator', null, { reason: review, note: 'plan_approval "auto" does not apply to plans with commands' });
+      o.plan_state = 'awaiting_approval'; this.ev('goal.updated', 'orchestrator', null, { status: 'draft', plan_state: 'awaiting_approval' });
+    }
     saveState(this.dir, S);
   }
 
@@ -627,6 +668,8 @@ export class Engine {
   async _runPlanner(S) {
     const goal = S.goal; const o = goal.orch;
     const wt = this._integrationWt(goal);
+    const guard = this._configGuard(goal, wt);
+    if (guard) return { error: guard };
     const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), constraints: { max_tasks: o.budgets.max_tasks, tiers: TIERS, check_allowlist: this._checkAllowlist(goal) } });
     const sessionId = crypto.randomUUID();
     const policyFile = path.join(this.P.workers, 'planner.policy.json');
@@ -677,6 +720,25 @@ export class Engine {
   async _dispatch(S) {
     const goal = S.goal; const o = goal.orch; const B = o.budgets;
     if (!this._gate?.dispatch) return;
+    if (!o.unsandboxed_checks && !sandboxAvailable({ bin: this.sandboxBin }).ok) {
+      o.halt_reason ??= `OS sandbox unavailable (${sandboxAvailable({ bin: this.sandboxBin }).reason}): checks refuse to run; set orch.unsandboxed_checks=true to override`; o.halt_at_ms ??= this.now();
+      return;
+    }
+    if (!this._planIntact(S)) return;
+    if (S.tasks.some((t) => t.status === 'ready')) {
+      const wt = await this._ensureIntegration(S);
+      const g = await this._repoGuard(S, wt);
+      if (g) {
+        const t = S.tasks.find((x) => x.status === 'ready');
+        if (g.kind === 'instructions') { // fail the task that would have run, never start it
+          t.status = 'failed'; t.updated_at = iso(this.now()); t.orch.last_failure = { kind: 'repo_instructions_changed', note: g.msg };
+          this.ev('task.failed', 'orchestrator', t.id, { cause: 'repo_instructions_changed', attempt: t.attempts, tier: t.orch.model_tier, final: true });
+        }
+        o.halt_reason ??= g.msg; o.halt_at_ms ??= this.now();
+        saveState(this.dir, S);
+        return;
+      }
+    }
     const running = () => S.tasks.filter((t) => t.status === 'running');
     let slots = B.max_parallel - running().length;
     for (const task of S.tasks) {
@@ -749,6 +811,37 @@ export class Engine {
     return wt;
   }
   _integrationWt(goal) { return path.join(goal.orch.worktree_root, 'integration'); }
+  _sandboxOpts(goal, wt, name) {
+    const o = goal.orch;
+    return { sandbox: { worktree: wt, tmpDir: this._tmp(name), goalDir: this.dir, orchDir: this.orchDir, home: this.env.HOME, ports: o.check_localhost_ports || [], profileDir: path.join(this.dir, 'sandbox') },
+      sandboxBin: this.sandboxBin, unsandboxed: o.unsandboxed_checks === true };
+  }
+  async _hashInstructions(ref) {
+    const out = {}; const repo = readJSON(this.P.goal).orch.repo;
+    for (const rel of INSTRUCTION_FILES) { const b = await G.showBlob(repo, ref, rel); out[rel] = b ? sha256Buf(b) : null; }
+    return out;
+  }
+  /** Hostile repo config on disk in `wt` (unless trusted) -> message, else null. */
+  _configGuard(goal, wt) {
+    if (goal.orch.trust_repo_config) return null;
+    const { findings } = scanRepoConfig(wt, wt);
+    if (!findings.length) return null;
+    this.ev('orch.repo_config.refused', 'orchestrator', null, { findings: findings.slice(0, 10).map((f) => ({ kind: f.kind, detail: f.detail })) });
+    return `repo configuration is not trusted (pass --trust-repo-config to the goal to override): ${formatFindings(findings).slice(0, 400)}`;
+  }
+  /** {kind,msg} when the integration checkout has hostile config, or the CLAUDE.md hashes differ from what the engine last recorded. */
+  async _repoGuard(S, wt) {
+    const goal = S.goal; const o = goal.orch;
+    const cfg = this._configGuard(goal, wt);
+    if (cfg) return { kind: 'config', msg: cfg };
+    if (!o.instructions) return null;
+    const cur = await this._hashInstructions(o.integration_branch);
+    const diff = INSTRUCTION_FILES.filter((rel) => (cur[rel] || null) !== (o.instructions[rel] || null));
+    if (!diff.length) return null;
+    const msg = `repo instructions changed since plan approval by something other than the engine's integration commits: ${diff.map((d) => `${d} ${String(o.instructions[d] || 'absent').slice(0, 12)} -> ${String(cur[d] || 'absent').slice(0, 12)}`).join(', ')}`;
+    this.ev('orch.repo_instructions.changed', 'orchestrator', null, { files: diff, phase: 'dispatch' });
+    return { kind: 'instructions', msg };
+  }
   _tmp(name) { return ensureDir(path.join(this.P.tmp, name)); }
   _checkAllowlist(goal) {
     const base = goal.orch.check_allowlist || [];
@@ -811,7 +904,8 @@ export function summarize(S, hb) {
   const counts = {}; for (const t of S.tasks) counts[t.status] = (counts[t.status] || 0) + 1;
   return { id: S.goal.id, title: S.goal.title, status: S.goal.status, blocked_reason: S.goal.blocked_reason || null, plan_state: S.goal.orch.plan_state,
     heartbeat: { seq: hb.seq, status: hb.status, ts: hb.ts }, tasks: counts, usage: S.goal.orch.usage, paused_reason: S.goal.orch.paused_reason, resume_at: S.goal.orch.resume_at || null,
-    task_list: S.tasks.map((t) => ({ id: t.id, status: t.status, tier: t.orch.model_tier, attempts: t.attempts })) };
+    task_list: S.tasks.map((t) => ({ id: t.id, status: t.status, tier: t.orch.model_tier, attempts: t.attempts })),
+    plan_review: reviewView(S.tasks), plan_approval: S.goal.orch.plan_approval || null, trust_repo_config: !!S.goal.orch.trust_repo_config, unsandboxed_checks: !!S.goal.orch.unsandboxed_checks };
 }
 
 /**
@@ -821,9 +915,36 @@ export function summarize(S, hb) {
 export async function createGoal(orchDir, spec, { clock = realClock } = {}) {
   const { normalizeGoalSpec, createGoalDir } = await import('./state.mjs');
   const goal = normalizeGoalSpec(spec, { clock });
-  const info = await G.repoInfo(goal.orch.repo, goal.orch.base_branch);
+  const start = goal.orch.repo;
+  const info = await G.repoInfo(start, goal.orch.base_branch);
   goal.orch.repo = info.root; goal.orch.base_commit = info.base_commit;
+  // condition 2: refuse repos whose own Claude Code configuration could steer a worker, unless the human opted in
+  const { findings } = scanRepoConfig(G.realpath(start), info.root);
+  const trusted = goal.orch.trust_repo_config === true;
+  if (findings.length && !trusted) throw new Error(`refusing repo ${info.root}: it carries Claude Code configuration that could add hooks, permissions, env, MCP servers or commands to workers:\n  ${formatFindings(findings)}\nReview it; if you wrote it and trust it, set orch.trust_repo_config (CLI: --trust-repo-config).`);
+  goal.orch.repo_config_findings = findings.map((f) => ({ path: path.relative(info.root, f.path) || '.', kind: f.kind, detail: f.detail }));
+  // CLAUDE.md files are trusted input: not refused, but hashed (committed content a worker will load) and announced
+  const instructions = {};
+  for (const rel of INSTRUCTION_FILES) { const b = await G.showBlob(info.root, info.base_commit, rel); instructions[rel] = b ? sha256Buf(b) : null; }
+  goal.orch.instructions = instructions;
   const dir = createGoalDir(orchDir, goal, spec.plan || null);
+  const notices = instructionNotice(info.root, instructions);
   appendEvent(dir, { type: 'goal.created', actor: 'human', goal_id: goal.id, data: { title: goal.title, criteria: goal.success_criteria.length } }, clock);
-  return { dir, goal };
+  if (notices.length) appendEvent(dir, { type: 'orch.repo_instructions', actor: 'orchestrator', goal_id: goal.id, data: { notices, files: Object.fromEntries(Object.entries(instructions).filter(([, h]) => h).map(([k, h]) => [k, h.slice(0, 12)])) } }, clock);
+  if (findings.length) {
+    notices.push(`WARNING: --trust-repo-config: repo configuration accepted without review by the engine: ${formatFindings(findings)}`);
+    appendEvent(dir, { type: 'orch.repo_config.trusted', actor: 'human', goal_id: goal.id, data: { warning: 'repo config accepted via trust_repo_config; workers may be steered by it', findings: goal.orch.repo_config_findings.slice(0, 20) } }, clock);
+  }
+  if (goal.orch.unsandboxed_checks) {
+    notices.push('WARNING: unsandboxed_checks is set: acceptance checks will run worker-written code without the OS sandbox');
+    appendEvent(dir, { type: 'orch.sandbox.disabled', actor: 'human', goal_id: goal.id, data: { warning: 'unsandboxed_checks is set; checks run without the OS sandbox' } }, clock);
+  }
+  return { dir, goal, notices };
+}
+
+/** Re-check an existing goal's repo at `aos-orch run` time (config may have changed since creation). Throws when refused. */
+export function assertRepoTrusted(goal) {
+  if (goal.orch.trust_repo_config) return;
+  const { findings } = scanRepoConfig(G.realpath(goal.orch.repo), goal.orch.repo);
+  if (findings.length) throw new Error(`refusing repo ${goal.orch.repo}: untrusted Claude Code configuration:\n  ${formatFindings(findings)}`);
 }

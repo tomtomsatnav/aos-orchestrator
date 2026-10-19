@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // aos-orch: minimal CLI for the AOS orchestrator engine (phase 1, headless, no HTTP server).
-//   aos-orch run <goal.json | goal-id> [--auto-approve] [--poll-ms N] [--interval-s N]
+//   aos-orch run <goal.json | goal-id> [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--poll-ms N] [--interval-s N]
 //   aos-orch status [goal-id]
 //   aos-orch pause|resume|cancel|kill|approve-plan|reject-plan <goal-id>
 //   aos-orch approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
@@ -8,7 +8,8 @@
 // The real `claude` binary is used only when AOS_CLAUDE_BIN is unset.
 import fs from 'node:fs';
 import path from 'node:path';
-import { Engine, createGoal, summarize } from '../lib/engine.mjs';
+import { Engine, createGoal, summarize, assertRepoTrusted } from '../lib/engine.mjs';
+import { reviewView, renderReview, planHash, tasksHash } from '../lib/plan.mjs';
 import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
 
@@ -39,10 +40,13 @@ async function main() {
       let dir;
       if (fs.existsSync(arg1) && fs.statSync(arg1).isFile()) {
         const spec = JSON.parse(fs.readFileSync(arg1, 'utf8'));
+        if (flags['trust-repo-config']) spec.orch = { ...(spec.orch || {}), trust_repo_config: true };
+        if (flags['unsandboxed-checks']) spec.orch = { ...(spec.orch || {}), unsandboxed_checks: true };
         if (flags['auto-approve']) spec.orch = { ...(spec.orch || {}), approval_policy: { ...(spec.orch?.approval_policy || {}), plan: 'auto' } };
         const id = spec.id && fs.existsSync(paths(goalDirOf(orch, spec.id)).goal) ? spec.id : null;
-        if (id) dir = goalDirOf(orch, id); else ({ dir } = await createGoal(orch, spec));
+        if (id) dir = goalDirOf(orch, id); else { const made = await createGoal(orch, spec); dir = made.dir; for (const n of made.notices) console.error(`aos-orch: ${n}`); }
       } else dir = resolveGoalDir(arg1);
+      assertRepoTrusted(readJSON(paths(dir).goal));
       const eng = new Engine({ goalDir: dir, orchDir: orch, intervalMs: flags['interval-s'] ? Number(flags['interval-s']) * 1000 : 10000 });
       const onSig = async () => { console.error('aos-orch: signal received; releasing the lock (workers keep running and are re-adopted by the next run)'); await eng.stop(); process.exit(130); };
       process.on('SIGINT', onSig); process.on('SIGTERM', onSig);
@@ -59,16 +63,30 @@ async function main() {
       if (!arg1) {
         let ids = []; try { ids = fs.readdirSync(goalsRoot(orch)); } catch { /* none */ }
         out(ids.map((id) => { const S = loadState(goalDirOf(orch, id)); return S.goal ? { id, status: S.goal.status, title: S.goal.title, engine: engineAlive(goalDirOf(orch, id)) } : null; }).filter(Boolean));
-      } else { const d = resolveGoalDir(arg1); const S = loadState(d); out({ ...summarize(S, loadHeartbeat(d)), engine_running: engineAlive(d), governor: readJSON(path.join(orch, 'governor.json'), null) }); }
+      } else {
+        const d = resolveGoalDir(arg1); const S = loadState(d);
+        out({ ...summarize(S, loadHeartbeat(d)), engine_running: engineAlive(d), governor: readJSON(path.join(orch, 'governor.json'), null) });
+        if (S.tasks.length) console.error(`\nPLAN FOR REVIEW (exact commands, model tier and path scope per task):\n${renderReview(reviewView(S.tasks))}`);
+      }
       break;
     }
     case 'pause': case 'resume': case 'cancel': case 'kill': case 'approve-plan': case 'reject-plan': {
       const d = resolveGoalDir(arg1);
-      enqueueCommand(d, { cmd, by: 'cli' });
+      let extra = {};
+      if (cmd === 'approve-plan') { // approve exactly what is shown here: the engine refuses if the plan differs from this hash
+        const S = loadState(d);
+        if (!S.tasks.length) die('there is no plan to approve yet');
+        console.error(`PLAN YOU ARE APPROVING (commands run as you, checks inside the OS sandbox):\n${renderReview(reviewView(S.tasks))}`);
+        extra = { reviewed: { plan_hash: planHash(readJSON(paths(d).plan)?.plan ?? null), tasks_hash: tasksHash(S.tasks) } };
+        console.error(`plan hash ${extra.reviewed.plan_hash.slice(0, 12)}`);
+      }
+      enqueueCommand(d, { cmd, by: 'cli', ...extra });
       out(engineAlive(d) ? `${cmd}: queued; the running engine applies it at its next tick` : `${cmd}: queued, but no engine is running for this goal; it applies on the next \`aos-orch run ${arg1}\``);
       break;
     }
-    case 'approvals': { out(listApprovals(paths(resolveGoalDir(arg1)).approvals).map((a) => ({ id: a.id, task: a.task_id, tool: a.tool, status: a.status, reason: a.reason, expires_at: a.expires_at, input: a.tool === 'Bash' ? a.input?.command : a.input?.file_path, cwd: a.cwd ?? null }))); break; }
+    case 'approvals': {
+      { const S = loadState(resolveGoalDir(arg1)); if (S.tasks.length) console.error(`PLAN (exact commands, model tier and path scope per task):\n${renderReview(reviewView(S.tasks))}\n`); }
+      out(listApprovals(paths(resolveGoalDir(arg1)).approvals).map((a) => ({ id: a.id, task: a.task_id, tool: a.tool, status: a.status, reason: a.reason, expires_at: a.expires_at, input: a.tool === 'Bash' ? a.input?.command : a.input?.file_path, cwd: a.cwd ?? null }))); break; }
     case 'approve': case 'deny': {
       const d = resolveGoalDir(arg1); if (!arg2) die(`usage: aos-orch ${cmd} <goal-id> <A-n>`);
       out(decide(paths(d).approvals, arg2, { decision: cmd, scope: flags['for-task'] ? 'task' : 'once', by: 'cli' }));

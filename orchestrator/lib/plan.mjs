@@ -5,7 +5,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { PLANNER_MARKER } from './worker.mjs';
 import { commandAllowed } from './checks.mjs';
-import { evaluate, DEFAULT_POLICY } from './policy.mjs';
+import crypto from 'node:crypto';
+import { evaluate, DEFAULT_POLICY, allowlistEntryProblem } from './policy.mjs';
 import { ID_RE, iso } from './state.mjs';
 
 export const TIERS = ['haiku', 'sonnet', 'opus'];
@@ -39,6 +40,10 @@ export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: []
     `Success criteria:\n${crit}`,
     `Repo facts: files (depth 2): ${facts.files.join(' ') || '(unknown)'}; Makefile targets: ${facts.make_targets.join(' ') || '(none)'}`,
     `Constraints: max_tasks=${c.max_tasks}; allowed tiers: ${c.tiers.join(', ')}; command allowlist candidates for checks: ${JSON.stringify(c.check_allowlist)}`,
+    'WORKERS CANNOT RUN CODE: their Bash is limited to read-only inspection (ls, cat, head, tail, wc, grep, rg, find -name, diff, git status/diff/log/show). '
+      + 'node, npm/npx/pnpm/yarn, make, python, ruby, perl, shells, env/xargs wrappers, find -exec and git hooks-running subcommands are rejected: a plan whose allowed_commands contain any of them is REJECTED. '
+      + 'Leave allowed_commands empty unless a read-only command is really needed. Put ALL verification (tests, builds, linters) in each task\'s `checks`: the engine runs those itself, in an OS sandbox (no network, writes only inside the task worktree). '
+      + 'A human reviews every plan that has commands before anything is dispatched.',
     'Produce tasks that are small (one concern, ideally < 200 changed lines), have disjoint path_scope where possible, start at the cheapest plausible tier, and each have at least one check from the allowed commands.',
     `OUTPUT SCHEMA: ${OUTPUT_SCHEMA}`,
   ].join('\n');
@@ -122,6 +127,8 @@ export function validatePlan(plan, opts) {
     const cmds = t.allowed_commands ?? [];
     if (!Array.isArray(cmds) || cmds.some((c) => typeof c !== 'string')) bad(`${at}: allowed_commands must be an array of strings`);
     else for (const c of cmds) {
+      const prob = allowlistEntryProblem(c);
+      if (prob) { bad(`${at}: allowed_commands entry "${c}" is dangerous or executes code and is rejected: ${prob}`); continue; }
       const v = evaluate(DEFAULT_POLICY, { tool_name: 'Bash', tool_input: { command: c }, cwd: '/w' }, { worktree: '/w', path_scope: [], allowed_tools: ['Bash'], allowed_commands: [c], grants: [] });
       if (v.decision === 'deny') bad(`${at}: allowed_commands entry "${c}" is dangerous (${v.rule})`);
     }
@@ -157,4 +164,57 @@ export function toTasks(planTasks, goal, nowMs) {
       phase: null, attempt_log: [], grants: [], result_summary: null, tokens: { new: 0, cache_read: 0 }, denial_retries: 0, note: null,
     },
   }));
+}
+
+
+// ---------------------------------------------------------------- human review of plans with commands (condition 3)
+/** Checks the engine may approve without a human: pure read-only inspection of files, no code execution. Deliberately tiny.
+ *  `make test`, `node --test <glob>`, npm/pytest/... execute worker-written code and are NEVER auto-approvable. */
+export const AUTO_APPROVABLE_CHECKS = ['grep', 'test', 'diff', 'cmp'];
+export function checkAutoApprovable(argv) {
+  if (!Array.isArray(argv) || !argv.length || argv.some((a) => typeof a !== 'string')) return false;
+  const a0 = argv[0];
+  const name = path.basename(a0);
+  if (a0 !== name && a0 !== `/usr/bin/${name}` && a0 !== `/bin/${name}`) return false;
+  return AUTO_APPROVABLE_CHECKS.includes(name);
+}
+
+/** Why this set of (validated) plan tasks needs a human, or null when plan_approval "auto" may proceed. Works on plan tasks or engine tasks. */
+export function humanReviewReason(tasks) {
+  const cmds = [];
+  for (const t of tasks) {
+    const o = t.orch || t;
+    for (const c of o.allowed_commands || []) cmds.push(`${t.id} allowed_commands: ${c}`);
+    for (const c of o.checks || []) if (!checkAutoApprovable(c.argv)) cmds.push(`${t.id} check: ${c.argv.join(' ')}`);
+  }
+  return cmds.length ? `plan contains commands that need human review (${cmds.slice(0, 5).join('; ')}${cmds.length > 5 ? `; +${cmds.length - 5} more` : ''})` : null;
+}
+
+export function canonical(v) {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (v && typeof v === 'object') return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}`;
+  return JSON.stringify(v) ?? 'null';
+}
+export const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+/** Hash of the plan as stored in plan.json. */
+export const planHash = (plan) => sha256(canonical(plan));
+/** What a human reviews, per task, in plain text: tier, path scope, allowed commands and the exact check commands. */
+export function reviewView(tasks) {
+  return tasks.map((t) => { const o = t.orch || t; return { id: t.id, model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
+    allowed_commands: [...(o.allowed_commands || [])], checks: (o.checks || []).map((c) => ({ command: c.argv.join(' '), argv: c.argv, timeout_s: c.timeout_s })) }; });
+}
+/** Hash of everything the approval covers in the engine's tasks (tier excluded: the retry ladder escalates it legitimately). */
+export function tasksHash(tasks) {
+  return sha256(canonical(tasks.map((t) => { const o = t.orch || t; return { id: t.id, depends_on: t.depends_on || [], path_scope: o.path_scope, allowed_commands: o.allowed_commands || [],
+    allowed_tools: o.allowed_tools || null, checks: (o.checks || []).map((c) => ({ argv: c.argv, timeout_s: c.timeout_s })) }; })));
+}
+/** Plain-text rendering of reviewView for `status` / `approvals`. */
+export function renderReview(view) {
+  const L = [];
+  for (const t of view) {
+    L.push(`task ${t.id}  tier=${t.model_tier}  scope=${t.path_scope.join(', ')}${t.depends_on.length ? `  after=${t.depends_on.join(',')}` : ''}`);
+    L.push(`  worker commands: ${t.allowed_commands.length ? t.allowed_commands.join(' | ') : '(none; read-only inspection only)'}`);
+    for (const c of t.checks) L.push(`  check (sandboxed, ${c.timeout_s}s): ${c.argv.map((a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : JSON.stringify(a))).join(' ')}`);
+  }
+  return L.join('\n');
 }

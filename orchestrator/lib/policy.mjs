@@ -11,7 +11,9 @@ export const DEFAULT_POLICY = {
   paths: { write: 'worktree+scope', read_extra: [], on_outside_scope: 'ask',
     deny: ['~/.claude/**', '~/.ssh/**', '~/.config/**', '**/.git/**', '**/.git', '**/.claude/settings*.json'] },
   bash: {
-    allow: ['ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'find -name', 'diff', 'git status', 'git diff', 'git log', 'node --check', 'node --test'],
+    // READ-ONLY inspection only. Nothing here may execute code the worker can write (node, npm, make, python, shells, ...):
+    // running tests is the engine's job (sandboxed acceptance checks), never the worker's.
+    allow: ['ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'find -name', 'diff', 'git status', 'git diff', 'git log', 'git show'],
     deny: ['git push', 'git remote', 'git config', 'git reset --hard', 'sudo', 'curl', 'wget', 'nc', 'ssh', 'scp', 'rsync',
       'npm install', 'pip install', 'brew', 'eval', 'exec'],
     deny_patterns: ['\\|\\s*(sh|bash|zsh|python3?|node|perl)\\b', 'rm\\s+-(?=[a-z]*r)[a-z]*\\s+(/|~|\\.\\.)'],
@@ -27,6 +29,21 @@ const ALWAYS_DENY_CMDS = new Set(['sudo', 'su', 'doas', 'curl', 'wget', 'nc', 'n
 const PKG_MGRS = new Set(['npm', 'pnpm', 'yarn', 'pip', 'pip3', 'brew', 'apt', 'apt-get', 'gem', 'cargo', 'go']);
 const PKG_VERBS = new Set(['install', 'i', 'add', 'update', 'upgrade', 'ci', 'get']);
 const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'python', 'python3', 'node', 'perl', 'ruby']);
+// Commands that execute code a worker can write (interpreters, shells, build/test runners, package-script runners) or run
+// another command: never allowed for a worker, not even with an approval (condition 1 of the security review).
+const EXEC_NAMES = new Set([
+  'node', 'nodejs', 'deno', 'bun', 'npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'corepack', 'tsx', 'ts-node', 'vitest', 'jest', 'mocha', 'ava', 'tap',
+  'make', 'gmake', 'cmake', 'ninja', 'bazel', 'rake', 'bundle', 'bundler', 'gradle', 'mvn', 'ant', 'cargo', 'rustc', 'go', 'gcc', 'g++', 'cc', 'c++', 'clang', 'clang++',
+  'swift', 'swiftc', 'java', 'javac', 'dotnet', 'pytest', 'tox', 'nox', 'poetry', 'pipenv', 'uv', 'irb', 'pry', 'lua', 'luajit', 'tclsh', 'wish', 'expect', 'osascript', 'jshell',
+  'sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish', 'ash', 'busybox', 'eval', 'source', '.', 'exec',
+  'env', 'xargs', 'nohup', 'timeout', 'gtimeout', 'nice', 'time', 'command', 'builtin', 'caffeinate', 'script', 'watch', 'parallel', 'stdbuf', 'unbuffer', 'sudo', 'doas', 'su', 'chroot', 'setsid', 'arch',
+  'awk', 'gawk', 'mawk', 'nawk', 'vi', 'vim', 'nvim', 'ex', 'ed', 'emacs', 'nano', 'less', 'more', 'man', 'sqlite3', 'sandbox-exec', 'launchctl', 'open', 'at', 'crontab', 'docker', 'podman', 'gh',
+]);
+const EXEC_PATTERNS = [/^python[\d.]*$/, /^pypy[\d.]*$/, /^ruby[\d.]*$/, /^perl[\d.]*$/, /^php[\d.]*$/, /^node[\d.]+$/, /^pip[\d.]*$/];
+// git subcommands that run hooks, aliases or filter/textconv drivers (or are not read-only at all)
+const GIT_EXEC_SUB = new Set(['add', 'commit', 'checkout', 'switch', 'merge', 'rebase', 'cherry-pick', 'revert', 'am', 'apply', 'stash', 'restore', 'archive', 'difftool', 'mergetool',
+  'bisect', 'maintenance', 'daemon', 'instaweb', 'send-email', 'hook', 'lfs', 'annex', 'clean', 'rm', 'mv', 'tag', 'bundle', 'fast-import', 'init']);
+export const GIT_READONLY_SUB = new Set(['status', 'diff', 'log', 'show', 'ls-files', 'ls-tree', 'rev-parse', 'rev-list', 'cat-file', 'blame', 'shortlog', 'describe']);
 const BUILTIN_DENY_GLOBS = ['~/.zshrc', '~/.bashrc', '~/.bash_profile', '~/.profile', '~/.zprofile', '~/.zshenv'];
 const GIT_DENY_SUB = new Set(['push', 'remote', 'config', 'filter-branch', 'update-ref', 'worktree', 'clone', 'fetch', 'pull', 'submodule', 'gc', 'prune', 'reflog']);
 const WRITE_CMDS = new Set(['mkdir', 'touch', 'mv', 'cp', 'rm', 'rmdir', 'tee', 'ln', 'truncate', 'chmod', 'install', 'dd']);
@@ -38,6 +55,12 @@ const EXEC_FLAGS = {
   rg: /^--pre(-glob)?(=|$)/,
   git: /^--(output|ext-diff|exec|upload-pack|receive-pack)(=|$)/,
   find: /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/,
+};
+const EXEC_ARG = {
+  find: /^-(exec|execdir|ok|okdir)$/,
+  rg: /^--pre(=|$)/,
+  git: /^--(ext-diff|exec-path|upload-pack|receive-pack|open-files-in-pager|textconv)(=|$)|^-O/,
+  grep: /^--(pre)(=|$)/,
 };
 const INLINE_CODE = /^-(c|e|E|-eval|-command|-exec)$/;
 const MAX_COMMAND = 16384;
@@ -123,6 +146,43 @@ function gitInfo(argv, ctx) {
   return { sub: argv[i], rest: argv.slice(i + 1), opts };
 }
 
+/** Reason when argv would execute code (the worker's own or anyone's), else null. Pure. */
+export function executesCode(argv) {
+  if (!Array.isArray(argv) || !argv.length) return null;
+  const name = path.basename(String(argv[0])).toLowerCase();
+  if (EXEC_NAMES.has(name) || EXEC_PATTERNS.some((r) => r.test(name))) return `${name} executes code and is never allowed for a worker (verification belongs in the plan's checks)`;
+  const rest = argv.slice(1);
+  if (EXEC_ARG[name] && rest.some((a) => EXEC_ARG[name].test(a))) return `${name} with an option that executes code`;
+  if (name === 'git') {
+    const g = gitInfo(argv);
+    if (GIT_EXEC_SUB.has(g.sub)) return `git ${g.sub} can run hooks, filters or aliases and is not allowed`;
+    if (g.opts.some((o) => EXEC_ARG.git.test(o))) return 'git with an option that executes code';
+  }
+  return null;
+}
+
+/**
+ * Why an allowed_commands / bash.allow ENTRY is unacceptable for a worker (it executes code, or is not a single simple
+ * read-only command), else null. Used by the plan validator to REJECT the plan.
+ */
+export function allowlistEntryProblem(entry) {
+  if (typeof entry !== 'string' || !entry.trim()) return 'empty entry';
+  const p = parseShell(entry);
+  if (p.commands.length !== 1) return 'must be exactly one simple command';
+  if (Object.values(p.flags).some(Boolean)) return 'contains shell constructs (substitution, expansion, heredoc, subshell)';
+  const c = p.commands[0];
+  if (!c.argv.length || c.redirects.length) return 'must be a plain command without redirects';
+  if (/^[A-Za-z_]\w*=/.test(c.argv[0])) return 'starts with a variable assignment';
+  const name = path.basename(c.argv[0]);
+  if (c.argv[0].includes('/') && !SYSTEM_BIN.test(c.argv[0])) return 'runs a file by path (code the worker can write)';
+  if (ALWAYS_DENY_CMDS.has(name.toLowerCase())) return `${name} is never allowed`;
+  const ex = executesCode(c.argv);
+  if (ex) return ex;
+  if (name.toLowerCase() === 'git' && !GIT_READONLY_SUB.has(gitInfo(c.argv).sub)) return `git ${gitInfo(c.argv).sub || '(no subcommand)'} is not a read-only git command (allowed: ${[...GIT_READONLY_SUB].join(', ')})`;
+  if (PKG_MGRS.has(name)) return `${name} is a package manager / build tool`;
+  return null;
+}
+
 function dangerous(policy, ctx, argv) {
   const name = path.basename(argv[0]);
   if (ALWAYS_DENY_CMDS.has(name)) return `${name} is never allowed`;
@@ -140,7 +200,7 @@ function dangerous(policy, ctx, argv) {
     }
     if (g.sub === 'branch' && g.rest.some((a) => /^-[dD]$|--delete/.test(a))) return 'deleting branches is not allowed';
   }
-  return null;
+  return executesCode(argv);
 }
 
 function evaluateBash(policy, command, ctx) {

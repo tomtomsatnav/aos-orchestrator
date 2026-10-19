@@ -42,7 +42,7 @@ aos-orch run goal.json
 ## Commands
 
 ```sh
-node orchestrator/bin/aos-orch.mjs run <goal.json | goal-id> [--auto-approve] [--poll-ms N] [--interval-s N]
+node orchestrator/bin/aos-orch.mjs run <goal.json | goal-id> [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--poll-ms N] [--interval-s N]
 node orchestrator/bin/aos-orch.mjs status [goal-id]
 node orchestrator/bin/aos-orch.mjs pause|resume|cancel|kill|approve-plan|reject-plan <goal-id>
 node orchestrator/bin/aos-orch.mjs approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
@@ -66,10 +66,67 @@ Goal file (`goal.json`):
   "plan": { "tasks": [] } }
 ```
 
-`plan` is optional and skips the planner (it is validated exactly like a planner plan). `approval_policy.plan` is
-`required` (default; the run stops at `draft / awaiting_approval` until `approve-plan`) or `auto`. Plan checks must match
+`plan` is optional and skips the planner (it is validated exactly like a planner plan). `approval_policy.plan` (alias
+`orch.plan_approval`) is `required` (default; the run stops at `draft / awaiting_approval` until `approve-plan`) or `auto`,
+and `auto` only applies to plans without commands (see Security model). Other goal fields: `orch.trust_repo_config`,
+`orch.unsandboxed_checks`, `orch.check_localhost_ports` (loopback ports checks may connect to). Plan checks must match
 `orch.check_allowlist` (argv prefix) or a criterion check; unsafe plans (cycles, bad tiers, path scopes outside the repo,
 `.git`/`.claude`, dangerous `allowed_commands`, shell/curl-style checks, missing timeouts) are rejected, never repaired.
+
+## Security model (what is enforced now, what is not)
+
+Enforced by code and covered by tests:
+
+1. **Workers cannot run code.** The default allowlist is read-only inspection (`ls cat head tail wc grep rg find -name diff`,
+   `git status|diff|log|show`) plus Read/Glob/Grep and Edit/Write inside `path_scope`. `lib/policy.mjs` hard-denies (no approval
+   possible) interpreters, shells, package/build/test runners (`node npm npx pnpm yarn make python* ruby perl cargo go ...`),
+   wrappers (`env xargs timeout nohup ...`), `eval/source`, `find -exec`, `rg --pre`, and git subcommands that run hooks, filters or
+   aliases (`add commit checkout merge rebase stash ...`), even when allowlisted, granted, or re-added by a policy file.
+   `validatePlan` REJECTS a plan whose `allowed_commands` contain any of them (the error names the entry). The planner prompt says
+   so: verification belongs in each task's `checks`, which only the engine runs.
+2. **Untrusted repo configuration is refused.** `createGoal` (so `aos-orch run goal.json`) refuses a repo whose
+   `.claude/settings.json`, `settings.local.json` or other `settings*.json` (scanned from the given path up to the git root) define hooks,
+   permissions, env, MCP servers, `apiKeyHelper`, `statusLine`, plugins or any unvetted key, that has a non-empty `.mcp.json`, or has
+   non-empty `.claude/{hooks,commands,agents,skills}`. `--trust-repo-config` / `orch.trust_repo_config` overrides it and is recorded in
+   `goal.json` and the event log with a warning. The integration checkout is re-scanned before every dispatch and before each merge, so a
+   commit that adds such config later blocks the goal. `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md` are not refused (trusted input):
+   their sha256 (committed content at `base_commit`) goes into `goal.json` (`orch.instructions`), a notice
+   `repo instructions will be loaded by workers: <path> <sha256 prefix>` is printed, and if the content on the integration branch differs at
+   dispatch from what the engine last recorded, the task is failed without running; only the engine's own merges move the recorded hash.
+   Workers always get `--setting-sources project --strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools ...`.
+3. **Plans with commands need a human.** A plan containing any `checks` command outside the vetted list, or any `allowed_commands`
+   entry, always stops at `awaiting_approval` even with `--auto-approve` / `plan_approval: "auto"`. The vetted list is `grep`, `test`,
+   `diff`, `cmp` (bare names or `/usr/bin|/bin/<name>`); `make test`, `node --test <glob>`, npm, pytest and the rest run worker-written
+   code and are never auto-approvable. `aos-orch status|approvals|approve-plan` print each task's exact commands, model tier and path scope
+   in plain text (on stderr; stdout stays JSON). The approval record (`orch.plan_approval`) stores sha256 hashes of `plan.json` and of the
+   task commands/scopes; `approve-plan` carries the hash the human saw and is refused if the plan differs; every dispatch and every
+   verification re-checks the hashes, so an edit after approval blocks the goal (`orch.plan.tampered`).
+4. **Checks are sandboxed** (`lib/sandbox.mjs`, macOS `sandbox-exec`, deny-default profile written to `<goal>/sandbox/`). A check may read
+   system and toolchain locations (`/usr /bin /sbin /System /Library /opt/homebrew`, the node install prefix, `~/.npm`), its worktree and its
+   private TMPDIR (`<goal>/tmp/<task>/check-N`, removed afterwards); it may write only the worktree, that TMPDIR and `/dev/null`; all
+   network is denied (loopback only for `orch.check_localhost_ports`); reads of `~/.ssh ~/.aws ~/.config ~/.claude ~/.gnupg`, keychains,
+   shell history, other worktrees and the engine's goal/approvals/policy directories are denied. Paths reach the profile only as `-D`
+   parameters through `execFile` (the profile text is static). If `sandbox-exec` is missing or fails its probe, checks are refused and
+   the goal blocks before dispatch unless `orch.unsandboxed_checks` is set (recorded, warned, event-logged).
+
+Residual risks (honest list):
+
+- **Workers (`claude` itself) are NOT OS-sandboxed in this phase.** They are constrained only by the policy hook (PreToolUse and
+  PermissionRequest) and the isolation flags, and the hook is a heuristic shell parser: an unparsed construct is `ask`, not proof of safety.
+  A worker still holds Edit/Write inside its scope, and anything it writes is later executed by the sandboxed checks.
+- The sandbox is defense in depth, not proof: `sandbox-exec` is deprecated and its profile language undocumented; a kernel or sandbox bug
+  defeats it. It does not limit CPU, memory, disk use inside the worktree or processes (only the timeout and the group kill do).
+  `file-read-metadata` is allowed everywhere, so a check can `stat` (not read or list) paths such as `~/.ssh`. Mach lookups are allowed
+  (node and system tools need them), so local services reachable through Mach/XPC are not blocked. Git commands inside a check cannot read
+  the main repository's `.git` (outside the worktree).
+- The CLAUDE.md hash covers committed content of the repo root files only (not ancestor directories of the worktree, not user-level
+  memory); `--setting-sources` is `project`, which still loads the repo's project settings (that is why the scan exists);
+  `--setting-sources ""` remains unverified. `git diff/log/show` can invoke textconv/external-diff drivers defined in the repository's own
+  git config, which is trusted. A trusted-repo override (`--trust-repo-config`) removes protection 2.
+- Auto-approval of command-free plans still trusts the vetted check list; a `grep` check can read any file inside its sandbox.
+- macOS-version quirks seen on macOS 27 (Darwin 27.0.0): the profile needs `process-exec*`, `process-fork` and read access to the node
+  prefix; node aborts at startup if its current directory is not readable (cwd must be inside the allowed worktree); the symlinked
+  `/tmp` and `/var` must be passed as real paths (the builder resolves them).
 
 ## State layout
 
@@ -99,13 +156,15 @@ Worktrees live outside the repo: `<repo>-aos-worktrees/<goal>/{integration,<task
 | `approvals.mjs` | file inbox: create (O_EXCL), decide, expire (timeout = deny), audit log |
 | `governor.mjs` | rate-limit parsing, thresholds, backoff, limit-failure matcher (UNVERIFIED), budgets |
 | `worker.mjs` | command line (spike-verified flags only), minimal env, detached spawn, stream-json tail, process-group kill |
-| `git.mjs`, `checks.mjs` | execFile-only git helpers; check runner |
+| `git.mjs`, `checks.mjs` | execFile-only git helpers; check runner (sandboxed by default) |
+| `sandbox.mjs` | `sandbox-exec` probe, static deny-default profile, `-D` parameter builder |
+| `repo-config.mjs` | scan for hostile repo Claude Code config; CLAUDE.md hashing |
 | `engine.mjs`, `report.mjs` | the tick, lifecycle, recovery, cancel, final report |
 
 ## Tests
 
 ```sh
-node --test orchestrator/test/engine.test.mjs orchestrator/test/policy.test.mjs orchestrator/test/units.test.mjs orchestrator/test/cli.test.mjs
+node --test 'orchestrator/test/*.test.mjs'
 make test        # includes the line above; ~35 s, zero model calls
 ```
 
@@ -114,7 +173,10 @@ repos under `$TMPDIR`. They cover: happy path with a 3-task DAG, retry/escalatio
 idempotent ticks, rate-limit pause/resume and the utilisation reserve (injected clock), budgets (dispatch stop and kill
 after grace), wall-clock kill with SIGKILL escalation, parallelism cap and scope overlap, crash/resume (re-adopt, lost
 worker), cancel/kill switch, pause/resume, locking, policy hook (table-driven plus real runs), approvals (granted, timeout
-= deny, expiry), scope violation, merge conflict, worker command line and env, event-log validity.
+= deny, expiry), scope violation, merge conflict, worker command line and env, event-log validity; `hardening.test.mjs` (no code execution via the allowlist, hostile repo configs,
+CLAUDE.md hash, plan approval gate and hash binding) and `sandbox.test.mjs` (macOS only, skipped elsewhere: write/read/network
+denials with canary files, private TMPDIR, timeouts, output cap, static profile with hostile worktree paths, refusal without the sandbox).
+Note: the engine tests use a stand-in for the human (`helpers.humanApproves`) because plans with node checks no longer auto-approve.
 
 ## Not done yet
 
