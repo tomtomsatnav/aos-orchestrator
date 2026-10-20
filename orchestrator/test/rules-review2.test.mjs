@@ -59,3 +59,24 @@ test('S1: accepting a repo loosening at creation prints the FULL content of it',
   const n = made.notices.find((x) => x.startsWith('ACCEPTED repo loosening'));
   assert.ok(n, made.notices.join('\n')); assert.ok(n.includes(id)); assert.ok(n.includes(cmd), 'full content');
 });
+
+test('S2: snapshotHash covers inputs and layers; recompileSnapshot refuses inputs that goal.json did not record', async () => {
+  const { snapshotHash } = await import('../lib/rules.mjs');
+  const { recompileSnapshot } = await import('../lib/rules-store.mjs');
+  const { sha256 } = await import('../lib/plan.mjs'); const { canonical } = await import('../lib/plan.mjs');
+  const layers = [{ layer: 'repo', rules: R({ worker: { bash: { allow: [{ id: 'sortu', cmd: 'sort' }] } } }), source: 'r' }];
+  const comp = compileRules(layers);
+  const snap = buildRulesSnapshot(comp, layers);
+  const h = snapshotHash(snap);
+  const t1 = structuredClone(snap); t1.inputs[0].rules.budgets = { max_usd: 1 };
+  assert.notEqual(snapshotHash(t1), h, 'inputs are covered');
+  const t2 = structuredClone(snap); t2.layers[1].source = 'elsewhere';
+  assert.notEqual(snapshotHash(t2), h, 'layers are covered');
+  // the reviewer's probe: inputs and the snapshot's own layer hashes rewritten consistently; only goal.json still remembers the real ones
+  const goal = { orch: { rules: { layers: snap.layers.map((l) => ({ layer: l.layer, sha12: l.sha256.slice(0, 12) })) }, repo_rules: { sha256: sha256(canonical(layers[0].rules)) } } };
+  assert.equal(recompileSnapshot(snap, [], goal).ok, true);
+  const forged = structuredClone(snap); forged.inputs[0].rules = R({ worker: { tools: { allow: ['Read', 'WebFetch'] } } }); forged.layers[1].sha256 = sha256(canonical(forged.inputs[0].rules));
+  assert.equal(recompileSnapshot(forged, []).ok, true, 'self-consistent on its own');
+  const r = recompileSnapshot(forged, [], goal); assert.equal(r.ok, false); assert.match(r.errors[0], /do not match/);
+  assert.equal(recompileSnapshot(snap, [], { orch: { rules: goal.orch.rules, repo_rules: { sha256: 'f'.repeat(64) } } }).ok, false, 'repo_rules.sha256 is checked too');
+});

@@ -85,11 +85,21 @@ export function compileGoal({ orchDir, goal, dir, accept = goal.orch.accept_repo
   return { ok: true, comp, layers, snap: buildRulesSnapshot(comp, layers) };
 }
 
-/** Recompile from the layers stored in a snapshot (a human accepted loosenings): never re-reads files. Inputs must still match the recorded layer hashes. */
-export function recompileSnapshot(snap, accept) {
+/**
+ * Recompile from the layers stored in a snapshot (a human accepted loosenings): never re-reads files. The stored inputs must match the layer hashes recorded in
+ * the snapshot AND, when `goal` is given, the ones goal.json recorded (goal.orch.rules.layers, goal.orch.repo_rules.sha256): a rewritten snapshot cannot smuggle rules in.
+ */
+export function recompileSnapshot(snap, accept, goal = null) {
   const stored = (snap.layers || []).filter((l) => l.layer !== 'default');
   const inputs = snap.inputs || [];
-  if (inputs.length !== stored.length || inputs.some((x, i) => sha256(canonical(x.rules)) !== stored[i].sha256)) return { ok: false, errors: ['stored rule layers do not match their recorded hashes'] };
+  const mismatch = { ok: false, errors: ['stored rule layers do not match their recorded hashes'] };
+  if (inputs.length !== stored.length || inputs.some((x, i) => x.layer !== stored[i].layer || sha256(canonical(x.rules)) !== stored[i].sha256)) return mismatch;
+  if (goal) {
+    const rec = (goal.orch?.rules?.layers || []).filter((l) => l.layer !== 'default');
+    if (rec.length !== inputs.length || inputs.some((x, i) => rec[i].layer !== x.layer || !rec[i].sha12 || !sha256(canonical(x.rules)).startsWith(rec[i].sha12))) return mismatch;
+    const rr = goal.orch?.repo_rules; const ri = inputs.find((x) => x.layer === 'repo');
+    if ((rr && (!ri || sha256(canonical(ri.rules)) !== rr.sha256)) || (!rr && ri)) return mismatch;
+  }
   const layers = inputs.map((x) => ({ layer: x.layer, rules: x.rules, source: x.source }));
   const comp = compileRules(layers, { accept });
   if (!comp.ok) return { ok: false, errors: comp.errors };

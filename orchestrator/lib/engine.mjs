@@ -369,7 +369,7 @@ export class Engine {
     const known = new Set((snap.dropped || []).filter((d) => d.layer === 'repo' && d.reason === 'loosening').map((d) => d.rule_id));
     const ids = want.filter((x) => known.has(x));
     if (!ids.length) return refuse(`none of the given ids is a dropped repo loosening (${want.length} given)`);
-    const r = recompileSnapshot(snap, [...new Set([...(o.accept_repo_loosening || []), ...ids])]);
+    const r = recompileSnapshot(snap, [...new Set([...(o.accept_repo_loosening || []), ...ids])], S.goal);
     if (!r.ok) return refuse(r.errors.join('; ').slice(0, 200));
     if (r.snap.rules_hash === snapshotHash(snap)) return refuse('accepting these loosenings changes nothing (a repo can never loosen the sandbox, plan approval or trust settings)');
     o.accept_repo_loosening = [...new Set([...(o.accept_repo_loosening || []), ...ids])];

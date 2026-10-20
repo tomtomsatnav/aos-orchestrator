@@ -332,6 +332,8 @@ export function snapshotHash(snap) {
   try {
     // loosenings / dropped / notes are part of what a human approves: hashed when present (an R4 snapshot has none, so its hash is unchanged)
     const extra = {}; for (const k of ['loosenings', 'dropped', 'notes']) if (Array.isArray(snap[k]) && snap[k].length) extra[k] = snap[k];
+    // a non-legacy snapshot also binds the layer inputs it can be recompiled from (an R4 snapshot has none, so its hash is unchanged)
+    if (Array.isArray(snap.inputs)) { extra.inputs = snap.inputs; extra.layers = snap.layers; }
     return sha256(canonical({ rules_version: snap.rules_version, compiled: snap.compiled, policy: snap.policy, ...extra }));
   } catch { return 'invalid'; }
 }
