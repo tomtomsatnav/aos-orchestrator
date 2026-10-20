@@ -139,8 +139,11 @@ export function validatePlan(plan, opts) {
     else for (const c of cmds) {
       const prob = allowlistEntryProblem(c);
       if (prob) { bad(`${at}: allowed_commands entry "${c}" is dangerous or executes code and is rejected: ${prob}`); continue; }
-      const v = evaluate(pol, { tool_name: 'Bash', tool_input: { command: c }, cwd: '/w' }, { worktree: '/w', path_scope: [], allowed_tools: ['Bash'], allowed_commands: [c], grants: [] });
-      if (v.decision === 'deny') bad(`${at}: allowed_commands entry "${c}" is dangerous (${v.rule})`);
+      // the WORST of the engine default and the goal's own policy: a goal policy can add denies but must never make a plan-time check weaker than the default
+      for (const p of pol === DEFAULT_POLICY ? [pol] : [DEFAULT_POLICY, pol]) {
+        const v = evaluate(p, { tool_name: 'Bash', tool_input: { command: c }, cwd: '/w' }, { worktree: '/w', path_scope: [], allowed_tools: ['Bash'], allowed_commands: [c], grants: [] });
+        if (v.decision === 'deny') { bad(`${at}: allowed_commands entry "${c}" is dangerous (${v.rule})`); break; }
+      }
     }
     if (!Array.isArray(t.checks) || !t.checks.length) bad(`${at}: at least one check is required`);
     else for (const [j, c] of t.checks.entries()) {

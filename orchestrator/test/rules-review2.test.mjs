@@ -117,3 +117,13 @@ test('S4: scope checks fold case/NFKC, expand braces, sample inside [] classes; 
   assert.equal(w('/w/a/b/server.KEY').decision, 'deny'); assert.equal(w('/w/a/b/ok.txt').decision, 'allow');
   assert.deepEqual(toPolicy(compileRules([]).compiled).paths.scope_deny, undefined, 'no scope_deny key by default: the default policy is unchanged');
 });
+
+test('S5: plan-time allowed_commands are judged by the worst of the default and the goal policy', async () => {
+  const { validatePlan } = await import('../lib/plan.mjs');
+  const { DEFAULT_POLICY } = await import('../lib/policy.mjs');
+  const weak = { ...DEFAULT_POLICY, bash: { ...DEFAULT_POLICY.bash, deny_patterns: [], deny: [] } }; // a legacy goal policy that dropped the default deny patterns
+  const t = { ...ptask('t1', 'a.txt', 'alpha'), allowed_commands: ['grep "| sh" a.txt'] };
+  const run = (policy) => validatePlan({ tasks: [t] }, { max_tasks: 12, check_allowlist: ['node'], ...(policy ? { policy } : {}) });
+  assert.equal(run().ok, false, 'the default denies it');
+  const r = run(weak); assert.equal(r.ok, false, 'a weaker goal policy cannot make it pass'); assert.match(r.errors.join(' '), /dangerous_pattern/);
+});
