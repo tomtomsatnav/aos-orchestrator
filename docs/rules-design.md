@@ -613,3 +613,7 @@ Deviations and choices made while implementing R0-R4 (smallest sensible choice e
   (the design wrote `approve`, which is the tool-approval command here) and does not approve: the engine recompiles from the snapshot's stored inputs, writes a new snapshot and fingerprint
   (`orch.rules.changed {direction: loosen}`), the plan stays `awaiting_approval`, and the human reviews and approves again. It is refused after approval, for unknown ids, and when it would change nothing
   (a repo can never loosen sandbox, plan approval or trust). The server has no accept endpoint yet. A worker-written `.aos` change was already a `scope_violation` since R2 (floor glob); R6 adds the test.
+- **R7.** `validatePlan(plan, {rules, policy})`: with the compiled rules it also enforces `plan.tiers`, `plan.max_start_tier`, `plan.scope_deny` (heuristic `scopeHitsDeny`: a literal name with an extension is a file,
+  any other literal is a directory, wildcards are sampled; deliberately over-rejecting for directory scopes), `checks.max_timeout_s`; `allowed_commands` are evaluated with the goal's own worker policy (G4,
+  also for legacy goals, whose policy is the snapshot's). The engine passes them from the intact snapshot, and the planner prompt lists the compiled tiers. `plan.auto_approvable_checks` and the task
+  `tier_ladder` are still constants (R8).

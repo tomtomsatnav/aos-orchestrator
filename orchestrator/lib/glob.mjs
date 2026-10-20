@@ -44,6 +44,21 @@ export function globsOverlap(a, b) {
   return true;
 }
 
+const sampleOf = (g) => g.replace(/\*\*\//g, 'x/').replace(/\*\*/g, 'x').replace(/[*?]/g, 'x').replace(/\[[^\]]*\]/g, 'x');
+/**
+ * Can a path_scope entry and a deny glob name a common file? Heuristic (no regex-language intersection): tries a few concrete paths built from both globs
+ * (the scope's samples, the deny's samples, and each glob's directory prefix joined with the other's tail) and asks whether both match one. Conservative for
+ * directory scopes (a scope that names `docs` covers everything under it), so a plan that could write a denied file is rejected rather than approved.
+ */
+export function scopeHitsDeny(scope, deny) {
+  const s = scope.replace(/^\.\//, '').replace(/\/+$/, ''); const d = deny.replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!hasWild(s) && /\.[^/]+$/.test(s)) return matchGlob(d, s); // a literal name with an extension is a file, not a directory
+  const dir = (g) => staticPrefix(g).join('/'); const tail = (g) => sampleOf(g.replace(/^(\*\*\/)+/, ''));
+  const join = (a, b) => (a ? `${a}/${b}` : b);
+  const cands = [sampleOf(s), `${sampleOf(s)}/x`, sampleOf(d), `${sampleOf(d)}/x`, join(dir(s), tail(d)), join(dir(d), tail(s)), join(dir(s), `${tail(d)}/x`), ...(hasWild(d) ? [] : [d, `${d}/x`])];
+  return cands.some((c) => matchGlob(s, c) && matchGlob(d, c));
+}
+
 export function scopesOverlap(as, bs) {
   return (as || []).some((a) => (bs || []).some((b) => globsOverlap(a, b)));
 }

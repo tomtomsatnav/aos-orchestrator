@@ -768,7 +768,8 @@ export class Engine {
       plan = r.plan; source = 'planner';
     }
     if (!this._rulesCheck(S).ok) return this._planRejected(S, ['rules.snapshot.json was modified or is missing']);
-    const v = validatePlan(plan, { max_tasks: o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal) });
+    const rv = this._rulesView(goal); // compiled rules and worker policy of the (intact) snapshot: the plan must lie inside them (R7, G4)
+    const v = validatePlan(plan, { max_tasks: rv ? rv.compiled.plan.max_tasks : o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal), ...(rv ? { rules: rv.compiled, policy: rv.policy } : {}) });
     if (!v.ok) return this._planRejected(S, v.errors);
     S.tasks = toTasks(v.tasks, goal, this.now());
     S.agents = S.tasks.map((t) => ({ id: t.assignee, role: 'worker', capabilities: ['edit', 'bash'], can_delegate: false, status: 'idle', current_task: null, last_event_at: null, orch: { tier: t.orch.model_tier } }));
@@ -797,7 +798,7 @@ export class Engine {
     const wt = this._integrationWt(goal);
     const guard = this._configGuard(goal, wt);
     if (guard) return { error: guard };
-    const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), constraints: { max_tasks: o.budgets.max_tasks, tiers: TIERS, check_allowlist: this._checkAllowlist(goal) } });
+    const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), constraints: { max_tasks: o.budgets.max_tasks, tiers: this._rulesView(goal)?.compiled.plan.tiers ?? TIERS, check_allowlist: this._checkAllowlist(goal) } });
     const sessionId = crypto.randomUUID();
     const policyFile = path.join(this.P.workers, 'planner.policy.json');
     atomicWrite(policyFile, { ...this._policyHead(goal), ctx: { worktree: realpathDeepest(wt), path_scope: [], allowed_tools: ['Read', 'Glob', 'Grep'], allowed_commands: [], grants: [], home: this.env.HOME, base_branch: o.base_branch } });

@@ -8,6 +8,7 @@ import { commandAllowed } from './checks.mjs';
 import crypto from 'node:crypto';
 import { evaluate, DEFAULT_POLICY, allowlistEntryProblem } from './policy.mjs';
 import { ID_RE, iso } from './state.mjs';
+import { scopeHitsDeny } from './glob.mjs';
 
 export const TIERS = ['haiku', 'sonnet', 'opus'];
 export const PLANNER_SYSTEM = 'You are the planner for an AOS-1 goal. You do not edit files. Output ONLY one JSON object.';
@@ -102,7 +103,9 @@ export function findCycle(tasks) {
 export const UNSAFE_CHECK_CMDS = new Set(['sh', 'bash', 'zsh', 'fish', 'eval', 'exec', 'sudo', 'su', 'curl', 'wget', 'nc', 'ssh', 'scp', 'rsync', 'env', 'xargs', 'open', 'osascript']);
 
 /**
- * Strict validation. opts: {max_tasks, check_allowlist, taskIdPrefix?}. Returns {ok, errors[], tasks[] (normalised)}.
+ * Strict validation. opts: {max_tasks, check_allowlist, rules?, policy?}. `rules` is the goal's COMPILED rule set and `policy` its worker policy: with them the plan
+ * must also respect plan.tiers, plan.max_start_tier, plan.scope_deny, checks.max_timeout_s, and allowed_commands are judged by the goal's own policy (G4; without
+ * them the engine defaults apply). Returns {ok, errors[], tasks[] (normalised)}.
  */
 export function validatePlan(plan, opts) {
   const errors = [];
@@ -110,6 +113,7 @@ export function validatePlan(plan, opts) {
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return { ok: false, errors: ['plan must be a JSON object'], tasks: [] };
   if (!Array.isArray(plan.tasks) || !plan.tasks.length) return { ok: false, errors: ['plan.tasks must be a non-empty array'], tasks: [] };
   if (plan.tasks.length > opts.max_tasks) bad(`plan has ${plan.tasks.length} tasks, max_tasks is ${opts.max_tasks}`);
+  const R = opts.rules || null; const pol = opts.policy || DEFAULT_POLICY; const maxTimeout = R ? R.checks.max_timeout_s : 3600;
   const ids = new Set();
   const tasks = [];
   for (const [i, t] of plan.tasks.entries()) {
@@ -122,21 +126,26 @@ export function validatePlan(plan, opts) {
     for (const f of ['title', 'description', 'output_contract']) if (typeof t[f] !== 'string' || !t[f].trim()) bad(`${at}: ${f} is required`);
     if (!Array.isArray(t.depends_on)) bad(`${at}: depends_on must be an array`);
     if (!TIERS.includes(t.model_tier)) bad(`${at}: model_tier must be one of ${TIERS.join('|')}`);
+    else if (R && !R.plan.tiers.includes(t.model_tier)) bad(`${at}: model_tier ${t.model_tier} is not allowed by the rules (plan.tiers: ${R.plan.tiers.join(', ')})`);
+    else if (R && TIERS.indexOf(t.model_tier) > TIERS.indexOf(R.plan.max_start_tier)) bad(`${at}: model_tier ${t.model_tier} is above plan.max_start_tier ${R.plan.max_start_tier}`);
     if (!Array.isArray(t.acceptance) || !t.acceptance.length || t.acceptance.some((a) => typeof a !== 'string' || !a.trim())) bad(`${at}: acceptance needs at least one non-empty string`);
     if (!Array.isArray(t.path_scope) || !t.path_scope.length) bad(`${at}: path_scope must be a non-empty array`);
-    else for (const g of t.path_scope) { const m = validateScope(g); if (m) bad(`${at}: ${m}`); }
+    else for (const g of t.path_scope) {
+      const m = validateScope(g); if (m) { bad(`${at}: ${m}`); continue; }
+      for (const d of R?.plan.scope_deny || []) if (scopeHitsDeny(g, d.glob)) bad(`${at}: path_scope "${g}" can reach "${d.glob}", which the rules deny (plan.scope_deny ${d.id}, layer ${d.layer})`);
+    }
     const cmds = t.allowed_commands ?? [];
     if (!Array.isArray(cmds) || cmds.some((c) => typeof c !== 'string')) bad(`${at}: allowed_commands must be an array of strings`);
     else for (const c of cmds) {
       const prob = allowlistEntryProblem(c);
       if (prob) { bad(`${at}: allowed_commands entry "${c}" is dangerous or executes code and is rejected: ${prob}`); continue; }
-      const v = evaluate(DEFAULT_POLICY, { tool_name: 'Bash', tool_input: { command: c }, cwd: '/w' }, { worktree: '/w', path_scope: [], allowed_tools: ['Bash'], allowed_commands: [c], grants: [] });
+      const v = evaluate(pol, { tool_name: 'Bash', tool_input: { command: c }, cwd: '/w' }, { worktree: '/w', path_scope: [], allowed_tools: ['Bash'], allowed_commands: [c], grants: [] });
       if (v.decision === 'deny') bad(`${at}: allowed_commands entry "${c}" is dangerous (${v.rule})`);
     }
     if (!Array.isArray(t.checks) || !t.checks.length) bad(`${at}: at least one check is required`);
     else for (const [j, c] of t.checks.entries()) {
       if (!c || !Array.isArray(c.argv) || !c.argv.length || c.argv.some((a) => typeof a !== 'string')) { bad(`${at}.checks[${j}]: argv must be a non-empty string array`); continue; }
-      if (!(typeof c.timeout_s === 'number' && c.timeout_s > 0 && c.timeout_s <= 3600)) bad(`${at}.checks[${j}]: timeout_s must be in (0, 3600]`);
+      if (!(typeof c.timeout_s === 'number' && c.timeout_s > 0 && c.timeout_s <= maxTimeout)) bad(`${at}.checks[${j}]: timeout_s must be in (0, ${maxTimeout}]`);
       if (UNSAFE_CHECK_CMDS.has(path.basename(c.argv[0]))) bad(`${at}.checks[${j}]: ${c.argv[0]} is not allowed as a check`);
       else if (!commandAllowed(c.argv, opts.check_allowlist)) bad(`${at}.checks[${j}]: "${c.argv.join(' ')}" is not on the goal's check allowlist`);
     }
