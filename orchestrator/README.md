@@ -48,7 +48,7 @@ node orchestrator/bin/aos-orch.mjs pause|resume|cancel|kill|approve-plan|reject-
 node orchestrator/bin/aos-orch.mjs approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
 ```
 
-`run` exits 0 achieved, 2 blocked, 3 cancelled, 4 waiting for plan approval. Control commands are queued as files in
+`run` exits 0 achieved, 2 blocked, 3 cancelled, 4 waiting for plan approval, 5 goal locked by another engine. Control commands are queued as files in
 `<goal>/commands/` and applied by the running engine at its next tick (no HTTP server in this phase). `cancel` and `kill`
 both SIGTERM every worker process group (SIGKILL after the grace period), mark tasks `cancelled` and remove the worktrees.
 The real `claude` binary is used only when `AOS_CLAUDE_BIN` is unset.
@@ -116,9 +116,15 @@ Enforced by code and covered by tests:
    `orch.worker.started` events and `<task>.<n>.pid.json` carry `sandboxed: true|false`.
    - **Writes allowed only to:** the task worktree; `<goal>/tmp/<task>` (the worker's TMPDIR); `<goal>/approvals/` and
      `<goal>/workers/decisions.ndjson` (the policy hook runs inside the sandbox and writes them); the Claude files a `claude -p` run
-     writes: `~/.claude/projects/<slug of the worktree>/`, `~/.claude/{session-env,shell-snapshots,todos,file-history}`, `~/.claude.json`
-     (+ its `.tmp`/`.lock`/`.backup` siblings), `~/.local/state/claude` (version locks); system temp: the engine's `$TMPDIR`,
-     `/tmp/claude-<uid>/` and the Bash tool's `/tmp/claude-<hex>-cwd` file; `/dev/null`, ttys.
+     writes: `~/.claude/projects/<slug of the worktree>/`, `~/.claude/session-env/<this run's session id>/` only,
+     `~/.claude/{todos,file-history}`, `~/.local/state/claude` (version locks); this worker's scratchpad
+     `/tmp/claude-<uid>/<slug of the worktree>/` (and creating the `/tmp/claude-<uid>` directory itself) and the Bash tool's
+     `/tmp/claude-<hex>-cwd` file; `/dev/null`, ttys. The engine's `$TMPDIR` is NOT writable (the worker's `TMPDIR` is its goal tmp dir).
+   - **Explicitly denied (probed):** `~/.claude/shell-snapshots/` (new files too; those snapshots are sourced by the user's interactive
+     shell tool sessions), `~/.claude.json` and its `.tmp`/`.lock`/`.backup` siblings (user-scope MCP servers), other sessions'
+     `~/.claude/session-env/<id>`, other sessions' scratchpads under `/tmp/claude-<uid>/`. `claude -p` still starts, authenticates from
+     the keychain and answers (3 probe runs under this profile; the first two failed for harness reasons: the `/tmp/claude-<uid>`
+     directory itself must be creatable and `USER`/`LOGNAME` must be in the env for the keychain lookup, which the engine's env has).
    - **Writes denied to everything else**, including the main repo working tree and its `.git` (read-only, so git works in a worktree),
      other worktrees, the rest of `<goal>/` (goal/tasks state, policy files, other tasks' tmp), `~` itself and shell rc files,
      `~/.claude/settings.json`, `CLAUDE.md`, skills, plugins, other projects' session dirs and auto-memory, `~/.ssh ~/.aws ~/.gnupg`
@@ -143,9 +149,12 @@ Residual risks (honest list):
   constrained only by the policy hook (PreToolUse and PermissionRequest) and the isolation flags, and the hook is a heuristic shell
   parser: an unparsed construct is `ask`, not proof of safety. Even sandboxed, a worker has the network, keychain read and read access
   to `~/.claude` (other sessions' transcripts), and can write the approvals inbox (the hook must), so a worker that gets a shell past the
-  hook could forge an approval file for its own later calls. `~/.claude.json` is writable (claude rewrites it), and it holds user-scope
-  MCP server config that an interactive session would load. A worker still holds Edit/Write inside its scope, and anything it writes
+  hook could forge an approval file for its own later calls. A worker still holds Edit/Write inside its scope, and anything it writes
   is later executed by the sandboxed checks.
+- What the worker sandbox does NOT contain: the network, keychain reads (so Claude credentials can be read and sent anywhere), reads of
+  `~/.claude` (other sessions' transcripts) and `~/.claude.json`, and anything inside the writable set above (the worktree and goal tmp
+  are executed later by the sandboxed checks). It guards against accidents and limits blast radius; it is not a boundary against a
+  determined malicious worker.
 - The sandbox is defense in depth, not proof: `sandbox-exec` is deprecated and its profile language undocumented; a kernel or sandbox bug
   defeats it. It does not limit CPU, memory, disk use inside the worktree or processes (only the timeout and the group kill do).
   `file-read-metadata` is allowed everywhere, so a check can `stat` (not read or list) paths such as `~/.ssh`. Mach lookups are allowed
