@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn as nodeSpawn, execFileSync } from 'node:child_process';
 import { parseRateLimitEvent, usageOf } from './governor.mjs';
+import { untrustedBlocks } from './untrusted.mjs';
 
 export const WORKER_TOOLS = 'Read,Edit,Write,Glob,Grep,Bash';
 export const READ_ONLY_TOOLS = 'Read,Glob,Grep';
@@ -65,18 +66,26 @@ export function buildSettings(hookScript, nodePath = process.execPath) {
 
 export function buildWorkerPrompt({ goal, task, deps = [], previous = null }) {
   const o = task.orch;
+  // Everything below that a model or a repo wrote (task text, dependency summaries, check output) goes into UNTRUSTED blocks.
+  const parts = [{ label: 'task description', text: o.description || '', max: 4000 }];
+  for (const d of deps) parts.push({ label: `dependency ${d.id} summary`, text: d.summary || 'done', max: 1000 });
+  if (previous?.check_output) parts.push({ label: 'previous check output', text: previous.check_output, max: 4096 });
+  if (previous?.note) parts.push({ label: 'previous note', text: previous.note, max: 1000 });
+  const U = untrustedBlocks(parts);
+  let i = 0;
   const lines = [
     `You are AOS worker ${task.id} for goal "${goal.title}". Work only in the current directory.`,
-    `TASK: ${task.title} - ${o.description || ''}`,
+    U.notice,
+    `TASK: ${task.title} - ${U.blocks[i++]}`,
     `YOU MAY CHANGE ONLY: ${o.path_scope.join(', ')}        COMMANDS YOU MAY RUN: ${(o.allowed_commands || []).join(', ') || '(none)'}`,
     `DONE MEANS: ${task.acceptance.join('; ')}; the engine will run: ${(o.checks || []).map((c) => c.argv.join(' ')).join(' ; ')}`,
   ];
   const ctx = [];
-  for (const d of deps) ctx.push(`dependency ${d.id} (${d.title}): ${d.summary || 'done'}`);
+  for (const d of deps) ctx.push(`dependency ${d.id} (${d.title}): ${U.blocks[i++]}`);
   if (previous) {
-    if (previous.check_output) ctx.push(`previous attempt failed the engine checks. Last output:\n${previous.check_output}`);
+    if (previous.check_output) ctx.push(`previous attempt failed the engine checks. Last output:\n${U.blocks[i++]}`);
     if (previous.denials?.length) ctx.push(`previous attempt had denied tool calls: ${previous.denials.join(', ')}`);
-    if (previous.note) ctx.push(previous.note);
+    if (previous.note) ctx.push(U.blocks[i++]);
   }
   if (ctx.length) lines.push(`CONTEXT: ${ctx.join('\n')}`);
   lines.push(`RULES: ${FILE_WRITE_RULE} Do not commit, push, install packages or use the network. If a tool call is denied, do not try to work around it: finish and state what you needed. End with a 3-line summary: changed files, how you checked, open issues.`);

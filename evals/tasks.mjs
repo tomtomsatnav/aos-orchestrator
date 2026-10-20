@@ -1,0 +1,58 @@
+// Eval task specs. Each: { id, profile, prompt, seed(dir) -> writes the seed repo files, grade(dir) -> {ok, why}, fake }.
+// `grade` is a deterministic grader that only READS files from the integration checkout. Code tasks load the model-written module in a vm context
+// with a timeout (not a security boundary: run real evals on a machine where that is acceptable). `fake` feeds `--fake` mode (test/fake-claude.mjs):
+// a valid draft, a one-task plan and the worker's file edits that satisfy the grader.
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+
+const read = (dir, rel) => { try { return fs.readFileSync(path.join(dir, rel), 'utf8'); } catch { return null; } };
+const put = (dir, rel, text) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), text); };
+function loadCjs(code) { const m = { exports: {} }; vm.runInNewContext(code, { module: m, exports: m.exports }, { timeout: 1000 }); return m.exports; }
+const verdict = (ok, why) => ({ ok: !!ok, why: ok ? 'ok' : why });
+
+const NODE_TEST = { argv: ['node', '--test'], timeout_s: 60 };
+const draftOf = (title, description, extra = []) => ({ title, description, success_criteria: [
+  { id: 'c1', text: 'the node tests pass', check: NODE_TEST }, { id: 'c2', text: 'the node tests pass on the integration branch', check: NODE_TEST }, ...extra ],
+  budgets: { max_new_tokens: 300000, max_attempts: 2 }, risks: [] });
+const GREP_DRAFT = (title, description, file, needle) => ({ title, description, success_criteria: [
+  { id: 'c1', text: `${file} mentions the new text`, check: { argv: ['grep', '-q', needle, file], timeout_s: 30 } },
+  { id: 'c2', text: `${file} still exists`, check: { argv: ['test', '-f', file], timeout_s: 30 } } ], budgets: { max_new_tokens: 300000, max_attempts: 2 }, risks: [] });
+const onePlan = (t) => ({ tasks: [{ id: 't1', depends_on: [], model_tier: 'haiku', allowed_commands: [], ...t }], risks: [] });
+
+export const TASKS = [
+  { id: 'readme-usage', profile: 'docs-only',
+    prompt: 'Add a "## Usage" section to README.md with a fenced shell block that shows the command `npm start`. Keep the existing title.',
+    seed(d) { put(d, 'README.md', '# Widget\n\nA tiny widget.\n'); },
+    grade(d) { const t = read(d, 'README.md') || ''; return verdict(/^# Widget$/m.test(t) && /^## Usage\s*$/m.test(t) && /```[a-z]*\n[^`]*npm start[^`]*```/.test(t), 'README.md lacks the title, the Usage heading or a fenced npm start block'); },
+    fake: { draft: GREP_DRAFT('Add Usage section', 'Document npm start in README.md.', 'README.md', 'Usage'),
+      plan: onePlan({ title: 'Add usage', description: 'Add a Usage section to README.md', path_scope: ['README.md'], checks: [{ argv: ['grep', '-q', 'Usage', 'README.md'], timeout_s: 30 }], output_contract: 'README has Usage', acceptance: ['README has a Usage section'] }),
+      edits: [{ path: 'README.md', content: '# Widget\n\nA tiny widget.\n\n## Usage\n\n```sh\nnpm start\n```\n' }] } },
+  { id: 'changelog-entry', profile: 'docs-only',
+    prompt: 'Add a new "## 1.1.0" entry to CHANGELOG.md above the existing 1.0.0 entry, with one bullet: "- add retry to the fetcher". Do not change the 1.0.0 entry.',
+    seed(d) { put(d, 'CHANGELOG.md', '# Changelog\n\n## 1.0.0\n\n- initial release\n'); },
+    grade(d) { const t = read(d, 'CHANGELOG.md') || ''; const a = t.indexOf('## 1.1.0'); const b = t.indexOf('## 1.0.0');
+      return verdict(a > 0 && b > a && /^- add retry to the fetcher\s*$/m.test(t.slice(a, b)) && /- initial release/.test(t.slice(b)), 'missing 1.1.0 entry above 1.0.0 with the retry bullet, or 1.0.0 changed'); },
+    fake: { draft: GREP_DRAFT('Changelog 1.1.0', 'Add the 1.1.0 entry.', 'CHANGELOG.md', '1.1.0'),
+      plan: onePlan({ title: 'Add entry', description: 'Add the 1.1.0 changelog entry', path_scope: ['CHANGELOG.md'], checks: [{ argv: ['grep', '-q', '1.1.0', 'CHANGELOG.md'], timeout_s: 30 }], output_contract: 'entry added', acceptance: ['1.1.0 entry exists'] }),
+      edits: [{ path: 'CHANGELOG.md', content: '# Changelog\n\n## 1.1.0\n\n- add retry to the fetcher\n\n## 1.0.0\n\n- initial release\n' }] } },
+  { id: 'fix-add', profile: 'node-library',
+    prompt: 'The function add in src/add.js returns the wrong result (see test/add.test.js). Fix src/add.js so `node --test` passes. Do not edit the test.',
+    seed(d) { put(d, 'package.json', '{"name":"adder","version":"1.0.0","scripts":{"test":"node --test"}}\n'); put(d, 'src/add.js', 'exports.add = (a, b) => a - b;\n');
+      put(d, 'test/add.test.js', "const test = require('node:test'); const assert = require('node:assert'); const { add } = require('../src/add.js');\ntest('add', () => { assert.strictEqual(add(2, 3), 5); assert.strictEqual(add(-1, 1), 0); });\n"); },
+    grade(d) { try { const { add } = loadCjs(read(d, 'src/add.js') || ''); const orig = read(d, 'test/add.test.js') || '';
+      return verdict(add(2, 3) === 5 && add(-1, 1) === 0 && add(0, 0) === 0 && /strictEqual\(add\(2, 3\), 5\)/.test(orig), 'add() is wrong or the test was edited'); } catch (e) { return verdict(false, `src/add.js failed to load: ${e.message}`); } },
+    fake: { draft: draftOf('Fix add', 'Fix src/add.js.'),
+      plan: onePlan({ title: 'Fix add', description: 'Fix add in src/add.js', path_scope: ['src/add.js'], checks: [NODE_TEST], output_contract: 'add works', acceptance: ['node --test passes'] }),
+      edits: [{ path: 'src/add.js', content: 'exports.add = (a, b) => a + b;\n' }] } },
+  { id: 'add-slugify', profile: 'node-library',
+    prompt: 'Add src/slugify.js (CommonJS, module.exports = { slugify }) where slugify(s) lowercases, trims, replaces each run of non-alphanumeric characters with a single "-" and has no leading or trailing "-". Add test/slugify.test.js using node:test that covers it.',
+    seed(d) { put(d, 'package.json', '{"name":"slug","version":"1.0.0","scripts":{"test":"node --test"}}\n'); put(d, 'src/index.js', '// entry point\n'); },
+    grade(d) { try { const { slugify } = loadCjs(read(d, 'src/slugify.js') || ''); const cases = [['Hello World', 'hello-world'], ['  A  B  ', 'a-b'], ['a--b__c', 'a-b-c'], ['---x---', 'x'], ['ABC123', 'abc123']];
+      const bad = cases.find(([i, o]) => slugify(i) !== o); const tests = read(d, 'test/slugify.test.js') || '';
+      return verdict(!bad && /node:test/.test(tests) && /slugify/.test(tests), bad ? `slugify(${JSON.stringify(bad[0])}) !== ${JSON.stringify(bad[1])}` : 'test/slugify.test.js missing or does not use node:test'); } catch (e) { return verdict(false, `src/slugify.js failed to load: ${e.message}`); } },
+    fake: { draft: draftOf('Add slugify', 'Add src/slugify.js and a test.'),
+      plan: onePlan({ title: 'Add slugify', description: 'Add src/slugify.js and its test', path_scope: ['src/slugify.js', 'test/slugify.test.js'], checks: [NODE_TEST], output_contract: 'slugify works', acceptance: ['node --test passes'] }),
+      edits: [{ path: 'src/slugify.js', content: "exports.slugify = (s) => String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n" },
+        { path: 'test/slugify.test.js', content: "const test = require('node:test'); const assert = require('node:assert'); const { slugify } = require('../src/slugify.js');\ntest('slugify', () => { assert.strictEqual(slugify('Hello World'), 'hello-world'); });\n" }] } },
+];
