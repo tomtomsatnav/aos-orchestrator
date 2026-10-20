@@ -41,6 +41,9 @@ export function shapeOutput(event, decision, reason) {
   return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision, permissionDecisionReason: reason } };
 }
 
+/** rule_id / rule_layer / rules_hash (12 chars, when the policy file carries one) for a decision-log record. All safe to log: never free text. */
+const ids = (v, cfg) => ({ rule_id: v.rule_id, rule_layer: v.layer, rules_hash: typeof cfg?.rules_hash === 'string' ? cfg.rules_hash.slice(0, 12) : null });
+
 function logDecision(env, rec) {
   if (!env.AOS_DECISION_LOG) return;
   try { fs.appendFileSync(env.AOS_DECISION_LOG, `${JSON.stringify({ ts: new Date().toISOString(), task_id: env.AOS_TASK_ID || null, attempt: Number(env.AOS_ATTEMPT) || null, ...rec })}\n`); } catch { /* best effort */ }
@@ -55,23 +58,23 @@ export async function decideForPayload(payload, env = process.env) {
   const call = { tool_name: payload.tool_name, tool_input: payload.tool_input, cwd: payload.cwd };
   const v = evaluate(cfg.policy, call, ctx);
   if (v.decision !== 'ask') {
-    logDecision(env, { event, decision: v.decision, rule: v.rule, label: safeLabel(call) });
-    return { event, decision: v.decision, reason: v.decision === 'allow' ? 'AOS policy: allowed' : `AOS policy: ${v.reason}`, rule: v.rule };
+    logDecision(env, { event, decision: v.decision, rule: v.rule, ...ids(v, cfg), label: safeLabel(call) });
+    return { event, decision: v.decision, reason: v.decision === 'allow' ? 'AOS policy: allowed' : `AOS policy: ${v.reason}`, rule: v.rule, rule_id: v.rule_id };
   }
   // ask: file an approval request, wait up to wait_in_hook_s, then deny
   const ap = cfg.policy?.approval || {};
   const dir = env.AOS_APPROVALS_DIR;
   if (!dir) return { event, decision: 'deny', reason: 'AOS policy: approval needed but no inbox configured', rule: 'policy_error' };
   const rec = createApproval(dir, { goal_id: env.AOS_GOAL_ID || null, task_id: env.AOS_TASK_ID || null, attempt: Number(env.AOS_ATTEMPT) || 0,
-    tool: call.tool_name, input: call.tool_input, cwd: call.cwd || null, reason: v.reason, rule: v.rule }, { ttl_s: ap.ttl_s || 86400 });
+    tool: call.tool_name, input: call.tool_input, cwd: call.cwd || null, reason: v.reason, rule: v.rule, rule_id: v.rule_id }, { ttl_s: ap.ttl_s || 86400 });
   const pollMs = Number(env.AOS_APPROVAL_POLL_MS) || 100;
   const done = rec.status !== 'pending' ? rec : await waitForDecision(dir, rec.id, { timeoutMs: hookWaitMs(cfg.policy), pollMs });
   if (done && done.status === 'approved') {
-    logDecision(env, { event, decision: 'allow', rule: 'approved', approval: rec.id, label: safeLabel(call) });
+    logDecision(env, { event, decision: 'allow', rule: 'approved', rule_id: 'grant:approved', rule_layer: 'grant', rules_hash: ids(v, cfg).rules_hash, asked_by: v.rule_id, approval: rec.id, label: safeLabel(call) });
     return { event, decision: 'allow', reason: `AOS policy: approved (${rec.id})`, rule: 'approved', approval: rec.id };
   }
   const why = done && done.status === 'denied' ? `approval ${rec.id} was denied` : `approval ${rec.id} pending; do not retry; finish and report what you needed`;
-  logDecision(env, { event, decision: 'deny', rule: 'ask_unresolved', approval: rec.id, label: safeLabel(call) });
+  logDecision(env, { event, decision: 'deny', rule: 'ask_unresolved', rule_id: 'floor:ask_unresolved', rule_layer: 'floor', rules_hash: ids(v, cfg).rules_hash, asked_by: v.rule_id, approval: rec.id, label: safeLabel(call) });
   return { event, decision: 'deny', reason: `AOS policy: ${why}`, rule: 'ask_unresolved', approval: rec.id };
 }
 

@@ -545,3 +545,8 @@ Deviations and choices made while implementing R0-R4 (smallest sensible choice e
   `denyGlobs` and `isProtectedRel` independently of `policy.paths.deny` (which still lists the first six for display, so `toPolicy(DEFAULT_RULES)` still
   equals `DEFAULT_POLICY`). Golden diff caused by R2 (tightening only): a worker `Write` to `.aos/rules.json` is now `deny/path_denied` (was
   `ask/outside_scope`), and `isProtectedRel('.aos/rules.json')` is `true` (was `false`). Side effect: a worker can no longer *read* `.aos/**` either.
+- **R3 rule ids.** `evaluate()` adds `layer` and `rule_id` (`<layer>:<rule>`; the legacy `rule` string is the id). Layer is `default` for rules driven by the
+  policy (tool allowlist, scope, bash allow/ask_on, deny patterns, an extra entry in the policy's own deny lists) and `floor` for rules enforced in code;
+  when a call matches both (e.g. `git push`, `.git/**`), `floor` wins. The hook log gains `rule_id`, `rule_layer`, `rules_hash` (12 chars, `null` until R4
+  puts a hash in the worker policy file); `approved` and `ask_unresolved` get `grant:approved` / `floor:ask_unresolved` plus `asked_by` (the rule that asked).
+  `createApproval` stores `rule_id` next to `rule`. The `orch.*` event additions (section 5) are left to R8/R11.

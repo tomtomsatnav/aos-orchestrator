@@ -44,12 +44,12 @@ export function createApproval(dir, req, { clock, ttl_s = 86400 } = {}) {
   for (let n = listApprovals(dir).length + 1; n < 100000; n++) {
     const id = `A-${n}`;
     const rec = { id, key, goal_id: req.goal_id, task_id: req.task_id, attempt: req.attempt, tool: req.tool, input: req.input, cwd: req.cwd ?? null,
-      reason: req.reason, rule: req.rule, requested_at: iso(t), expires_at: iso(t + ttl_s * 1000), status: 'pending' };
+      reason: req.reason, rule: req.rule, rule_id: req.rule_id ?? null, requested_at: iso(t), expires_at: iso(t + ttl_s * 1000), status: 'pending' };
     try {
       const fd = fs.openSync(file(dir, id), 'wx', 0o600);
       fs.writeSync(fd, `${JSON.stringify(rec, null, 2)}\n`);
       fs.closeSync(fd);
-      audit(dir, { event: 'requested', id, task_id: req.task_id, tool: req.tool, rule: req.rule }, clock);
+      audit(dir, { event: 'requested', id, task_id: req.task_id, tool: req.tool, rule: req.rule, rule_id: req.rule_id ?? null }, clock);
       return rec;
     } catch (e) { if (e.code !== 'EEXIST') throw e; }
   }

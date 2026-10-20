@@ -82,7 +82,12 @@ export function mergePolicy(...layers) {
   return out;
 }
 
-const res = (decision, reason, rule) => ({ decision, reason, rule });
+const res = (decision, reason, rule, layer) => (layer ? { decision, reason, rule, layer } : { decision, reason, rule });
+// Rule ids (docs/rules-design.md section 5): `<layer>:<rule>`. The legacy `rule` strings are the ids. Rules not listed here are enforced by
+// code (the floor); the listed ones are driven by the policy (default layer, later user/repo/goal).
+const DEFAULT_LAYER_RULES = new Set(['tool_not_allowed', 'outside_scope', 'bash_allow', 'write_in_scope', 'read_in_worktree', 'dangerous_pattern', 'substitution', 'unknown_command', 'default']);
+const POLICY_DENY_REASON = 'command is on the policy deny list';
+const withId = (r) => { const layer = r.layer || (DEFAULT_LAYER_RULES.has(r.rule) ? 'default' : 'floor'); return { ...r, layer, rule_id: `${layer}:${r.rule}` }; };
 const lex = (p) => p;
 const isInside = (p, root) => p === root || p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
 const expandHome = (p, home) => (home && (p === '~' || p.startsWith('~/')) ? path.join(home, p.slice(1)) : p);
@@ -96,16 +101,19 @@ function makeResolver(ctx) {
   };
 }
 
-function denyGlobs(policy, ctx) {
-  const g = [...(policy.paths?.deny || []), ...BUILTIN_DENY_GLOBS].map((x) => expandHome(x, ctx.home));
-  return g;
+const hits = (globs, ps) => globs.map(fold).some((g) => ps.map(fold).some((p) => globToRegex(g).test(p) || matchGlob(g, p)));
+/** Which layer protects one of these paths: 'floor' (code), 'default' (the policy's own deny list) or null. Floor wins when both match. */
+function pathDeniedBy(policy, ctx, ...ps) {
+  const exp = (l) => l.map((x) => expandHome(x, ctx.home));
+  if (hits(exp(BUILTIN_DENY_GLOBS), ps)) return 'floor';
+  return hits(exp(policy.paths?.deny || []), ps) ? 'default' : null;
 }
-const pathDenied = (policy, ctx, ...ps) => denyGlobs(policy, ctx).map(fold).some((g) => ps.map(fold).some((p) => globToRegex(g).test(p) || matchGlob(g, p)));
 
 /** mode: 'read' | 'write'. Returns null when the path is acceptable, else a result. */
 function checkPath(policy, ctx, R, arg, mode, base) {
   const { abs, real } = R.resolve(arg, base);
-  if (pathDenied(policy, ctx, abs, real)) return res('deny', `path is protected by policy: ${mode}`, 'path_denied');
+  const pd = pathDeniedBy(policy, ctx, abs, real);
+  if (pd) return res('deny', `path is protected by policy: ${mode}`, 'path_denied', pd);
   const inside = isInside(real, R.wt);
   if (mode === 'read') {
     if (inside) return null;
@@ -189,7 +197,7 @@ export function allowlistEntryProblem(entry) {
 function dangerous(policy, ctx, argv) {
   const name = path.basename(argv[0]);
   if (ALWAYS_DENY_CMDS.has(name)) return `${name} is never allowed`;
-  if ((policy.bash?.deny || []).some((e) => prefixMatch(e, argv))) return 'command is on the policy deny list';
+  if ((policy.bash?.deny || []).some((e) => prefixMatch(e, argv))) return POLICY_DENY_REASON;
   if (PKG_MGRS.has(name) && argv.slice(1).some((a) => PKG_VERBS.has(a))) return 'package installs are not allowed';
   if (name === 'chmod' && argv.some((a) => /^-[a-zA-Z]*R/.test(a))) return 'recursive chmod is not allowed';
   if (name === 'git') {
@@ -214,7 +222,7 @@ function evaluateBash(policy, command, ctx) {
   const askOn = new Set(policy.bash?.ask_on || []);
   let out = res('allow', 'all commands match the allowlist', 'bash_allow');
   const note = (r) => { out = worst(out, r); };
-  const askOrDeny = (key, reason) => note(res(askOn.has(key) ? 'ask' : 'deny', reason, key));
+  const askOrDeny = (key, reason) => note(res(askOn.has(key) ? 'ask' : 'deny', reason, key, 'default'));
 
   for (const rx of policy.bash?.deny_patterns || []) {
     let re; try { re = new RegExp(rx); } catch { return res('deny', 'invalid deny pattern in policy', 'policy_error'); }
@@ -232,7 +240,7 @@ function evaluateBash(policy, command, ctx) {
     }
     const name = path.basename(c.argv[0]);
     const why = dangerous(policy, ctx, c.argv);
-    if (why) return res('deny', why, 'dangerous');
+    if (why) return res('deny', why, 'dangerous', why === POLICY_DENY_REASON && !dangerous({ ...policy, bash: { ...policy.bash, deny: [] } }, ctx, c.argv) ? 'default' : 'floor');
     if (c.ops === '|' && INTERPRETERS.has(name)) return res('deny', 'piping into an interpreter is not allowed', 'pipe_into_interpreter');
     if (/^[A-Za-z_]\w*=/.test(c.argv[0]) || c.argv[0].includes('$')) { askOrDeny('unparsed', 'variable assignment or expanded command name'); continue; }
     // after cd/pushd/popd the rest of the line runs in another directory than the one paths are resolved against
@@ -284,9 +292,12 @@ function redirectCheck(policy, ctx, R, rd, cwd) {
 /**
  * @param policy  merged policy object (see DEFAULT_POLICY)
  * @param toolCall {tool_name, tool_input, cwd?}
+ * @returns {decision, reason, rule, rule_id: '<layer>:<rule>', layer: 'floor'|'default'}
  * @param ctx {worktree, path_scope[], allowed_tools[], allowed_commands[], grants[], home?, base_branch?, realpath?(abs)->real}
  */
-export function evaluate(policy, toolCall, ctx) {
+export function evaluate(policy, toolCall, ctx) { return withId(evaluateRaw(policy, toolCall, ctx)); }
+
+function evaluateRaw(policy, toolCall, ctx) {
   try {
     const pol = mergePolicy(policy);
     const tool = toolCall?.tool_name;

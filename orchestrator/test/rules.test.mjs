@@ -181,3 +181,73 @@ test('floor: plan path_scope may not target .aos (nor .git / .claude)', () => {
   for (const g of ['.aos/**', '.aos/rules.json', './.aos', '.aos', '.git/hooks/*', '.claude/**']) assert.match(validateScope(g) || '', /targets protected files/, g);
   assert.equal(validateScope('src/.aos-notes/**'), null); assert.equal(validateScope('docs/**'), null);
 });
+
+// ---------------------------------------------------------------- R3: rule ids
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { decideForPayload } from '../lib/policy-hook.mjs';
+import { DEFAULT_POLICY as DP } from '../lib/policy.mjs';
+import { readApproval, listApprovals } from '../lib/approvals.mjs';
+
+const rctx = { worktree: '/w/t1', path_scope: ['a.txt', 'src/**'], allowed_tools: ['Read', 'Write', 'Edit', 'Bash'], allowed_commands: [], grants: [], home: '/home/u', base_branch: 'main' };
+const rev = (tool, input, pol = DP) => evaluate(pol, { tool_name: tool, tool_input: input, cwd: '/w/t1' }, rctx);
+
+test('rule ids: evaluate() returns <layer>:<rule> and the layer; `rule` is unchanged', () => {
+  const cases = [
+    ['Write', { file_path: '/w/t1/a.txt' }, 'allow', 'write_in_scope', 'default'],
+    ['Write', { file_path: '/w/t1/.git/x' }, 'deny', 'path_denied', 'floor'],
+    ['Write', { file_path: '/w/t1/.aos/rules.json' }, 'deny', 'path_denied', 'floor'],
+    ['Write', { file_path: '/w/t1/other.txt' }, 'ask', 'outside_scope', 'default'],
+    ['Write', { file_path: '/w/x.txt' }, 'deny', 'outside_worktree', 'floor'],
+    ['Read', { file_path: '/etc/passwd' }, 'deny', 'outside_read_root', 'floor'],
+    ['WebFetch', {}, 'deny', 'tool_not_allowed', 'default'],
+    ['Bash', { command: 'ls' }, 'allow', 'bash_allow', 'default'],
+    ['Bash', { command: 'sed -i x a.txt' }, 'ask', 'unknown_command', 'default'],
+    ['Bash', { command: 'cat $(x)' }, 'ask', 'substitution', 'default'],
+    ['Bash', { command: 'cat $X' }, 'ask', 'unparsed', 'default'],
+    ['Bash', { command: 'git push' }, 'deny', 'dangerous', 'floor'], // on the policy deny list AND a code rule: floor wins
+    ['Bash', { command: 'cat a | sh' }, 'deny', 'dangerous_pattern', 'default'],
+    ['Bash', { command: '' }, 'deny', 'unparsed', 'floor'],
+  ];
+  for (const [t, i, d, rule, layer] of cases) {
+    const r = rev(t, i);
+    assert.deepEqual([r.decision, r.rule, r.layer, r.rule_id], [d, rule, layer, `${layer}:${rule}`], JSON.stringify(i));
+  }
+  // an extra entry in the policy's own deny list is a 'default'-layer rule; the floor wins when both match
+  const custom = { bash: { deny: ['mkfs'] }, paths: { deny: ['**/secrets/**'] } };
+  const c = (t, i) => evaluate({ ...DP, bash: { ...DP.bash, ...custom.bash }, paths: { ...DP.paths, ...custom.paths } }, { tool_name: t, tool_input: i, cwd: '/w/t1' }, rctx);
+  assert.equal(c('Bash', { command: 'mkfs x' }).rule_id, 'default:dangerous');
+  assert.equal(c('Write', { file_path: '/w/t1/secrets/k' }).rule_id, 'default:path_denied');
+  assert.equal(c('Write', { file_path: '/w/t1/.git/k' }).rule_id, 'floor:path_denied');
+  assert.equal(evaluate(DP, { tool_name: 'Bash', tool_input: { command: 'ls' } }, { ...rctx, worktree: undefined }).rule_id, 'floor:no_context');
+  assert.equal(evaluate(DP, { tool_name: 'Bash', tool_input: { command: 'ls' } }, undefined).rule_id, 'floor:policy_error');
+});
+
+test('rule ids: the hook logs rule_id, rule_layer and rules_hash (12 chars); the legacy `rule` stays; asks store rule_id in the approval', async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aos-rid-'))); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const wt = path.join(root, 'wt'); fs.mkdirSync(wt);
+  const policyFile = path.join(root, 'policy.json'); const log = path.join(root, 'decisions.ndjson'); const appr = path.join(root, 'approvals');
+  fs.writeFileSync(policyFile, JSON.stringify({ policy: mergePolicy({ approval: { wait_in_hook_s: 0 } }), rules_hash: 'abcdef0123456789abcdef', ctx: { worktree: wt, path_scope: ['a.txt'], allowed_tools: ['Write', 'Bash'], allowed_commands: [], grants: [], home: root } }));
+  const env = { PATH: process.env.PATH, AOS_POLICY_FILE: policyFile, AOS_DECISION_LOG: log, AOS_APPROVALS_DIR: appr, AOS_GOAL_ID: 'g', AOS_TASK_ID: 't1', AOS_ATTEMPT: '1' };
+  const call = (tool, input) => decideForPayload({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input, cwd: wt }, env);
+  await call('Write', { file_path: path.join(wt, 'a.txt') });
+  await call('Write', { file_path: path.join(wt, '.aos', 'rules.json') });
+  const ask = await call('Write', { file_path: path.join(wt, 'other.txt') });
+  const recs = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(recs.length, 3);
+  assert.deepEqual(recs.map((r) => [r.decision, r.rule, r.rule_id, r.rule_layer, r.rules_hash]), [
+    ['allow', 'write_in_scope', 'default:write_in_scope', 'default', 'abcdef012345'],
+    ['deny', 'path_denied', 'floor:path_denied', 'floor', 'abcdef012345'],
+    ['deny', 'ask_unresolved', 'floor:ask_unresolved', 'floor', 'abcdef012345'],
+  ]);
+  assert.equal(recs[2].asked_by, 'default:outside_scope');
+  assert.equal(ask.rule, 'ask_unresolved');
+  for (const r of recs) for (const k of ['rule_id', 'rule_layer', 'rules_hash']) assert.match(String(r[k]), /^[a-z0-9:_]+$/, 'ids are safe to log');
+  const a = listApprovals(appr); assert.equal(a.length, 1);
+  assert.equal(a[0].rule, 'outside_scope'); assert.equal(a[0].rule_id, 'default:outside_scope'); assert.equal(readApproval(appr, a[0].id).rule_id, 'default:outside_scope');
+  // no rules_hash in the policy file (before R4): null, not a crash
+  fs.writeFileSync(policyFile, JSON.stringify({ policy: DP, ctx: { worktree: wt, path_scope: [], allowed_tools: ['Bash'], allowed_commands: [], grants: [], home: root } }));
+  await call('Bash', { command: 'git push' });
+  assert.equal(JSON.parse(fs.readFileSync(log, 'utf8').trim().split('\n').pop()).rules_hash, null);
+});
