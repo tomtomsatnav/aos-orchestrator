@@ -219,9 +219,11 @@ export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
   const o = spec.orch || {};
   if (typeof o.repo !== 'string' || !path.isAbsolute(o.repo)) throw new Error('goal.orch.repo must be an absolute path');
   const criteria = (spec.success_criteria || []).map((c, i) => ({ id: c.id || `c${i + 1}`, text: c.text || '', met: false,
-    ...(c.check ? { check: c.check } : {}), ...(c.requires ? { requires: c.requires } : {}) }));
+    ...(c.check ? { check: c.check } : {}), ...(c.requires ? { requires: c.requires } : {}), ...(c.verify !== undefined ? { verify: c.verify } : {}) }));
   if (!criteria.length) throw new Error('goal.success_criteria needs at least one criterion');
   for (const c of criteria) {
+    if (c.verify !== undefined && c.verify !== 'human') throw new Error(`criterion ${c.id}: verify must be "human"`);
+    if (c.verify === 'human' && (c.check || c.requires)) throw new Error(`criterion ${c.id}: a human-review criterion (verify "human") cannot also have a check or requires`);
     if (c.check && (!Array.isArray(c.check.argv) || !c.check.argv.length || !(c.check.timeout_s > 0))) throw new Error(`criterion ${c.id}: check needs argv[] and timeout_s > 0`);
   }
   const budget = { max_ticks: 500, max_usd: 5, max_wall_clock_s: 7200, ...(spec.budget || {}) };
@@ -230,6 +232,7 @@ export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
   if (!Array.isArray(ports) || ports.length > 16 || ports.some((x) => !Number.isInteger(x) || x < 1 || x > 65535)) throw new Error('goal.orch.check_localhost_ports must be an array of up to 16 ports (1-65535)');
   for (const k of ['trust_repo_config', 'unsandboxed_checks', 'sandbox_workers']) if (o[k] !== undefined && typeof o[k] !== 'boolean') throw new Error(`goal.orch.${k} must be a boolean`);
   if (o.accept_repo_loosening !== undefined && (!Array.isArray(o.accept_repo_loosening) || o.accept_repo_loosening.length > 64 || o.accept_repo_loosening.some((x) => typeof x !== 'string' || !x || x.length > 200))) throw new Error('goal.orch.accept_repo_loosening must be an array of up to 64 rule ids');
+  if (o.drafted !== undefined && !(o.drafted && typeof o.drafted === 'object' && !Array.isArray(o.drafted) && ['haiku', 'sonnet', 'opus'].includes(o.drafted.tier))) throw new Error('goal.orch.drafted must be {tier: "haiku"|"sonnet"|"opus"}');
   if (o.rules !== undefined && (!o.rules || typeof o.rules !== 'object' || Array.isArray(o.rules))) throw new Error('goal.orch.rules must be an object (a rules layer)');
   const approval = { plan: 'required', outside_allowlist: 'ask', dangerous: 'deny', ...(o.approval_policy || {}) };
   if (o.plan_approval !== undefined) approval.plan = o.plan_approval; // documented alias: orch.plan_approval
@@ -248,6 +251,7 @@ export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
       policy: o.policy || 'policy.default.json',
       // the spec's `orch.rules` (a rules layer) is stored as rules_layer: orch.rules is the snapshot summary the engine writes (docs/rules-design.md, Implementation notes)
       ...(o.rules !== undefined ? { rules_layer: o.rules } : {}),
+      ...(o.drafted !== undefined ? { drafted: { tier: o.drafted.tier } } : {}),
       ...(o.accept_repo_loosening !== undefined ? { accept_repo_loosening: o.accept_repo_loosening } : {}),
       check_allowlist: o.check_allowlist || null,
       governor: o.governor || {},

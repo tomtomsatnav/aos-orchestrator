@@ -53,7 +53,7 @@ export function goalDetail(sup, id) {
   const evs = readEvents(dir, { limit: 25 });
   return {
     ...goalSummary(sup, id), description: goal.description || '',
-    criteria: goal.success_criteria.map((c) => ({ id: c.id, text: c.text, met: !!c.met })),
+    criteria: goal.success_criteria.map((c) => ({ id: c.id, text: c.text, met: !!c.met, ...(c.verify === 'human' ? { verify: 'human', needs_confirmation: !c.met } : {}) })),
     tasks: tasks.map((t) => {
       const log = t.orch.attempt_log || [];
       const ran = log.reduce((s, a) => s + Math.max(0, ((a.ended_at ? Date.parse(a.ended_at) : now) - Date.parse(a.started_at)) / 1000 || 0), 0);

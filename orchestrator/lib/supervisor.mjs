@@ -290,6 +290,18 @@ export class Supervisor {
     return this._command(id, { cmd: 'reject-plan', by });
   }
 
+  /** A human confirms a verify:"human" criterion (CLI `confirm`, control server). Only when every task is done; the engine applies it and finishes the goal. */
+  async confirmCriterion(id, criterion, by) {
+    const { S } = this.state(id);
+    const c = S.goal.success_criteria.find((x) => x.id === criterion);
+    if (!c) throw new SupervisorError(404, 'not_found', 'no such criterion');
+    if (c.verify !== 'human') throw new SupervisorError(409, 'not_human_criterion', 'this criterion is verified by a check, not by a human');
+    if (TERMINAL.has(S.goal.status)) throw new SupervisorError(409, 'invalid_state', `goal is ${S.goal.status}`);
+    if (!(S.tasks.length > 0 && S.tasks.every((t) => t.status === 'done'))) throw new SupervisorError(409, 'not_ready', 'confirm only after every task is done');
+    if (c.met) throw new SupervisorError(409, 'invalid_state', 'already confirmed');
+    return this._command(id, { cmd: 'confirm', criterion, by });
+  }
+
   decideApproval(goalId, approvalId, decision, scope, by) {
     const { dir } = this.state(goalId);
     const ad = paths(dir).approvals;

@@ -84,10 +84,25 @@ approval screen and the rules hash is bound into the plan approval. Rules are sn
 re-verified at every dispatch.
 
 ```
+aos-orch draft "<prompt>" --repo <path> [--out goal.json] [--profile strict|node-library|docs-only] [--answers "..."]
+aos-orch confirm <goal-id> <criterion-id>
 aos-orch rules show [goal-id]          # defaults + user layer, or the goal's snapshot (what the approval screen prints)
 aos-orch rules check <file> [--layer user|repo|goal]   # validate a rules file and show what it would change
 aos-orch rules explain <goal-id> <task-id> '{"tool_name":"Bash","tool_input":{"command":"ls"}}'   # dry-run the policy: decision + rule id
 ```
+
+### Prompt to goal (`aos-orch draft`)
+
+`aos-orch draft "add a retry to the fetcher" --repo ~/code/app` makes one model call with no tools (`--tools ""`, one turn, `budgets.draft_usd_cap`
+$0.10, tier `plan.draft_tier`, an empty working directory) and prints a draft for review: each criterion with its sandboxed check command
+and the allowlist rule that permits it, or `HUMAN REVIEW`, the lowered budgets, the rules hash and any questions. It writes `goal.json`
+(0600, never overwrites) and creates nothing else; `aos-orch run goal.json` is a separate step. The model output is untrusted and is
+validated against the compiled rules: a check argv must already be on the rules' check allowlist (criteria never widen it), budgets may
+only be lower than the rules, no rule/trust/sandbox/approval field is accepted, control and bidi characters are rejected, and a draft needs
+at least 2 criteria (or a human-review one). A vague prompt returns up to 3 `questions` (exit 3); answer with `--answers` (two rounds at most).
+One invalid output is retried once on sonnet. A `verify: "human"` criterion keeps the goal `blocked` ("awaiting human confirmation: c2")
+until `aos-orch confirm <goal> c2` (or `POST /api/goals/:id/criteria/:cid/confirm`) once every task is done. A goal made from a draft records
+`drafted: true` and `draft_tier` on `goal.created`.
 
 ## Security model (what is enforced now, what is not)
 
@@ -292,7 +307,9 @@ Endpoints (all JSON; errors are `{error:{code,message}}`; unknown route 404, wro
 | `POST /auth/logout` | revokes the calling session |
 | `GET /api/health` | `{ok, version, goals, workers:{running,max}, governor:{five_hour, seven_day, paused, resume_at, reason}}` (utilisation 0..1 or null) |
 | `GET /api/goals` | `{goals:[GoalSummary]}` |
-| `POST /api/goals` | body per the brief; 201 `{goal: GoalDetail, notices}`; 400 invalid, 422 repo/config refusal. Extension: optional `check_allowlist:[string]` (commands the planner may use in checks; without it a planned goal cannot have checks). `plan_approval` may only be `"human"`; criteria are `{text}` only (met when all tasks are done) |
+| `POST /api/goals` | body per the brief; 201 `{goal: GoalDetail, notices}`; 400 invalid, 422 repo/config refusal. Extension: optional `check_allowlist:[string]` (commands the planner may use in checks; without it a planned goal cannot have checks). `plan_approval` may only be `"human"`; criteria are `{text}` (met when all tasks are done), or `{text, check:{argv,timeout_s}}` (the argv must already be allowed by the rules or by `check_allowlist` in the same body: 422 `criterion_refused` otherwise), or `{text, verify:"human"}`. Optional `profile` and `drafted:{tier}` |
+| `POST /api/goals/draft` `{prompt, repo, profile?}` | 200 `{draft, errors, questions, rules_hash, draft_tier}`. One no-tools model call; **creates no goal** (only `POST /api/goals` does). Same auth as goal creation; 6 per minute per session, then 429 |
+| `POST /api/goals/:id/criteria/:cid/confirm` | a human confirms a `verify:"human"` criterion (only once every task is done); 409 otherwise; audited |
 | `GET /api/goals/:id` | `{goal: GoalDetail}` |
 | `POST /api/goals/:id/pause\|resume\|cancel\|kill` | kill needs `{confirm:true}`; 200 `{goal, applied}`; 409 on terminal / not-resumable goals |
 | `PATCH /api/goals/:id/budgets` | any of `max_new_tokens max_wall_s max_parallel max_attempts` (+ `max_usd max_ticks`); integers in closed ranges |

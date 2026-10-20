@@ -1,0 +1,42 @@
+{
+  "_comment": "aos-orch draft: one valid draft (a check on an allowlisted command plus a human-review criterion).",
+  "draft": {
+    "behavior": "success",
+    "plan_format": "fenced",
+    "usage": {
+      "input_tokens": 120,
+      "output_tokens": 300
+    },
+    "draft": {
+      "title": "Add alpha file",
+      "description": "Create a.txt containing alpha and keep the README readable.",
+      "success_criteria": [
+        {
+          "id": "c1",
+          "text": "a.txt holds alpha",
+          "check": {
+            "argv": [
+              "grep",
+              "-qx",
+              "alpha",
+              "a.txt"
+            ],
+            "timeout_s": 30
+          }
+        },
+        {
+          "id": "c2",
+          "text": "the README reads well",
+          "verify": "human"
+        }
+      ],
+      "budgets": {
+        "max_new_tokens": 500000,
+        "max_attempts": 2
+      },
+      "risks": [
+        "README wording is subjective"
+      ]
+    }
+  }
+}

@@ -241,6 +241,7 @@ export class Engine {
           break;
         }
         case 'accept-repo-loosening': this._acceptRepoLoosening(S, c); break;
+        case 'confirm': this._confirmCriterion(S, c); break;
         case 'approve-plan':
           if (goal.orch.plan_state === 'awaiting_approval') { this._activate(S, 'human', c.reviewed); saveState(this.dir, S); }
           break;
@@ -255,6 +256,29 @@ export class Engine {
         default: this.ev('human.note', 'human', null, { note: `ignored unknown command ${String(c.cmd).slice(0, 40)}` });
       }
     }
+  }
+
+  /**
+   * `confirm <goal> <criterion>`: a human confirms a verify:"human" criterion. Only once every task is done (a human cannot pre-confirm work that has not happened),
+   * only for a criterion that asks for it. A goal that was blocked on exactly this ("awaiting human confirmation") goes back to active, and the verify step of the
+   * same tick finishes it (achieved) or re-blocks it on the next unconfirmed criterion.
+   */
+  _confirmCriterion(S, c) {
+    const goal = S.goal; const refuse = (reason) => this.ev('orch.criterion.refused', 'orchestrator', null, { reason, criterion: String(c.criterion).slice(0, 40) });
+    const crit = goal.success_criteria.find((x) => x.id === c.criterion);
+    if (!crit) return refuse('no such criterion');
+    if (crit.verify !== 'human') return refuse('this criterion is verified by a check, not by a human');
+    if (TERMINAL.has(goal.status)) return refuse(`goal is ${goal.status}`);
+    if (!(S.tasks.length > 0 && S.tasks.every((t) => t.status === 'done'))) return refuse('confirm only after every task is done');
+    if (crit.met) return refuse('already confirmed');
+    crit.met = true; crit.confirmed = { by: String(c.by || 'cli').slice(0, 60), at: iso(this.now()) };
+    this.ev('orch.criterion.confirmed', 'human', null, { criterion: crit.id, by: crit.confirmed.by, rule: 'ask_human.on_human_criterion' });
+    this.ev('goal.updated', 'orchestrator', null, { criterion: crit.id, met: true });
+    if (goal.status === 'blocked' && String(goal.blocked_reason || '').startsWith('awaiting human confirmation') && !goal.orch.halt_reason) {
+      goal.status = 'active'; delete goal.blocked_reason; goal.orch.reported = false;
+      this.ev('orch.goal.unblocked', 'human', null, { previous: 'blocked', why: 'criterion confirmed' });
+    }
+    saveState(this.dir, S);
   }
 
   /** Resume a goal that stopped on a budget cap, once the caps were raised. Other blocks (failed task, rejected plan) stay blocked. */
@@ -691,7 +715,8 @@ export class Engine {
     const results = {};
     for (const c of goal.success_criteria) {
       let met;
-      if (c.check) { const r = await runCheck(c.check, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('criteria') }), ...this._sandboxOpts(goal, wt, 'criteria') }); results[c.id] = r; met = r.ok; }
+      if (c.verify === 'human') met = c.met === true; // only a human's `confirm` sets it (never the engine, never a check)
+      else if (c.check) { const r = await runCheck(c.check, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('criteria') }), ...this._sandboxOpts(goal, wt, 'criteria') }); results[c.id] = r; met = r.ok; }
       else if (Array.isArray(c.requires) && c.requires.length) met = c.requires.every((id) => S.tasks.find((t) => t.id === id)?.status === 'done');
       else met = allDone;
       if (met !== !!c.met) { c.met = met; this.ev('goal.updated', 'orchestrator', null, { criterion: c.id, met }); }
@@ -758,7 +783,9 @@ export class Engine {
       goal.status = 'achieved'; goal.updated_at = iso(this.now());
       this.ev('goal.achieved', 'orchestrator', null, { criteria: crit.length });
     } else if (allDone) {
-      goal.status = 'blocked'; goal.blocked_reason = `all tasks done but criteria not met: ${crit.filter((c) => !c.met).map((c) => c.id).join(', ')}`;
+      const unmet = crit.filter((c) => !c.met);
+      goal.status = 'blocked';
+      goal.blocked_reason = unmet.every((c) => c.verify === 'human') ? `awaiting human confirmation: ${unmet.map((c) => c.id).join(', ')}` : `all tasks done but criteria not met: ${unmet.map((c) => c.id).join(', ')}`;
       this.ev('goal.blocked', 'orchestrator', null, { reason: goal.blocked_reason });
     }
   }
@@ -1120,7 +1147,7 @@ export async function createGoal(orchDir, spec, { clock = realClock } = {}) {
   const dir = createGoalDir(orchDir, goal, spec.plan || null);
   if (rr.rules) atomicWrite(path.join(dir, REPO_RULES_FILE), rr.rules);
   const notices = instructionNotice(info.root, instructions);
-  appendEvent(dir, { type: 'goal.created', actor: 'human', goal_id: goal.id, data: { title: goal.title, criteria: goal.success_criteria.length } }, clock);
+  appendEvent(dir, { type: 'goal.created', actor: 'human', goal_id: goal.id, data: { title: goal.title, criteria: goal.success_criteria.length, ...(goal.orch.drafted ? { drafted: true, draft_tier: goal.orch.drafted.tier } : {}) } }, clock);
   if (notices.length) appendEvent(dir, { type: 'orch.repo_instructions', actor: 'orchestrator', goal_id: goal.id, data: { notices, files: Object.fromEntries(Object.entries(instructions).filter(([, h]) => h).map(([k, h]) => [k, h.slice(0, 12)])) } }, clock);
   if (findings.length) {
     notices.push(`WARNING: --trust-repo-config: repo configuration accepted without review by the engine: ${formatFindings(findings)}`);

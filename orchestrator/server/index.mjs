@@ -5,9 +5,10 @@ import http from 'node:http';
 import path from 'node:path';
 import { Auth, SESSION_TTL_MS } from './auth.mjs';
 import { loginPage } from './login-page.mjs';
-import { goalSummary, goalDetail, planView, approvalView, eventView, scrub } from './views.mjs';
+import { goalSummary, goalDetail, planView, approvalView, eventView, scrub, scrubDeep } from './views.mjs';
 import { SupervisorError, validateRepo } from '../lib/supervisor.mjs';
 import { ID_RE, readEvents, goalDirOf, readJSON, paths } from '../lib/state.mjs';
+import { draftGoal, draftRules, checkProblem, PROFILES } from '../lib/draft.mjs';
 
 export const SERVER_VERSION = '0.3.0';
 export const DEFAULT_PORT = 4319;
@@ -35,12 +36,19 @@ const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 
 export function parseGoalBody(b) {
   if (!isObj(b)) throw bad('body must be a JSON object');
-  exact(b, ['title', 'description', 'repo', 'base_branch', 'success_criteria', 'budgets', 'trust_repo_config', 'plan_approval', 'unsandboxed_checks', 'check_allowlist'], 'goal');
+  exact(b, ['title', 'description', 'repo', 'base_branch', 'success_criteria', 'budgets', 'trust_repo_config', 'plan_approval', 'unsandboxed_checks', 'check_allowlist', 'profile', 'drafted'], 'goal');
   const out = { title: str(b.title, 'title', 1, 200), description: b.description === undefined ? '' : str(b.description, 'description', 0, 8000), repo: str(b.repo, 'repo', 1, 1024) };
   out.base_branch = b.base_branch === undefined ? 'main' : str(b.base_branch, 'base_branch', 1, 100);
   if (!BRANCH_RE.test(out.base_branch)) throw bad('base_branch is not a safe branch name');
   if (!Array.isArray(b.success_criteria) || b.success_criteria.length < 1 || b.success_criteria.length > 20) throw bad('success_criteria must be an array of 1-20 items');
-  out.success_criteria = b.success_criteria.map((c, i) => { if (!isObj(c)) throw bad(`success_criteria[${i}] must be an object`); exact(c, ['text'], `success_criteria[${i}]`); return { text: str(c.text, `success_criteria[${i}].text`, 1, 500) }; });
+  out.success_criteria = b.success_criteria.map((c, i) => { if (!isObj(c)) throw bad(`success_criteria[${i}] must be an object`); exact(c, ['text', 'check', 'verify'], `success_criteria[${i}]`);
+    const o = { text: str(c.text, `success_criteria[${i}].text`, 1, 500) };
+    if (c.verify !== undefined) { if (c.verify !== 'human') throw bad(`success_criteria[${i}].verify must be "human"`); if (c.check !== undefined) throw bad(`success_criteria[${i}]: a check or verify "human", not both`); o.verify = 'human'; }
+    if (c.check !== undefined) { // validated against the compiled rules by the handler (a criterion check never widens the allowlist)
+      if (!isObj(c.check) || !Array.isArray(c.check.argv)) throw bad(`success_criteria[${i}].check must be {argv, timeout_s}`);
+      o.check = { argv: c.check.argv, timeout_s: c.check.timeout_s };
+    }
+    return o; });
   const B = b.budgets === undefined ? {} : b.budgets;
   if (!isObj(B)) throw bad('budgets must be an object');
   exact(B, ['max_new_tokens', 'max_wall_s', 'max_parallel', 'max_attempts'], 'budgets');
@@ -57,6 +65,8 @@ export function parseGoalBody(b) {
     if (!Array.isArray(b.check_allowlist) || b.check_allowlist.length > 20) throw bad('check_allowlist must be an array of up to 20 strings');
     out.check_allowlist = b.check_allowlist.map((s, i) => str(s, `check_allowlist[${i}]`, 1, 100));
   }
+  if (b.profile !== undefined) { if (typeof b.profile !== 'string' || !Object.hasOwn(PROFILES, b.profile)) throw bad('profile must be one of strict, node-library, docs-only'); out.profile = b.profile; }
+  if (b.drafted !== undefined) { if (!isObj(b.drafted)) throw bad('drafted must be an object'); exact(b.drafted, ['tier'], 'drafted'); if (!['haiku', 'sonnet'].includes(b.drafted.tier)) throw bad('drafted.tier must be haiku or sonnet'); out.drafted = { tier: b.drafted.tier }; }
   return out;
 }
 
@@ -72,6 +82,7 @@ export function createControlServer(opts) {
   const extraOrigins = new Set([...(opts.allowedOrigins || ['http://127.0.0.1:4318', 'http://localhost:4318']), dashboardUrl.origin]);
   let port = opts.port ?? DEFAULT_PORT;
   const sseClients = new Set();
+  const draftHits = new Map(); const draftBusy = new Set(); const DRAFT_PER_MIN = 6; const DRAFT_PARALLEL = 3;
   let sseSeq = 0;
 
   const hosts = () => new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
@@ -125,16 +136,43 @@ export function createControlServer(opts) {
     ['POST', '/api/goals', async (c) => {
       const p = parseGoalBody(c.body);
       const root = await validateRepo(p.repo, { orchDir: sup.orchDir });
+      if (p.success_criteria.some((c) => c.check)) { // a criterion check must already be allowed by the rules (user + repo + profile layers) or by the allowlist typed in the same request: criteria never widen it
+        const dr = await draftRules({ orchDir: sup.orchDir, root, branch: p.base_branch, profile: p.profile || 'strict' });
+        if (!dr.ok) throw new HttpError(422, 'goal_refused', scrub(`rules refused: ${dr.errors.slice(0, 3).join('; ')}`).slice(0, 1500));
+        const c0 = dr.comp.compiled; const plus = { ...c0, checks: { ...c0.checks, allowlist: [...c0.checks.allowlist, ...(p.check_allowlist || []).map((cmd, i) => ({ id: `form${i}`, cmd, layer: 'goal' }))] } };
+        p.success_criteria.forEach((c, i) => { const why = c.check ? checkProblem(c.check, plus) : null; if (why) throw new HttpError(422, 'criterion_refused', scrub(`success_criteria[${i}].check: ${why}`).slice(0, 500)); });
+      }
       const id = `g-${new Date(clock.now()).toISOString().slice(0, 10).replace(/-/g, '')}-${slug(p.title)}-${Math.random().toString(16).slice(2, 6)}`;
       const spec = { id, title: p.title, description: p.description, success_criteria: p.success_criteria,
         budget: { max_ticks: 100000, max_usd: 5, max_wall_clock_s: p.budgets.max_wall_s ?? 7200 },
-        orch: { repo: root, base_branch: p.base_branch, trust_repo_config: p.trust_repo_config, unsandboxed_checks: p.unsandboxed_checks, plan_approval: 'required',
+        orch: { repo: root, base_branch: p.base_branch, trust_repo_config: p.trust_repo_config, ...(p.profile && PROFILES[p.profile] ? { rules: PROFILES[p.profile] } : {}), ...(p.drafted ? { drafted: p.drafted } : {}), unsandboxed_checks: p.unsandboxed_checks, plan_approval: 'required',
           ...(p.check_allowlist ? { check_allowlist: p.check_allowlist } : {}),
           budgets: Object.fromEntries(['max_new_tokens', 'max_parallel', 'max_attempts'].filter((k) => p.budgets[k] !== undefined).map((k) => [k, p.budgets[k]])) } };
       let made;
       try { made = await sup.createGoal(spec); } catch (e) { throw new HttpError(422, 'goal_refused', scrub(String(e.message)).slice(0, 1500)); }
       aud(c, made.goal.id, 'goal.create', { title: p.title.slice(0, 100), trust_repo_config: p.trust_repo_config, unsandboxed_checks: p.unsandboxed_checks });
       return [201, { goal: goalDetail(sup, made.goal.id), notices: made.notices.map(scrub) }];
+    }],
+    // R12: a draft is a PROPOSAL. This route never creates a goal (only an explicit POST /api/goals does); it is authenticated like goal creation and rate-limited per session.
+    ['POST', '/api/goals/draft', async (c) => {
+      if (!isObj(c.body)) throw bad('body must be a JSON object'); exact(c.body, ['prompt', 'repo', 'profile'], 'draft');
+      const prompt = str(c.body.prompt, 'prompt', 1, 6000); const repo = str(c.body.repo, 'repo', 1, 1024);
+      let profile = 'strict'; if (c.body.profile !== undefined) { if (typeof c.body.profile !== 'string' || !Object.hasOwn(PROFILES, c.body.profile)) throw bad('profile must be one of strict, node-library, docs-only'); profile = c.body.profile; }
+      const who = auth.auditId(c.principal); const now = clock.now();
+      const recent = (draftHits.get(who) || []).filter((t) => now - t < 60000);
+      if (recent.length >= DRAFT_PER_MIN || draftBusy.has(who) || draftBusy.size >= DRAFT_PARALLEL) throw new HttpError(429, 'rate_limited', 'too many draft requests; wait a moment', { 'Retry-After': '10' });
+      draftHits.set(who, [...recent, now]); draftBusy.add(who);
+      let r; try { r = await draftGoal({ orchDir: sup.orchDir, repo, prompt, profile, env: sup.env, spawnFn: sup.spawnFn, claudeBin: sup.claudeBin, ...(opts.draft || {}) }); } finally { draftBusy.delete(who); }
+      log(`draft ${r.ok ? 'ok' : 'refused'} tier=${r.tier} tokens=${r.usage.new_tokens}`);
+      return scrubDeep({ draft: r.draft, errors: r.errors, questions: r.questions, rules_hash: r.rules_hash, draft_tier: r.tier, profile: r.profile, usage: r.usage });
+    }],
+    ['POST', '/api/goals/:id/criteria/:cid/confirm', async (c) => {
+      const id = goalId(c.params); const b = confirmBody(c.body); exact(b, [], 'confirm');
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(c.params.cid)) throw bad('invalid criterion id');
+      sup.state(id);
+      aud(c, id, 'criterion.confirm', { criterion: c.params.cid });
+      await sup.confirmCriterion(id, c.params.cid, by(c));
+      return { goal: goalDetail(sup, id) };
     }],
     ['GET', '/api/goals/:id', (c) => { const id = goalId(c.params); sup.state(id); return { goal: goalDetail(sup, id) }; }],
     ['POST', '/api/goals/:id/pause', lifecycle('pause')],

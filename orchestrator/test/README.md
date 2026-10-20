@@ -57,6 +57,7 @@ Step fields (all optional):
 | `message` | final assistant text / `result.result` (for `rate_limit` the limit text) |
 | `rate_limit` | `{five_hour_utilization, seven_day_utilization, five_hour_resets_at, seven_day_resets_at, status?}` for the `rate_limit_event`. Default is a benign `allowed` event (0.14 / 0.30, resets in the future). `status` is derived (`>=1` rejected, `>=0.75` allowed_warning) unless given |
 | `permission_denials` | `[{tool_name, tool_input, reason?}]` appended to `result.permission_denials` and emitted as `system/permission_denied` (in addition to hook-made denials) |
+| `draft` | `aos-orch draft` only: the prompt contains the marker `AOS_DRAFT`; the scenario's `draft` key (a Step, or a list with one Step per call, first on haiku, retry on sonnet) is the call. `draft: <object>` on the Step is returned as the result text (`plan_format` applies). Examples: `scenarios/draft-*.json` |
 | `plan` | planner only: object (or string) returned as the result text. `plan_format`: `raw` (default), `fenced` (```` ```json ````), `prose` (text around the JSON). With `--json-schema` it is also in `structured_output` |
 | `ignore_sigterm` | `true`: ignore SIGTERM (only SIGKILL stops it) |
 | `api_error_status` | `rate_limit` only; default 429 |

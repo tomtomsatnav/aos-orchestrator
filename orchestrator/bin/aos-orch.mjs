@@ -5,6 +5,8 @@
 //   aos-orch pause|resume|cancel|kill|approve-plan|reject-plan <goal-id>
 //   aos-orch serve [--port 4319] [--max-workers N] [--dashboard-url URL] [--origins a,b] [--leave-workers|--kill-workers] [--drain-s N]
 //   aos-orch login-link [--port N] | token [--show] | goals [--json]
+//   aos-orch draft "<prompt>" --repo <path> [--out goal.json] [--profile strict|node-library|docs-only] [--answers "..."] [--branch main]
+//   aos-orch confirm <goal-id> <criterion-id>
 //   aos-orch rules show [goal-id] | rules check <file> [--layer user|repo|goal] | rules explain <goal-id> <task-id> '<tool json>'
 //   aos-orch approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
 // State lives under AOS_ORCH_DIR (default ${CLAUDE_PLUGIN_DATA or ~/.claude/plugins/data/aos-dashboard-aos-local}/orch).
@@ -16,6 +18,7 @@ import { reviewView, renderReview, planHash, tasksHash } from '../lib/plan.mjs';
 import { rulesFingerprint } from '../lib/rules.mjs';
 import { renderRulesFor, renderUserRules, checkRulesFile, explainCall } from '../lib/rules-store.mjs';
 import { q } from '../lib/ctrl.mjs';
+import { draftGoal, renderDraft, PROFILES } from '../lib/draft.mjs';
 import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
@@ -26,10 +29,11 @@ const argv = process.argv.slice(2);
 const flags = {}; const pos = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s', 'accept-repo-loosening', 'layer'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
+  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s', 'accept-repo-loosening', 'layer', 'repo', 'out', 'profile', 'answers', 'branch'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
 }
 const [cmd, arg1, arg2] = pos;
 const orch = flags['orch-dir'] ? path.resolve(flags['orch-dir']) : orchRoot();
+
 const out = (o) => console.log(typeof o === 'string' ? o : JSON.stringify(o, null, 2));
 const die = (m, code = 1) => { console.error(`aos-orch: ${m}`); process.exit(code); };
 
@@ -125,6 +129,33 @@ async function main() {
       out(decide(paths(d).approvals, arg2, { decision: cmd, scope: flags['for-task'] ? 'task' : 'once', by: 'cli' }));
       break;
     }
+    case 'draft': { // one no-tools model call proposes a goal; prints it for review and writes goal.json (0600). Never runs it: `aos-orch run goal.json` is a separate, deliberate step.
+      if (!arg1 || typeof flags.repo !== 'string') die('usage: aos-orch draft "<prompt>" --repo <path> [--out goal.json] [--profile strict|node-library|docs-only] [--answers "..."]', 64);
+      const profile = typeof flags.profile === 'string' ? flags.profile : 'strict';
+      if (!Object.hasOwn(PROFILES, profile)) die(`unknown profile ${q(profile.slice(0, 30))}`, 64);
+      const out = path.resolve(typeof flags.out === 'string' ? flags.out : 'goal.json');
+      if (fs.existsSync(out)) die(`${out} already exists; choose another --out (a draft never overwrites a file)`, 64);
+      const request = typeof flags.answers === 'string' ? `${arg1}\n\nAnswers to your questions:\n${flags.answers}` : arg1;
+      const r = await draftGoal({ orchDir: orch, repo: path.resolve(flags.repo), prompt: request, profile, branch: typeof flags.branch === 'string' ? flags.branch : 'main' });
+      console.error(renderDraft(r));
+      if (!r.ok) process.exit(2);
+      if (r.questions.length) { console.error('\nThe model could not tell what "done" means. Answer and run again with --answers "..." (at most 2 rounds), or write goal.json by hand.'); process.exit(3); }
+      fs.writeFileSync(out, `${JSON.stringify(r.spec, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+      console.error(`wrote ${out} (0600). Review and edit it, then: aos-orch run ${out}`);
+      break;
+    }
+    case 'confirm': { // a human confirms a verify:"human" criterion once every task is done
+      if (!arg1 || !arg2) die('usage: aos-orch confirm <goal-id> <criterion-id>', 64);
+      const d = resolveGoalDir(arg1); const S = loadState(d); const c = S.goal.success_criteria.find((x) => x.id === arg2);
+      if (!c) die(`no such criterion: ${q(arg2.slice(0, 40))}`, 2);
+      if (c.verify !== 'human') die('that criterion is verified by a check, not by a human', 2);
+      if (c.met) die('that criterion is already confirmed', 2);
+      if (!(S.tasks.length && S.tasks.every((t) => t.status === 'done'))) die('confirm only after every task is done', 2);
+      console.error(`CONFIRMING (you are saying this is true): ${q(c.text)}`);
+      enqueueCommand(d, { cmd: 'confirm', by: 'cli', criterion: arg2 });
+      out(`confirm: queued; the engine applies it at its next tick${lockStatus(d).owner_alive ? '' : ` (no engine is running: it applies on the next \`aos-orch run ${arg1}\` or when \`aos-orch serve\` is started)`}`);
+      break;
+    }
     case 'rules': {
       const sub = arg1; const [, , , a3, a4] = pos;
       if (sub === 'show') {
@@ -184,7 +215,7 @@ async function main() {
       break;
     }
     default:
-      die('usage: aos-orch run|serve|login-link|token|goals|status|pause|resume|cancel|kill|approve-plan|reject-plan|approvals|approve|deny|rules ...', 64);
+      die('usage: aos-orch run|serve|login-link|token|goals|status|pause|resume|cancel|kill|approve-plan|reject-plan|approvals|approve|deny|draft|confirm|rules ...', 64);
   }
 }
 main().catch((e) => die(e.message));

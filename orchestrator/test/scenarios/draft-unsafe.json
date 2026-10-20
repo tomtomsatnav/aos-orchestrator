@@ -1,0 +1,40 @@
+{
+  "_comment": "Every output is invalid (unknown field, budget above the rules, off-allowlist argv): the draft fails after the one retry.",
+  "draft": {
+    "behavior": "success",
+    "usage": {
+      "input_tokens": 120,
+      "output_tokens": 300
+    },
+    "draft": {
+      "title": "Add alpha file",
+      "description": "Create a.txt containing alpha and keep the README readable.",
+      "success_criteria": [
+        {
+          "id": "c1",
+          "text": "a.txt holds alpha",
+          "check": {
+            "argv": [
+              "rm",
+              "-rf",
+              "x"
+            ],
+            "timeout_s": 30
+          }
+        },
+        {
+          "id": "c2",
+          "text": "the README reads well",
+          "verify": "human"
+        }
+      ],
+      "budgets": {
+        "max_new_tokens": 999999999999
+      },
+      "risks": [
+        "README wording is subjective"
+      ],
+      "trust_repo_config": true
+    }
+  }
+}
