@@ -1,0 +1,2 @@
+Vendored copy of the AOS-1 JSON Schemas from https://github.com/tomtomsatnav/aos-1-spec at tag v1.0.0.
+orchestrator/lib/schema.mjs loads them via ../../schemas. Do not edit here; update from the spec repo.

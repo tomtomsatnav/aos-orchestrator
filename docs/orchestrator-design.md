@@ -7,7 +7,7 @@ Spike verdicts are cited as **[S-n]**, the row numbers of the spike results tabl
 
 **Goals.** Turn one human-written Goal into merged-ready work on a branch: plan once with Opus, run headless Claude Code
 workers in isolated git worktrees on the cheapest model tier that passes, verify every task with real commands, and
-integrate the results onto `aos/<goal>/integration`. Implement AOS-1 (SPEC.md §3–§7) with real dispatch.
+integrate the results onto `aos/<goal>/integration`. Implement AOS-1 ([SPEC.md](https://github.com/tomtomsatnav/aos-1-spec/blob/v1.0.0/SPEC.md) §3–§7) with real dispatch.
 
 **Non-goals.** No LLM in the control loop. No auto-merge to `main`, no push, no deploys. No remote hosts, no multi-user
 server, no Windows support in v1. No replacement for interactive Claude Code: the orchestrator runs well-specified work.

@@ -1,8 +1,7 @@
 # Orchestrator state contract (what the dashboard relies on)
 
-The monitor (`monitor.mjs`, port 4318) never imports or calls the orchestrator. Its whole coupling is the files below, the
-hook env tags, and two ports. Anything that writes this layout (the in-repo engine, or the orchestrator once it lives in its
-own repo) is compatible. Source of truth for the mapping: the comment block above `loadGoalEntry` in `monitor.mjs`.
+The dashboard monitor (`monitor.mjs` in https://github.com/tomtomsatnav/agent-orchestration-standard, port 4318) never imports or calls the orchestrator. Its whole coupling is the files below, the
+hook env tags, and two ports. Anything that writes this layout (this engine, or any other orchestrator) is compatible. Source of truth for the mapping: the comment block above `loadGoalEntry` in `monitor.mjs`.
 
 ## On-disk layout (read-only for the monitor)
 
