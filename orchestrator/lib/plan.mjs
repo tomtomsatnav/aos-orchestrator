@@ -99,7 +99,7 @@ export function findCycle(tasks) {
   return seen === tasks.length ? [] : [...indeg].filter(([, n]) => n > 0).map(([id]) => id);
 }
 
-const UNSAFE_CHECK_CMDS = new Set(['sh', 'bash', 'zsh', 'fish', 'eval', 'exec', 'sudo', 'su', 'curl', 'wget', 'nc', 'ssh', 'scp', 'rsync', 'env', 'xargs', 'open', 'osascript']);
+export const UNSAFE_CHECK_CMDS = new Set(['sh', 'bash', 'zsh', 'fish', 'eval', 'exec', 'sudo', 'su', 'curl', 'wget', 'nc', 'ssh', 'scp', 'rsync', 'env', 'xargs', 'open', 'osascript']);
 
 /**
  * Strict validation. opts: {max_tasks, check_allowlist, taskIdPrefix?}. Returns {ok, errors[], tasks[] (normalised)}.
