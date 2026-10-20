@@ -321,7 +321,7 @@ test('condition 3: status / approvals / approve-plan print the exact commands, t
   assert.equal(r.code, 4, r.err); assert.equal(JSON.parse(r.out).plan_state, 'awaiting_approval');
   r = await run(['status', 'g-rev'], env);
   const st = JSON.parse(r.out);
-  assert.deepEqual(st.plan_review[0], { id: 't1', model_tier: 'sonnet', path_scope: ['a.txt', 'docs/**'], depends_on: [], allowed_commands: ['ls -la'], checks: [{ command: 'node --test test/x.test.mjs', argv: ['node', '--test', 'test/x.test.mjs'], timeout_s: 120 }] });
+  assert.deepEqual(st.plan_review[0], { id: 't1', title: 'Write a.txt', description: 'Create a.txt', output_contract: 'a.txt holds alpha', acceptance: ['a.txt holds alpha'], model_tier: 'sonnet', path_scope: ['a.txt', 'docs/**'], depends_on: [], allowed_commands: ['ls -la'], checks: [{ command: 'node --test test/x.test.mjs', argv: ['node', '--test', 'test/x.test.mjs'], timeout_s: 120 }] });
   for (const re of [/PLAN FOR REVIEW/, /task t1\s+tier=sonnet\s+scope=a\.txt, docs\/\*\*/, /worker commands: ls -la/, /check \(sandboxed, 120s\): node --test test\/x\.test\.mjs/]) assert.match(r.err, re);
   r = await run(['approvals', 'g-rev'], env);
   assert.match(r.err, /node --test test\/x\.test\.mjs/); assert.match(r.err, /tier=sonnet/);

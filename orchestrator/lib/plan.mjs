@@ -8,7 +8,7 @@ import { commandAllowed } from './checks.mjs';
 import crypto from 'node:crypto';
 import { evaluate, DEFAULT_POLICY, allowlistEntryProblem } from './policy.mjs';
 import { ID_RE, iso } from './state.mjs';
-import { scopeHitsDeny, globCompileProblem } from './glob.mjs';
+import { scopeHitsDeny, globCompileProblem, MAX_SCOPE_LEN } from './glob.mjs';
 import { CTRL_RE, escCtrl } from './ctrl.mjs';
 
 export const TIERS = ['haiku', 'sonnet', 'opus'];
@@ -85,6 +85,7 @@ export function validateScope(g) {
   if (BROAD.has(g)) return `path_scope "${g}" is too broad`;
   if (BAD_SCOPE_ROOTS.test(g.replace(/^\.\//, ''))) return `path_scope "${g}" targets protected files`;
   if (CTRL_RE.test(g)) return 'path_scope contains control characters';
+  if (g.length > MAX_SCOPE_LEN) return `path_scope is longer than ${MAX_SCOPE_LEN} characters`;
   const p = globCompileProblem(g); if (p) return `path_scope "${g}" ${p}`;
   return null;
 }
@@ -222,20 +223,30 @@ export const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex')
 export const planHash = (plan) => sha256(canonical(plan));
 /** What a human reviews, per task, in plain text: tier, path scope, allowed commands and the exact check commands. */
 export function reviewView(tasks) {
-  return tasks.map((t) => { const o = t.orch || t; return { id: t.id, model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
+  return tasks.map((t) => { const o = t.orch || t; return { id: t.id, title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
     allowed_commands: [...(o.allowed_commands || [])], checks: (o.checks || []).map((c) => ({ command: c.argv.join(' '), argv: c.argv, timeout_s: c.timeout_s })) }; });
 }
 /** Hash of everything the approval covers in the engine's tasks (tier excluded: the retry ladder escalates it legitimately). */
-export function tasksHash(tasks) {
+export function tasksHash(tasks, v = 1) {
   return sha256(canonical(tasks.map((t) => { const o = t.orch || t; return { id: t.id, depends_on: t.depends_on || [], path_scope: o.path_scope, allowed_commands: o.allowed_commands || [],
-    allowed_tools: o.allowed_tools || null, checks: (o.checks || []).map((c) => ({ argv: c.argv, timeout_s: c.timeout_s })) }; })));
+    allowed_tools: o.allowed_tools || null, checks: (o.checks || []).map((c) => ({ argv: c.argv, timeout_s: c.timeout_s })),
+    // v2: the text that reaches the worker prompt is covered too (a tasks.json edit of the description or the done-criteria is a plan change). v1 (goals approved before) omits it.
+    ...(v >= 2 ? { title: t.title ?? null, description: o.description ?? null, output_contract: t.output_contract ?? null, acceptance: t.acceptance || [] } : {}) }; })));
 }
+/** The tasks-hash version of a goal: 2 once the engine created its plan with v2 (goal.orch.tasks_hash_v), 1 for a goal whose plan predates v2 (its approval must keep verifying). */
+export const tasksHashV = (goal) => { const o = goal?.orch || {}; const fp = o.plan_fingerprint || o.plan_approval; return fp ? (fp.tasks_hash_v || 1) : (o.tasks_hash_v || 1); };
+export const tasksHashFor = (goal, tasks) => tasksHash(tasks, tasksHashV(goal));
 /** Plain-text rendering of reviewView for `status` / `approvals` / `approve-plan`. `rulesText` (rules-store renderRulesFor) is printed after the tasks, next to the rules hash. */
 export function renderReview(view, rulesText) {
   const L = [];
   const e = escCtrl; const arg = (a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : e(JSON.stringify(String(a))));
   for (const t of view) {
     L.push(`task ${e(t.id)}  tier=${e(t.model_tier)}  scope=${t.path_scope.map(e).join(', ')}${t.depends_on.length ? `  after=${t.depends_on.map(e).join(',')}` : ''}`);
+    const block = (label, text) => { const ls = String(text ?? '').slice(0, 2000).split('\n'); ls.forEach((ln, i) => L.push(i ? `    ${ln}` : `  ${label}: ${ln}`)); }; // what the worker is told (covered by the tasks hash)
+    if (t.title) block('title', t.title);
+    if (t.description) block('description', t.description);
+    if (t.output_contract) block('output contract', t.output_contract);
+    if ((t.acceptance || []).length) block('acceptance', t.acceptance.join(' | '));
     L.push(`  worker commands: ${t.allowed_commands.length ? t.allowed_commands.map(e).join(' | ') : '(none; read-only inspection only)'}`);
     for (const c of t.checks) L.push(`  check (sandboxed, ${e(c.timeout_s)}s): ${c.argv.map(arg).join(' ')}`);
   }

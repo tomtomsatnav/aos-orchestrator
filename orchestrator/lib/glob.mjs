@@ -4,6 +4,10 @@ const cache = new Map();
 export const MAX_MATCH_LEN = 4096;
 export const MAX_BRACE_VARIANTS = 64;
 export const MAX_GLOB_WILDCARDS = 8;
+/** Total matcher cost of a glob: brace variants x tokens, summed over the variants. Above this the glob does not compile (a long literal times 64 variants is 250k states). */
+export const MAX_GLOB_COST = 2048;
+/** A path_scope entry is at most this long. */
+export const MAX_SCOPE_LEN = 512;
 
 /** Parse the inside of a [...] class into inclusive code-unit ranges. A reversed range like `z-a` throws (the regex engine used to). */
 export function classRanges(body) {
@@ -55,7 +59,10 @@ function parseGlob(glob) {
     }
     return vs;
   };
-  return seq(false);
+  const vs = seq(false);
+  const cost = vs.reduce((a, v) => a + v.length, 0);
+  if (cost > MAX_GLOB_COST) throw new Error(`too complex (${vs.length} variant(s) x ${Math.max(...vs.map((v) => v.length))} tokens = ${cost} > ${MAX_GLOB_COST})`);
+  return vs;
 }
 
 /** Linear-time match of one token sequence: a state-set (NFA) simulation, O(path length x tokens), no backtracking. */
@@ -173,18 +180,26 @@ const sampleOf = (g) => g.replace(/\*\*\//g, 'x/').replace(/\*\*/g, 'x').replace
  * policy hook (and the post-task scope check) is the authority and enforces scope_deny on every write whatever the plan-time answer was.
  */
 export function scopeHitsDeny(scope, deny) {
+  // bounded: oversized input, too many variant pairs or too much matching work all answer "overlap" (plan validation then rejects, conservatively)
+  if (typeof scope !== 'string' || typeof deny !== 'string' || scope.length > MAX_SCOPE_LEN || deny.length > 1024) return true;
+  const work = { left: SCOPE_WORK_MAX };
   const clean = (x) => fold(x).replace(/^\.\//, '').replace(/\/+$/, '');
   const hintOf = (x) => [...new Set(clean(x).replace(/[^a-z0-9_.-]/g, ''))].join('');
   const variants = (x, other) => expandBraces(clean(x)).flatMap((v) => expandClasses(v, 64, hintOf(other)));
-  for (const s of variants(scope, deny)) for (const d of variants(deny, scope)) if (scopeHitsDenyPlain(s, d)) return true;
+  const sv = variants(scope, deny); const dv = variants(deny, scope);
+  if (sv.length * dv.length > SCOPE_PAIRS_MAX) return true;
+  for (const s of sv) for (const d of dv) { if (scopeHitsDenyPlain(s, d, work)) return true; if (work.left <= 0) return true; }
   return false;
 }
-function scopeHitsDenyPlain(s, d) {
+const SCOPE_WORK_MAX = 400000; const SCOPE_PAIRS_MAX = 1024;
+function scopeHitsDenyPlain(s, d, work) {
+  work.left -= s.length + d.length + 16;
   if (!hasWild(s) && /\.[^/]+$/.test(s)) return matchGlob(d, s, true); // a literal name with an extension is a file, not a directory
   const dir = (g) => staticPrefix(g).join('/'); const tail = (g) => sampleOf(g.replace(/^(\*\*\/)+/, ''));
   const join = (a, b) => (a ? `${a}/${b}` : b);
   const cands = [sampleOf(s), `${sampleOf(s)}/x`, sampleOf(d), `${sampleOf(d)}/x`, join(dir(s), tail(d)), join(dir(d), tail(s)), join(dir(s), `${tail(d)}/x`), ...(hasWild(d) ? [] : [d, `${d}/x`])];
-  return cands.some((c) => matchGlob(s, c) && matchGlob(d, c, true));
+  for (const c of cands) { work.left -= c.length + s.length + d.length + 16; if (work.left <= 0) return true; if (matchGlob(s, c) && matchGlob(d, c, true)) return true; }
+  return false;
 }
 
 export function scopesOverlap(as, bs) {

@@ -9,10 +9,13 @@ import { escCtrl } from '../lib/ctrl.mjs';
 
 // absolute-path-looking token (leading slash, at least one more segment) -> its basename
 const PATH_RE = /(?<![\w.:/~-])\/(?:[^\s/"'`<>|;,()\\]+\/)+[^\s/"'`<>|;,()\\]*/g;
+/** Absolute paths reduced to their basename, and every control, bidi and invisible character escaped (this text reaches a human's screen). */
 export function scrub(s) {
   if (typeof s !== 'string') return s;
-  return s.replace(PATH_RE, (m) => path.basename(m) || '<path>');
+  return escCtrl(s.replace(PATH_RE, (m) => path.basename(m) || '<path>'));
 }
+/** Free text that may span lines (a description): everything but \n and \t is escaped. */
+const escText = (s) => String(s ?? '').replace(/[\n\t]|[^\n\t]+/g, (m) => (m === '\n' || m === '\t' ? m : escCtrl(m)));
 export function scrubDeep(v, depth = 0) {
   if (typeof v === 'string') return scrub(v);
   if (depth > 8) return null;
@@ -35,7 +38,7 @@ export function goalSummary(sup, id) {
   const used_wall_s = o.started_ms ? Math.max(0, Math.round(((endMs || now) - o.started_ms) / 1000)) : 0;
   const paused = hb.status === 'paused';
   return {
-    id: goal.id, title: goal.title, status: goal.status, repo_name: path.basename(o.repo || ''), created_at: goal.created_at, updated_at: goal.updated_at,
+    id: goal.id, title: escCtrl(goal.title), status: goal.status, repo_name: escCtrl(path.basename(o.repo || '')), created_at: goal.created_at, updated_at: goal.updated_at,
     plan_state: o.plan_state, paused_reason: o.paused_reason || (paused ? 'paused by a human' : null), resume_at: o.resume_at || null,
     budget: { max_new_tokens: o.budgets.max_new_tokens, used_new_tokens: o.usage.new_tokens, max_wall_s: goal.budget.max_wall_clock_s, used_wall_s,
       max_parallel: o.budgets.max_parallel, running: tasks.filter((t) => t.status === 'running').length, max_attempts: o.budgets.max_attempts },
@@ -52,8 +55,8 @@ export function goalDetail(sup, id) {
   const pend = listApprovals(paths(dir).approvals, { status: 'pending' });
   const evs = readEvents(dir, { limit: 25 });
   return {
-    ...goalSummary(sup, id), description: goal.description || '',
-    criteria: goal.success_criteria.map((c) => ({ id: c.id, text: c.text, met: !!c.met, ...(c.verify === 'human' ? { verify: 'human', needs_confirmation: !c.met } : {}) })),
+    ...goalSummary(sup, id), description: escText(goal.description),
+    criteria: goal.success_criteria.map((c) => ({ id: escCtrl(c.id), text: escCtrl(c.text), met: !!c.met, ...(c.verify === 'human' ? { verify: 'human', needs_confirmation: !c.met } : {}) })),
     tasks: tasks.map((t) => {
       const log = t.orch.attempt_log || [];
       const ran = log.reduce((s, a) => s + Math.max(0, ((a.ended_at ? Date.parse(a.ended_at) : now) - Date.parse(a.started_at)) / 1000 || 0), 0);
@@ -81,7 +84,7 @@ export function planView(sup, id) {
   return { plan_state: S.goal.orch.plan_state, plan_hash: h ? h.combined : null, rules: rs ? scrubDeep(rs) : null, rules_text: rs && !rs.tampered ? scrub(renderRulesSummary(rs)) : null,
     tasks: escDeep(S.tasks.map((t) => ({ id: t.id, title: t.title, tier: t.orch.model_tier, depends_on: t.depends_on, path_scope: t.orch.path_scope,
       allowed_commands: t.orch.allowed_commands || [], checks: (t.orch.checks || []).map((c) => ({ cmd: cmdText(c.argv), argv: c.argv, timeout_s: c.timeout_s })),
-      allowed_tools: t.orch.allowed_tools || [] }))) };
+      allowed_tools: t.orch.allowed_tools || [], description: t.orch.description || '', output_contract: t.output_contract || '', acceptance: t.acceptance || [] }))) };
 }
 
 // any <repo>-aos-worktrees/<goal>/<task|integration> prefix (the task's own worktree is gone once it is merged)
@@ -98,7 +101,7 @@ export function approvalView(sup, a) {
   const raw = a.tool === 'Bash' ? a.input?.command : (a.input?.file_path || a.input?.notebook_path || a.input?.pattern || a.input?.path || JSON.stringify(a.input || {}));
   let cwd = null;
   if (a.cwd) { const r = rep(a.cwd); cwd = r.startsWith('<worktree>') ? (r.slice('<worktree>'.length).replace(/^\//, '') || '.') : path.basename(a.cwd); }
-  return { id: `${a.goal}~${a.id}`, goal_id: a.goal, task_id: a.task_id, kind: KIND[a.tool] || 'tool', tool: a.tool, summary: rep(raw).slice(0, 500), reason: scrub(a.reason || ''), cwd,
+  return { id: `${a.goal}~${a.id}`, goal_id: a.goal, task_id: a.task_id, kind: KIND[a.tool] || 'tool', tool: a.tool, summary: escCtrl(rep(raw).slice(0, 500)), reason: scrub(a.reason || ''), cwd: cwd === null ? null : escCtrl(cwd),
     created_at: a.requested_at, expires_at: a.expires_at, status: a.status };
 }
 function safeReal(p) { try { return path.resolve(p); } catch { return p; } }

@@ -13,7 +13,7 @@ import { Governor, checkBudgets } from './governor.mjs';
 import * as G from './git.mjs';
 import * as W from './worker.mjs';
 import { listApprovals, decide } from './approvals.mjs';
-import { planHash, tasksHash, sha256 } from './plan.mjs';
+import { planHash, tasksHashFor, tasksHashV, sha256 } from './plan.mjs';
 import { rulesFingerprint } from './rules.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -209,9 +209,9 @@ export class Supervisor {
   reviewHash(id) {
     const { dir, S } = this.state(id);
     if (!S.tasks.length) return null;
-    const ph = planHash(readJSON(paths(dir).plan)?.plan ?? null); const th = tasksHash(S.tasks);
+    const ph = planHash(readJSON(paths(dir).plan)?.plan ?? null); const th = tasksHashFor(S.goal, S.tasks);
     const rh = rulesFingerprint(S.goal, readJSON(paths(dir).rules, null)); // undefined for legacy goals: their combined hash is unchanged
-    return { combined: sha256(rh ? `${ph}:${th}:${rh}` : `${ph}:${th}`), plan_hash: ph, tasks_hash: th, ...(rh ? { rules_hash: rh } : {}) };
+    return { combined: sha256(rh ? `${ph}:${th}:${rh}` : `${ph}:${th}`), plan_hash: ph, tasks_hash: th, ...(tasksHashV(S.goal) >= 2 ? { tasks_hash_v: tasksHashV(S.goal) } : {}), ...(rh ? { rules_hash: rh } : {}) };
   }
 
   allApprovals() {

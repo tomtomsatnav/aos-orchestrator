@@ -101,7 +101,8 @@ async function legacyGoal(sb, orchExtra = {}) {
   const eng = sb.engine(g.dir, { humanApproves: false }); await eng.start(); await eng.tick();
   // turn it back into a pre-R4 goal: no snapshot file, no orch.rules, no rules hash in the fingerprint
   fs.rmSync(paths(g.dir).rules);
-  const gj = readJSON(paths(g.dir).goal); delete gj.orch.rules; delete gj.orch.plan_fingerprint.rules_hash; fs.writeFileSync(paths(g.dir).goal, JSON.stringify(gj));
+  // and pre-v2: the tasks hash then omits the description text
+  const gj = readJSON(paths(g.dir).goal); delete gj.orch.rules; delete gj.orch.plan_fingerprint.rules_hash; delete gj.orch.plan_fingerprint.tasks_hash_v; delete gj.orch.tasks_hash_v; gj.orch.plan_fingerprint.tasks_hash = tasksHash(loadState(g.dir).tasks); fs.writeFileSync(paths(g.dir).goal, JSON.stringify(gj));
   return { ...g, eng };
 }
 

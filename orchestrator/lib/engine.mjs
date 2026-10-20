@@ -18,7 +18,7 @@ import { compileGoal, recompileSnapshot, previewGoal, parseRepoRules, REPO_RULES
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
 import { Governor, DEFAULTS as GOV_DEFAULTS, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
-import { buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHash, reviewView, canonical, sha256 } from './plan.mjs';
+import { buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHashFor, tasksHashV, reviewView, canonical, sha256 } from './plan.mjs';
 import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
 import { sandboxAvailable, wrapWorkerCommand, SANDBOX_EXEC } from './sandbox.mjs';
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
@@ -297,7 +297,7 @@ export class Engine {
   /** Current fingerprint of what a human approves: the stored plan and the engine's task commands/scopes. */
   _fingerprint(S) {
     const rules_hash = rulesFingerprint(S.goal, readJSON(this.P.rules, null));
-    return { plan_hash: planHash(readJSON(this.P.plan)?.plan ?? null), tasks_hash: tasksHash(S.tasks), ...(rules_hash ? { rules_hash } : {}) };
+    return { plan_hash: planHash(readJSON(this.P.plan)?.plan ?? null), tasks_hash: tasksHashFor(S.goal, S.tasks), ...(tasksHashV(S.goal) >= 2 ? { tasks_hash_v: tasksHashV(S.goal) } : {}), ...(rules_hash ? { rules_hash } : {}) };
   }
 
   /** Activate the goal. The approval record stores the plan hash; a human approval of an edited plan is refused. */
@@ -818,6 +818,7 @@ export class Engine {
     const rv = this._rulesView(goal); // compiled rules and worker policy of the (intact) snapshot: the plan must lie inside them (R7, G4)
     const v = validatePlan(plan, { max_tasks: rv ? rv.compiled.plan.max_tasks : o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal), ...(rv ? { rules: rv.compiled, policy: rv.policy } : {}) });
     if (!v.ok) return this._planRejected(S, v.errors);
+    o.tasks_hash_v = 2; // new plans are hashed with their description/output_contract/acceptance too (older goals keep v1 so their approval still verifies)
     S.tasks = toTasks(v.tasks, goal, this.now(), this._R(goal).retry.ladder);
     S.agents = S.tasks.map((t) => ({ id: t.assignee, role: 'worker', capabilities: ['edit', 'bash'], can_delegate: false, status: 'idle', current_task: null, last_event_at: null, orch: { tier: t.orch.model_tier } }));
     atomicWrite(this.P.plan, { source, plan });

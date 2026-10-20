@@ -14,10 +14,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Engine, createGoal, summarize, assertRepoTrusted } from '../lib/engine.mjs';
-import { reviewView, renderReview, planHash, tasksHash } from '../lib/plan.mjs';
+import { reviewView, renderReview, planHash, tasksHashFor, tasksHashV } from '../lib/plan.mjs';
 import { rulesFingerprint } from '../lib/rules.mjs';
 import { renderRulesFor, renderUserRules, checkRulesFile, explainCall } from '../lib/rules-store.mjs';
-import { q } from '../lib/ctrl.mjs';
+import { q, escCtrl, escBeyondC0 } from '../lib/ctrl.mjs';
 import { draftGoal, renderDraft, PROFILES } from '../lib/draft.mjs';
 import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
@@ -34,7 +34,8 @@ for (let i = 0; i < argv.length; i++) {
 const [cmd, arg1, arg2] = pos;
 const orch = flags['orch-dir'] ? path.resolve(flags['orch-dir']) : orchRoot();
 
-const out = (o) => console.log(typeof o === 'string' ? o : JSON.stringify(o, null, 2));
+// worker- and model-controlled strings reach the terminal: JSON output escapes what JSON.stringify leaves raw (C1, bidi, invisible characters), text output escapes every control character
+const out = (o) => console.log(typeof o === 'string' ? escCtrl(o).replace(/\\u000a/g, '\n') : JSON.stringify(o, (k, v) => (typeof v === 'string' ? escBeyondC0(v) : v), 2));
 const die = (m, code = 1) => { console.error(`aos-orch: ${m}`); process.exit(code); };
 
 function resolveGoalDir(id) {
@@ -109,7 +110,7 @@ async function main() {
         if (!S.tasks.length) die('there is no plan to approve yet');
         console.error(`PLAN YOU ARE APPROVING (commands run as you, checks inside the OS sandbox):\n${renderReview(reviewView(S.tasks), rulesSummaryOf(d, S.goal))}`);
         const rules_hash = rulesFingerprint(S.goal, readJSON(paths(d).rules, null));
-        extra = { reviewed: { plan_hash: planHash(readJSON(paths(d).plan)?.plan ?? null), tasks_hash: tasksHash(S.tasks), ...(rules_hash ? { rules_hash } : {}) } };
+        extra = { reviewed: { plan_hash: planHash(readJSON(paths(d).plan)?.plan ?? null), tasks_hash: tasksHashFor(S.goal, S.tasks), ...(rules_hash ? { rules_hash } : {}) } };
         console.error(`plan hash ${extra.reviewed.plan_hash.slice(0, 12)}${rules_hash ? `  rules hash ${rules_hash.slice(0, 12)}` : ''}`);
       }
       enqueueCommand(d, { cmd, by: 'cli', ...extra });
@@ -211,7 +212,7 @@ async function main() {
     case 'goals': {
       const ids = fs.existsSync(goalsRoot(orch)) ? fs.readdirSync(goalsRoot(orch)) : [];
       const rows = ids.map((id) => { const S = loadState(goalDirOf(orch, id)); return S.goal ? { id, status: S.goal.status, plan_state: S.goal.orch.plan_state, tasks: `${S.tasks.filter((t) => t.status === 'done').length}/${S.tasks.length}`, engine: engineAlive(goalDirOf(orch, id)), title: S.goal.title } : null; }).filter(Boolean);
-      if (flags.json) out(rows); else out(rows.length ? rows.map((r) => `${r.id}  ${r.status}${r.status === 'draft' ? `/${r.plan_state}` : ''}  tasks ${r.tasks}  ${r.engine ? 'engine' : '-'}  ${r.title}`).join('\n') : '(no goals)');
+      if (flags.json) out(rows); else out(rows.length ? rows.map((r) => escCtrl(`${r.id}  ${r.status}${r.status === 'draft' ? `/${r.plan_state}` : ''}  tasks ${r.tasks}  ${r.engine ? 'engine' : '-'}  ${r.title}`)).join('\n') : '(no goals)');
       break;
     }
     default:
