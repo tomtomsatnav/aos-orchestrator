@@ -242,7 +242,7 @@ export function beyondPrompt(scope, text) {
 export function reviewView(tasks, goal = null) {
   const text = goal ? goalPromptText(goal) : null;
   const W = goal?.orch?.plan_warnings || {};
-  const view = tasks.map((t) => { const o = t.orch || t; return { ...(text === null ? {} : beyondPrompt(o.path_scope, text)), warnings: [...(W[t.id] || [])], id: t.id, title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
+  const view = tasks.map((t) => { const o = t.orch || t; return { ...(text === null ? {} : beyondPrompt(o.path_scope, text)), ...(W[t.id]?.length ? { warnings: [...W[t.id]] } : {}), id: t.id, title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
     allowed_commands: [...(o.allowed_commands || [])], checks: (o.checks || []).map((c) => ({ command: c.argv.join(' '), argv: c.argv, timeout_s: c.timeout_s })) }; });
   view.goal_warnings = [...(W.goal || [])]; // not serialised with the array: renderReview prints them
   return view;
