@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   TERMINAL, paths, ensureDir, readJSON, atomicWrite, iso, realClock, loadState, saveState, loadHeartbeat, appendEvent, readEvents,
-  acquireLock, touchLock, releaseLock, drainCommands, enqueueCommand, pidAlive, goalDirOf, orchRoot,
+  acquireLock, touchLock, releaseLock, drainCommands, enqueueCommand, pidAlive, goalDirOf, orchRoot, applyBudgetPatch, validateBudgetPatch,
 } from './state.mjs';
 import * as G from './git.mjs';
 import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
@@ -44,6 +44,7 @@ export class Engine {
     this.plannerTimeoutMs = o.plannerTimeoutMs ?? 300000;
     this.pid = o.pid ?? process.pid;
     this.spawnFn = o.spawnFn;
+    this.slotGate = o.slotGate || null; // supervisor: global worker semaphore {acquire(goalId)->token|null, release(token)}
     this.sandboxBin = o.sandboxBin || SANDBOX_EXEC; // tests may point this at a missing binary
     this.hookScript = o.hookScript || HOOK_SCRIPT; // tests may substitute a stub hook
     this.lockRefreshMs = o.lockRefreshMs ?? null; // default: a third of the lock TTL
@@ -145,7 +146,7 @@ export class Engine {
     let S = loadState(this.dir);
     if (!S.goal) throw new Error('no goal.json');
     let goal = S.goal;
-    const o = goal.orch;
+    let o = goal.orch;
     let hb = loadHeartbeat(this.dir);
     if (TERMINAL.has(goal.status)) { if (hb.status !== 'stopped') atomicWrite(P.hb, { ...hb, status: 'stopped' }); return { stopped: true, goal: goal.status }; }
     touchLock(this.dir, { pid: this.pid, now: Date.now() });
@@ -164,7 +165,7 @@ export class Engine {
 
     // 2. Observe: drain human commands
     await this._observe(S);
-    S = loadState(this.dir); goal = S.goal;
+    S = loadState(this.dir); goal = S.goal; o = goal.orch; // S was reloaded: `o` must follow it, or halt_reason set later in this tick is invisible to the dispatch gate
     if (TERMINAL.has(goal.status)) return { goal: goal.status, seq };
     hb = loadHeartbeat(this.dir);
 
@@ -222,7 +223,16 @@ export class Engine {
         case 'pause': atomicWrite(this.P.hb, { ...hb, status: 'paused' }); this.ev('human.pause', 'human', null, { by: c.by || 'cli' }); break;
         case 'resume':
           atomicWrite(this.P.hb, { ...hb, status: 'running' }); this.gov.resume(this.now());
-          this.ev('human.resume', 'human', null, { by: c.by || 'cli' }); break;
+          this.ev('human.resume', 'human', null, { by: c.by || 'cli' });
+          if (goal.status === 'blocked') this._unblock(S);
+          break;
+        case 'budgets': {
+          const v = validateBudgetPatch(c.patch);
+          if (!v.ok) { this.ev('orch.budgets.refused', 'orchestrator', null, { errors: v.errors }); break; }
+          applyBudgetPatch(goal, S.tasks, v.patch); saveState(this.dir, S);
+          this.ev('orch.budgets.updated', 'human', null, { by: c.by || 'cli', patch: v.patch });
+          break;
+        }
         case 'approve-plan':
           if (goal.orch.plan_state === 'awaiting_approval') { this._activate(S, 'human', c.reviewed); saveState(this.dir, S); }
           break;
@@ -237,6 +247,19 @@ export class Engine {
         default: this.ev('human.note', 'human', null, { note: `ignored unknown command ${String(c.cmd).slice(0, 40)}` });
       }
     }
+  }
+
+  /** Resume a goal that stopped on a budget cap, once the caps were raised. Other blocks (failed task, rejected plan) stay blocked. */
+  _unblock(S) {
+    const goal = S.goal; const o = goal.orch;
+    if (!String(o.halt_reason || '').startsWith('budget')) { this.ev('orch.resume.refused', 'orchestrator', null, { reason: 'not blocked by a budget cap', blocked_reason: goal.blocked_reason || null }); return false; }
+    const b = checkBudgets(goal, { nowMs: this.now(), seq: loadHeartbeat(this.dir).seq, inflightTokens: 0 });
+    if (b.hard.length) { this.ev('orch.resume.refused', 'orchestrator', null, { reason: 'budget still exceeded', hard: b.hard }); return false; }
+    goal.status = 'active'; delete goal.blocked_reason; o.halt_reason = null; o.halt_at_ms = null; o.reported = false; o.soft = b.soft;
+    goal.updated_at = iso(this.now());
+    this.ev('orch.goal.unblocked', 'human', null, { previous: 'blocked' }); this.ev('goal.updated', 'orchestrator', null, { status: 'active' });
+    saveState(this.dir, S);
+    return true;
   }
 
   /** Current fingerprint of what a human approves: the stored plan and the engine's task commands/scopes. */
@@ -746,13 +769,15 @@ export class Engine {
       if (task.status !== 'ready') continue;
       if ((o.soft || []).length && task.orch.model_tier === 'opus') continue; // soft budget: no new opus-tier work
       if (running().some((r) => scopesOverlap(r.orch.path_scope, task.orch.path_scope))) continue; // SPEC section 6
+      const tok = this.slotGate ? this.slotGate.acquire(goal.id) : true;
+      if (!tok) break; // global worker cap / fairness: try again next tick
       try { await this._startAttempt(S, task); slots--; } catch (e) {
         task.status = 'ready'; task.attempts = Math.max(0, task.attempts - 1); task.orch.phase = null;
         const le = task.orch.attempt_log.at(-1); if (le && !le.ended_at) { le.ended_at = iso(this.now()); le.outcome = 'dispatch_failed'; le.counted = false; }
         o.halt_reason ??= `dispatch of ${task.id} failed: ${String(e.message).slice(0, 200)}`; o.halt_at_ms ??= this.now();
         this.ev('agent.errored', 'orchestrator', task.id, { error: String(e.message).slice(0, 300) });
         break;
-      }
+      } finally { if (this.slotGate) this.slotGate.release(tok); }
     }
   }
 

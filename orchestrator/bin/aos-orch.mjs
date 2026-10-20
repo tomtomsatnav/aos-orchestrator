@@ -3,6 +3,8 @@
 //   aos-orch run <goal.json | goal-id> [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--poll-ms N] [--interval-s N]
 //   aos-orch status [goal-id]
 //   aos-orch pause|resume|cancel|kill|approve-plan|reject-plan <goal-id>
+//   aos-orch serve [--port 4319] [--max-workers N] [--dashboard-url URL] [--origins a,b] [--leave-workers|--kill-workers] [--drain-s N]
+//   aos-orch login-link [--port N] | token [--show] | goals [--json]
 //   aos-orch approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
 // State lives under AOS_ORCH_DIR (default ${CLAUDE_PLUGIN_DATA or ~/.claude/plugins/data/aos-dashboard-aos-local}/orch).
 // The real `claude` binary is used only when AOS_CLAUDE_BIN is unset.
@@ -12,12 +14,15 @@ import { Engine, createGoal, summarize, assertRepoTrusted } from '../lib/engine.
 import { reviewView, renderReview, planHash, tasksHash } from '../lib/plan.mjs';
 import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
+import { Supervisor } from '../lib/supervisor.mjs';
+import { createControlServer, parsePort, DEFAULT_PORT } from '../server/index.mjs';
+import { ensureCliToken, readCliToken, createLoginCode } from '../server/auth.mjs';
 
 const argv = process.argv.slice(2);
 const flags = {}; const pos = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
+  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
 }
 const [cmd, arg1, arg2] = pos;
 const orch = flags['orch-dir'] ? path.resolve(flags['orch-dir']) : orchRoot();
@@ -92,8 +97,48 @@ async function main() {
       out(decide(paths(d).approvals, arg2, { decision: cmd, scope: flags['for-task'] ? 'task' : 'once', by: 'cli' }));
       break;
     }
+    case 'serve': {
+      const port = parsePort(flags.port ?? process.env.AOS_ORCH_PORT ?? DEFAULT_PORT);
+      const sup = new Supervisor({ orchDir: orch, ...(flags['max-workers'] ? { maxWorkers: Number(flags['max-workers']) } : {}),
+        ...(flags['interval-s'] ? { intervalMs: Number(flags['interval-s']) * 1000 } : {}), ...(flags['poll-ms'] ? { pollMs: Number(flags['poll-ms']) } : {}) });
+      const origins = (flags.origins || process.env.AOS_ORCH_ORIGINS || '').split(',').map((x) => x.trim()).filter(Boolean);
+      const srv = createControlServer({ supervisor: sup, port, dashboardUrl: flags['dashboard-url'] || process.env.AOS_DASHBOARD_URL || undefined,
+        ...(origins.length ? { allowedOrigins: origins } : {}), log: (m) => console.error(`aos-orch: ${m}`) });
+      await sup.start();
+      await srv.listen();
+      console.error(`aos-orch: control server on http://127.0.0.1:${srv.port} (token file: ${ensureCliToken(orch)}); \`aos-orch login-link\` prints a browser login URL`);
+      let stopping = false;
+      const down = async (sig) => {
+        if (stopping) return; stopping = true;
+        console.error(`aos-orch: ${sig}: stop dispatching, ${flags['leave-workers'] ? 'leaving' : flags['kill-workers'] ? 'killing' : 'draining'} workers`);
+        await srv.close();
+        await sup.stop({ workers: flags['leave-workers'] ? 'leave' : flags['kill-workers'] ? 'kill' : 'drain', drainMs: (Number(flags['drain-s']) || 30) * 1000 });
+        process.exit(0);
+      };
+      process.on('SIGINT', () => down('SIGINT')); process.on('SIGTERM', () => down('SIGTERM'));
+      await new Promise(() => {});
+      break;
+    }
+    case 'login-link': {
+      const port = parsePort(flags.port ?? process.env.AOS_ORCH_PORT ?? DEFAULT_PORT);
+      ensureCliToken(orch);
+      out(`http://127.0.0.1:${port}/auth/login?code=${createLoginCode(orch)}`);
+      console.error('aos-orch: one-time link, valid 2 minutes, opening it does not use it up until the page signs in; sessions last 12 h and end when the server restarts');
+      break;
+    }
+    case 'token': {
+      const f = ensureCliToken(orch);
+      if (flags.show) out(readCliToken(orch)); else out(f);
+      break;
+    }
+    case 'goals': {
+      const ids = fs.existsSync(goalsRoot(orch)) ? fs.readdirSync(goalsRoot(orch)) : [];
+      const rows = ids.map((id) => { const S = loadState(goalDirOf(orch, id)); return S.goal ? { id, status: S.goal.status, plan_state: S.goal.orch.plan_state, tasks: `${S.tasks.filter((t) => t.status === 'done').length}/${S.tasks.length}`, engine: engineAlive(goalDirOf(orch, id)), title: S.goal.title } : null; }).filter(Boolean);
+      if (flags.json) out(rows); else out(rows.length ? rows.map((r) => `${r.id}  ${r.status}${r.status === 'draft' ? `/${r.plan_state}` : ''}  tasks ${r.tasks}  ${r.engine ? 'engine' : '-'}  ${r.title}`).join('\n') : '(no goals)');
+      break;
+    }
     default:
-      die('usage: aos-orch run|status|pause|resume|cancel|kill|approve-plan|reject-plan|approvals|approve|deny ...', 64);
+      die('usage: aos-orch run|serve|login-link|token|goals|status|pause|resume|cancel|kill|approve-plan|reject-plan|approvals|approve|deny ...', 64);
   }
 }
 main().catch((e) => die(e.message));

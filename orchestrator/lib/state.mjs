@@ -234,3 +234,33 @@ export function createGoalDir(orch, goal, plan = null) {
 export function checkTasks(tasks) {
   return tasks.flatMap((t) => validateTask(t).map((e) => `${t.id}: ${e}`));
 }
+
+// ---------------------------------------------------------------- budget patches (control server / supervisor)
+export const BUDGET_LIMITS = { max_new_tokens: [1, 1e10], max_wall_s: [1, 31536000], max_parallel: [1, 16], max_attempts: [1, 10], max_usd: [0, 10000], max_ticks: [1, 1e7] };
+
+/** Strict validation of a budget patch: known keys only, integers (max_usd may be fractional) inside closed ranges. */
+export function validateBudgetPatch(patch) {
+  const errors = [];
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, errors: ['budgets must be an object'], patch: {} };
+  const out = {};
+  for (const [k, v] of Object.entries(patch)) {
+    const lim = BUDGET_LIMITS[k];
+    if (!lim) { errors.push(`unknown budget field "${k}"`); continue; }
+    if (typeof v !== 'number' || !Number.isFinite(v) || (k !== 'max_usd' && !Number.isInteger(v)) || v < lim[0] || v > lim[1]) { errors.push(`${k} must be ${k === 'max_usd' ? 'a number' : 'an integer'} in [${lim[0]}, ${lim[1]}]`); continue; }
+    out[k] = v;
+  }
+  if (!errors.length && !Object.keys(out).length) errors.push('no budget fields given');
+  return { ok: !errors.length, errors, patch: out };
+}
+
+/** Apply a validated patch to goal.json / tasks (mutates). max_attempts also applies to tasks that can still run. */
+export function applyBudgetPatch(goal, tasks, patch) {
+  const B = goal.orch.budgets;
+  for (const [k, v] of Object.entries(patch)) {
+    if (k === 'max_new_tokens' || k === 'max_parallel') B[k] = v;
+    else if (k === 'max_attempts') { B.max_attempts = v; for (const t of tasks) if (!['done', 'failed', 'cancelled'].includes(t.status)) t.max_attempts = v; }
+    else if (k === 'max_wall_s') goal.budget.max_wall_clock_s = v;
+    else if (k === 'max_usd' || k === 'max_ticks') goal.budget[k] = v;
+  }
+  return patch;
+}

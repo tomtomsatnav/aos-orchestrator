@@ -1,4 +1,4 @@
-# AOS orchestrator: engine core (phase 1)
+# AOS orchestrator: engine core (phase 1) + supervisor and control server (phase 3)
 
 A deterministic engine that turns one human-written Goal into merge-ready work on a git branch. Design:
 [docs/orchestrator-design.md](../docs/orchestrator-design.md). Verified CLI facts: [spike/README.md](spike/README.md).
@@ -180,11 +180,74 @@ Note: the engine tests use a stand-in for the human (`helpers.humanApproves`) be
 
 ## Not done yet
 
-- Control server (`127.0.0.1:4319`), token/cookie auth, HTTP approvals API, SSE events: phase 3.
 - Control UI and monitor integration (goal hub, DAG, meters); the telemetry hook (`aos-hook.mjs` tagging): phases 2 and 4.
 - Real-claude runs: nothing here has ever called the real binary. Unverified: OAuth with the minimal env, the real
   plan-limit failure text (the matcher is a configurable guess), `--setting-sources ""`, `--resume` for approval
   continuations, planner `--json-schema`.
-- One engine per goal and per process; the global worker semaphore across goals, goal creation via API, `aos` CLI
-  integration (`scripts/aos.mjs`), `schemas/orch-task.schema.json` (validation lives in `lib/plan.mjs`).
-- Resuming a `blocked` goal after raising a budget (re-run is only supported for active/draft/paused goals).
+- `aos` CLI integration (`scripts/aos.mjs`), `schemas/orch-task.schema.json` (validation lives in `lib/plan.mjs`).
+- The planner call is not counted against the global worker cap; only task workers are.
+
+## Supervisor and control server (phase 3)
+
+```sh
+node orchestrator/bin/aos-orch.mjs serve [--port 4319] [--max-workers 3] [--dashboard-url http://127.0.0.1:4318/] [--origins a,b]
+                                         [--leave-workers | --kill-workers] [--drain-s 30]    # env: AOS_ORCH_PORT, AOS_ORCH_ORIGINS, AOS_DASHBOARD_URL
+node orchestrator/bin/aos-orch.mjs login-link [--port N]   # prints a one-time browser login URL (valid 2 minutes)
+node orchestrator/bin/aos-orch.mjs token [--show]          # prints the token FILE path; the token itself only with --show
+node orchestrator/bin/aos-orch.mjs goals [--json]
+```
+
+`lib/supervisor.mjs`: one process, one engine tick loop per non-terminal goal found in `AOS_ORCH_DIR/goals` (rescanned every 2 s;
+a goal owned by another live engine is skipped). A global slot gate (`max_workers_global` in `<orch>/config.json` or `--max-workers`,
+default 3) is consulted by every engine before it starts a worker: reservations are counted, and a goal may only take a free slot if no
+other goal that was recently denied (or has a ready task) runs fewer workers (least-running-first, so one goal cannot starve others).
+The plan-usage governor is the shared `governor.json` (7-day hold pauses all goals until a human `resume`, 5-hour reserve stops new
+work, rejected calls pause until the reset); the gate checks it too. Shutdown (SIGTERM/SIGINT): stop dispatching, then `drain` (default:
+workers finish and are merged, up to `--drain-s`, the rest are killed), `--kill-workers` or `--leave-workers`; state stays resumable
+(a killed worker is `lost` and requeued uncounted; a left one is re-adopted). `setBudgets` + `resume` unblock a goal that was blocked by a
+budget cap (`orch.budgets.updated` / `orch.goal.unblocked` events); other blocks (failed task, rejected plan) are not resumable.
+
+### Control server (`server/`, HTTP on 127.0.0.1 only)
+
+Request pipeline: loopback peer -> `Host` must be `127.0.0.1:<port>` or `localhost:<port>` (else 403, DNS rebinding) -> if `Origin` is
+present it must be `http://127.0.0.1:4318`, `http://localhost:4318`, the dashboard URL's origin, an `--origins` entry or the server's own origin
+(else 403); CORS headers (`Access-Control-Allow-Origin: <that origin>`, `Access-Control-Allow-Headers: Authorization, Content-Type`, `Vary: Origin`,
+never `*`) only for allowed origins; preflight `OPTIONS` answers 204 for GET/POST/PATCH with those two headers only -> `/api/*` needs `Authorization: Bearer <token>`
+(401 with one uniform body whatever the failure; routes are not revealed to unauthenticated callers) -> mutations need `Content-Type: application/json`
+(415 otherwise, so form posts are refused) and a body of at most 64 KB (413) -> handler. Header timeout 10 s, request timeout 15 s. 10 failed
+credentials per minute lock the IP out (429, `Retry-After`, doubling up to 15 min). No cookies anywhere. Logs contain `METHOD path status` only (no query string, no tokens).
+
+Credentials: the CLI token (`<orch>/control-token`, 32 random bytes hex, 0600, dir 0700, constant-time compare, persists across restarts) and browser
+session tokens (random, 12 h, MEMORY ONLY: a server restart needs a new `login-link`; revocable with `POST /auth/logout`). `aos-orch login-link` writes
+a hashed single-use code (2 minutes) under `<orch>/login-codes/` and prints `http://127.0.0.1:<port>/auth/login?code=...`. `GET /auth/login` only serves a tiny
+page (strict CSP, `Referrer-Policy: no-referrer`) and does NOT consume the code; the page removes the code from the address bar, POSTs it to `/auth/exchange`
+and redirects to the dashboard (default `http://127.0.0.1:4318/`, `--dashboard-url`) with the session in the URL FRAGMENT: `#aos_token=<session>`. The
+dashboard reads `location.hash`, stores it in `sessionStorage`, clears the hash and sends it as `Authorization: Bearer`. `EventSource` cannot set headers,
+so the UI should poll `GET /api/goals` and `/api/goals/:id/events?after=`; `GET /api/stream` (SSE, header auth) exists for fetch-streaming clients.
+
+Endpoints (all JSON; errors are `{error:{code,message}}`; unknown route 404, wrong method 405):
+
+| Method and path | Notes |
+|---|---|
+| `GET /auth/login?code=` | login page, no state change |
+| `POST /auth/exchange` `{code}` | -> `{token, token_type, expires_at, expires_in_s}` |
+| `POST /auth/logout` | revokes the calling session |
+| `GET /api/health` | `{ok, version, goals, workers:{running,max}, governor:{five_hour, seven_day, paused, resume_at, reason}}` (utilisation 0..1 or null) |
+| `GET /api/goals` | `{goals:[GoalSummary]}` |
+| `POST /api/goals` | body per the brief; 201 `{goal: GoalDetail, notices}`; 400 invalid, 422 repo/config refusal. Extension: optional `check_allowlist:[string]` (commands the planner may use in checks; without it a planned goal cannot have checks). `plan_approval` may only be `"human"`; criteria are `{text}` only (met when all tasks are done) |
+| `GET /api/goals/:id` | `{goal: GoalDetail}` |
+| `POST /api/goals/:id/pause\|resume\|cancel\|kill` | kill needs `{confirm:true}`; 200 `{goal, applied}`; 409 on terminal / not-resumable goals |
+| `PATCH /api/goals/:id/budgets` | any of `max_new_tokens max_wall_s max_parallel max_attempts` (+ `max_usd max_ticks`); integers in closed ranges |
+| `GET /api/goals/:id/plan` | `{plan_state, plan_hash, tasks:[{id,title,tier,depends_on,path_scope,allowed_commands,checks:[{cmd,argv,timeout_s}],allowed_tools}]}` |
+| `POST /api/goals/:id/plan/approve` `{plan_hash}` / `plan/reject` `{reason}` | `plan_hash` binds plan.json and the task commands/scopes; a stale hash is 409 |
+| `GET /api/goals/:id/events?after=&limit=` | `{events, next_after, has_more}`, limit 1-500 |
+| `GET /api/approvals[?status=pending\|approved\|denied\|expired\|all]` | default pending |
+| `POST /api/approvals/:id/approve\|deny` `{scope?:'once'\|'task'}` | approval ids are goal-qualified: `<goal_id>~A-<n>` |
+| `GET /api/stream[?goal=]` | SSE `goal_event` messages, header auth only |
+
+GoalSummary/GoalDetail follow the brief; additive extras: `paused`, `blocked_reason`. Responses never contain filesystem paths: `repo_name` is a basename,
+engine free text is scrubbed (absolute paths become basenames), approval `cwd` is relative to the worktree. Documented exception: an approval's `summary`
+is the exact command / file the worker asked for (a human cannot approve blind; only the worktree prefix is replaced by `<worktree>`), and plan `checks`/`allowed_commands`
+are shown verbatim for the same reason.
+Audit: every mutating call appends a `human.note` Event with actor `control` and `data {audit:true, action, session}` (`cli` or a hash of the session id, never a token) to
+the goal's `events.ndjson`, in addition to the engine's own `human.*` events; refused attempts are recorded too.
