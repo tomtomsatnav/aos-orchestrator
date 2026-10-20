@@ -26,6 +26,8 @@ import { listApprovals, expireDue, readApproval } from './approvals.mjs';
 import { buildReport } from './report.mjs';
 import { probeClaudeVersion } from './cli-version.mjs';
 import { runAdvisoryReview } from './review.mjs';
+import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath } from './anticheat.mjs';
+import { isTestPath } from './protect.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_SCRIPT = path.join(HERE, 'policy-hook.mjs');
@@ -688,6 +690,9 @@ export class Engine {
       return this._failAttempt(S, task, entry, 'scope_violation', { escalate: true, note: `changed files outside path_scope: ${outside.slice(0, 5).join(', ')}` });
     }
     await G.commitAll(wt, `aos: ${task.id} attempt ${entry.n} (${entry.tier})`);
+    // anti-cheat, before any check runs worker-written test code: skipped / deleted tests, test configuration, acceptance tests, copied expectations
+    const ac = await this._anticheatDiff(S, task, entry, wt);
+    if (ac.fail) return this._failAttempt(S, task, entry, ac.fail.kind, { escalate: true, note: ac.note });
     const checks = await runChecks(task.orch.checks, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp(task.id) }), allowlist: this._checkAllowlist(goal), ...this._sandboxOpts(goal, wt, task.id) });
     entry.checks_ok = checks.ok;
     const last = checks.results.at(-1);
@@ -698,6 +703,8 @@ export class Engine {
       return this._failAttempt(S, task, entry, 'denied', { escalate: true, note: `denied tool calls: ${task.orch.last_denials.join(', ')}` });
     }
     if (!checks.ok) return this._failAttempt(S, task, entry, 'check_failed', { escalate: true, check_output: tail(last?.output || '', 4096) });
+    const vac = this._judgeChecks(S.goal, checks.results, entry);
+    if (vac) return this._failAttempt(S, task, entry, vac.kind, { escalate: true, note: `anti-cheat ${vac.kind}: ${vac.reason}`.slice(0, 300) });
 
     task.orch.phase = 'integrating'; saveState(this.dir, S);
     const pre = await this._repoGuard(S, this._integrationWt(goal));
@@ -717,6 +724,11 @@ export class Engine {
     task.orch.grants = task.orch.grants.filter((g) => !g.once);
     goal.orch.instructions = await this._hashInstructions(goal.orch.integration_branch); // the engine's own integration commit is sanctioned
     this.ev('orch.integrate.merged', 'orchestrator', task.id, { sha: m.sha, branch: task.orch.branch });
+    if (task.orch.role === 'acceptance') { // these test files are now read-only for every other task and re-run from this commit at verify
+      const A = this._anti(goal); A.acceptance ||= { items: [] };
+      A.acceptance.items = A.acceptance.items.filter((i) => i.task !== task.id); A.acceptance.items.push({ task: task.id, files: ac.acceptFiles, commit: m.sha });
+      this.ev('orch.anticheat.acceptance', 'orchestrator', task.id, { files: ac.acceptFiles.slice(0, 20), commit: m.sha.slice(0, 12) });
+    }
     this.ev('task.completed', task.assignee, task.id, { result: task.orch.result_summary.slice(0, 200), tier: entry.tier, attempts: task.attempts });
     await this._dropWorktree(S, task);
     saveState(this.dir, S);
@@ -732,7 +744,15 @@ export class Engine {
     for (const c of goal.success_criteria) {
       let met;
       if (c.verify === 'human') met = c.met === true; // only a human's `confirm` sets it (never the engine, never a check)
-      else if (c.check) { const r = await runCheck(c.check, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('criteria') }), ...this._sandboxOpts(goal, wt, 'criteria') }); results[c.id] = r; met = r.ok; }
+      else if (c.check) {
+        const r = await runCheck({ ...c.check, argv: forceTapArgv(c.check.argv) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('criteria') }), ...this._sandboxOpts(goal, wt, 'criteria') });
+        r.argv = c.check.argv;
+        if (r.ok) { // a criterion that "passes" by running no / only skipped tests, or fewer tests than the base commit, is not met
+          const v = judgeRun(r.argv, parseTestSummary(r.summary_text ?? r.output), this._anti(goal).baselines?.[checkKey(r.argv)]);
+          if (!v.ok) { r.ok = false; r.output = `ANTI-CHEAT ${v.kind}: ${v.reason}\n${r.output}`; (this._anti(goal).criteria ||= {})[c.id] = { kind: v.kind, reason: v.reason }; this.ev('orch.anticheat.failed', 'orchestrator', null, { kind: v.kind, reason: v.reason.slice(0, 200), criterion: c.id }); }
+        }
+        delete r.summary_text; results[c.id] = r; met = r.ok;
+      }
       else if (Array.isArray(c.requires) && c.requires.length) met = c.requires.every((id) => S.tasks.find((t) => t.id === id)?.status === 'done');
       else met = allDone;
       if (met !== !!c.met) { c.met = met; this.ev('goal.updated', 'orchestrator', null, { criterion: c.id, met }); }
@@ -791,8 +811,14 @@ export class Engine {
     if (goal.status !== 'active') return;
     const crit = goal.success_criteria;
     const allDone = S.tasks.length > 0 && S.tasks.every((t) => t.status === 'done');
-    if (allDone && !crit.every((c) => c.met) && !o.final_checked) { await this._runCriteria(S); if (o.protected_tests?.files?.length) await this._runProtectedTests(S); o.final_checked = true; saveState(this.dir, S); }
+    if (allDone && !crit.every((c) => c.met) && !o.final_checked) { await this._runCriteria(S); if (o.protected_tests?.files?.length) await this._runProtectedTests(S); if (o.anticheat?.acceptance?.items?.length) await this._runAcceptanceTests(S); o.final_checked = true; saveState(this.dir, S); }
     if (allDone && o.protected_tests?.files?.length && !o.protected_result) await this._runProtectedTests(S); // fail closed: protection on and never run -> run it before anything can be achieved
+    if (allDone && o.anticheat?.acceptance?.items?.length && !o.anticheat.acceptance_result) await this._runAcceptanceTests(S); // fail closed, like the protected tests
+    if (allDone && o.anticheat?.acceptance_result?.ok === false) {
+      goal.status = 'blocked'; goal.blocked_reason = `the ACCEPTANCE tests (written first, read-only for the other tasks) fail against the integration branch: ${String(o.anticheat.acceptance_result.output || '').split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 300)}`;
+      this.ev('goal.blocked', 'orchestrator', null, { reason: goal.blocked_reason });
+      return;
+    }
     if (allDone && o.protected_result && o.protected_result.ok === false) {
       goal.status = 'blocked'; goal.blocked_reason = `the ORIGINAL existing tests fail against the integration branch (a test was deleted, weakened or the code broke it): ${String(o.protected_result.output || '').split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 300)}`;
       this.ev('goal.blocked', 'orchestrator', null, { reason: goal.blocked_reason });
@@ -816,7 +842,7 @@ export class Engine {
   async _advisoryReview(S) {
     const goal = S.goal; const o = goal.orch;
     const tier = this._R(goal).review.tier || 'haiku';
-    const r = await runAdvisoryReview({ goal, orchDir: this.orchDir, env: this.env, bin: this.bin, tier, spawnFn: this.spawnFn, killGraceMs: this.killGraceMs });
+    const r = await runAdvisoryReview({ goal, anticheat: reviewerNotes(S), orchDir: this.orchDir, env: this.env, bin: this.bin, tier, spawnFn: this.spawnFn, killGraceMs: this.killGraceMs });
     o.review = { tier, text: r.text ?? null, error: r.error ?? null, new_tokens: r.usage?.new_tokens ?? 0, notional_usd: r.usage?.notional_usd ?? 0, at: iso(this.now()) };
     o.usage.new_tokens += o.review.new_tokens; o.usage.notional_usd = (o.usage.notional_usd || 0) + o.review.notional_usd;
     this.ev('orch.review.advisory', 'orchestrator', null, { tier, ok: !r.error, error: r.error ?? null, new_tokens: o.review.new_tokens });
@@ -849,7 +875,7 @@ export class Engine {
     }
     if (!this._rulesCheck(S).ok) return this._planRejected(S, ['rules.snapshot.json was modified or is missing']);
     const rv = this._rulesView(goal); // compiled rules and worker policy of the (intact) snapshot: the plan must lie inside them (R7, G4)
-    const validate = (pl) => validatePlan(pl, { max_tasks: rv ? rv.compiled.plan.max_tasks : o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal), ...(rv ? { rules: rv.compiled, policy: rv.policy } : {}) });
+    const validate = (pl) => validatePlan(pl, { max_tasks: rv ? rv.compiled.plan.max_tasks : o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal), acceptance_first: rv?.compiled.checks.acceptance_first === true && goal.success_criteria.some((c) => c.check), ...(rv ? { rules: rv.compiled, policy: rv.policy } : {}) });
     let v = validate(plan);
     // a planner plan that breaks the rules gets AUTO_REPLANS automatic re-plan(s) with the exact validation errors fed back (its tokens are counted in the goal's usage like any planner call)
     while (!v.ok && source === 'planner' && (o.replans || 0) < AUTO_REPLANS && !o.halt_reason && o.usage.new_tokens < o.budgets.max_new_tokens) {
@@ -887,6 +913,13 @@ export class Engine {
       const hit = scopeHitsTests(t.path_scope, prot);
       if (hit.length) add(t.id, `path_scope includes EXISTING test file(s) ${hit.slice(0, 5).join(', ')}${hit.length > 5 ? ` (+${hit.length - 5})` : ''}. Existing tests must stay unchanged: the originals from the base commit are re-run at verify and the goal cannot be achieved if one fails. Approve only if modifying them is really intended.`);
     }
+    const critArgvs = goal.success_criteria.filter((c) => c.check).map((c) => c.check.argv);
+    for (const t of tasks) { // anti-cheat: what a human is asked to approve here lifts a rule for exactly these files / this task
+      const inputs = new Set(checkInputPaths([...t.checks.map((c) => c.argv), ...critArgvs]));
+      const hot = t.path_scope.filter((g) => !/[*?{}[\]!]/.test(g) && (isConfigPath(g) || inputs.has(g.replace(/^\.\//, ''))));
+      if (hot.length) add(t.id, `CONFIG FILE IN SCOPE: ${hot.join(', ')}. This task may change test configuration or a file a check runs (package.json scripts, runner config, check scripts); the anti-cheat check_config_changed rule is lifted for exactly these files. Approve only if that is intended.`);
+      if (t.allow_skip?.length) add(t.id, `ALLOW_SKIP: this task may add skipped/todo tests (the tests_skipped rule is lifted for it). Reason(s): ${t.allow_skip.join(' | ')}`);
+    }
     if (o.allow_loopback !== true && o.worktree_root) { // (a supplied plan has no integration worktree yet: nothing to read)
       const wt = this._integrationWt(goal);
       const read = async (rel) => { const f = path.join(wt, rel); return fs.existsSync(f) && fs.statSync(f).size < 200000 ? fs.readFileSync(f, 'utf8') : null; };
@@ -906,12 +939,119 @@ export class Engine {
     if (js.length) {
       try {
         for (const f of js) { const b = await G.showBlob(o.repo, pt.base_commit, f); if (b) { fs.mkdirSync(path.dirname(path.join(wt, f)), { recursive: true }); fs.writeFileSync(path.join(wt, f), b); } }
-        const r = await runCheck({ argv: ['node', '--test', ...js], timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('protected') }), ...this._sandboxOpts(goal, wt, 'protected') });
+        const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('protected') }), ...this._sandboxOpts(goal, wt, 'protected') });
         res.ok = r.ok; if (!r.ok) res.output = tail(r.output || '', 2000);
+        const sm = parseTestSummary(r.summary_text ?? r.output);
+        if (r.ok && !(sm && sm.tests > 0 && sm.pass > 0)) { res.ok = false; res.output = `anti-cheat: the original tests ran ${sm ? `${sm.tests} test(s) of which ${sm.pass} passed` : 'with no countable test summary'}`; }
       } catch (e) { res.ok = false; res.output = `could not run the original tests: ${String(e.message).slice(0, 300)}`; } finally { await G.discardChanges(wt).catch(() => {}); }
     }
     o.protected_result = res;
     this.ev('orch.protected_tests.checked', 'orchestrator', null, { ok: res.ok, files: res.files, not_executed: other.length });
+    saveState(this.dir, S);
+    return res;
+  }
+
+  // ------------------------------------------------------------------ anti-cheat (lib/anticheat.mjs)
+  _anti(goal) { return (goal.orch.anticheat ||= { baselines: {}, criteria: {} }); }
+
+  /** Test files of a worktree: [{path, text}] (bounded). */
+  async _readTestFiles(wt) {
+    const out = [];
+    const ls = (await G.git(wt, ['ls-files', '-z'], { allowFail: true })).stdout.split('\0').filter((f) => f && isTestPath(f) && !f.split('/').includes('node_modules'));
+    for (const f of ls.slice(0, 300)) { try { const abs = path.join(wt, f); if (fs.statSync(abs).size <= 200000) out.push({ path: f, text: fs.readFileSync(abs, 'utf8') }); } catch { /* gone */ } }
+    return out;
+  }
+
+  /** Before the first dispatch the integration branch IS the base commit: run each test check there once and record how many tests it counts. Static declaration counts are the fallback. */
+  async _ensureBaselines(S, wt) {
+    const goal = S.goal; const A = this._anti(goal);
+    A.baselines_done = true;
+    const checks = new Map();
+    for (const c of goal.success_criteria) if (c.check && isTestRunArgv(c.check.argv)) checks.set(checkKey(c.check.argv), c.check);
+    for (const t of S.tasks) for (const c of t.orch.checks) if (isTestRunArgv(c.argv)) checks.set(checkKey(c.argv), c);
+    let files = null;
+    for (const [key, c] of checks) {
+      let b = null;
+      try {
+        const r = await runCheck({ argv: forceTapArgv(c.argv), timeout_s: Math.min(c.timeout_s || 300, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('baseline') }), ...this._sandboxOpts(goal, wt, 'baseline') });
+        const sm = r.rejected ? null : parseTestSummary(r.summary_text ?? r.output);
+        if (sm) b = { tests: sm.tests, pass: sm.pass, source: 'run' };
+      } catch { /* static fallback */ } finally { await G.discardChanges(wt).catch(() => {}); }
+      if (!b) { files ||= await this._readTestFiles(wt); b = { tests: staticTestCount(c.argv, files), source: 'static' }; }
+      A.baselines[key] = { ...b, at: iso(this.now()) };
+    }
+    this.ev('orch.anticheat.baseline', 'orchestrator', null, { checks: Object.entries(A.baselines).slice(0, 20).map(([k, b]) => ({ check: k.slice(0, 120), tests: b.tests, source: b.source })) });
+    saveState(this.dir, S);
+  }
+
+  /** Diff-based rules for one attempt. Sets entry.anticheat. -> {fail?: finding, note?, acceptFiles[]}. */
+  async _anticheatDiff(S, task, entry, wt) {
+    const goal = S.goal; const o = goal.orch;
+    let res;
+    try {
+      const { base, files } = await attemptDiff(wt, o.integration_branch);
+      const accTasks = S.tasks.filter((t) => t.orch.role === 'acceptance');
+      const items = o.anticheat?.acceptance?.items || [];
+      const ctx = { path_scope: task.orch.path_scope, allow_skip: task.orch.allow_skip || [], checks: [...task.orch.checks.map((c) => c.argv), ...goal.success_criteria.filter((c) => c.check).map((c) => c.check.argv)],
+        acceptance: accTasks.length ? { files: items.flatMap((i) => i.files), scopes: accTasks.flatMap((t) => t.orch.path_scope) } : null, is_acceptance: task.orch.role === 'acceptance', literal_copy: o.literal_copy === 'fail' ? 'fail' : 'warn' };
+      const io = { before: async (p) => { if (!base) return null; const b = await G.showBlob(o.repo, base, p).catch(() => null); return b ? b.toString('utf8') : null; },
+        after: async (p) => { try { return fs.readFileSync(path.join(wt, p), 'utf8'); } catch { return null; } }, tests: () => this._readTestFiles(wt) };
+      const { findings } = await analyzeDiff(files, ctx, io);
+      const acceptFiles = files.filter((f) => f.status !== 'D' && isTestPath(f.path)).map((f) => f.path);
+      if (ctx.is_acceptance) { // an acceptance task that adds no test is vacuous
+        const texts = []; for (const p of acceptFiles) { const t = await io.after(p); if (t !== null) texts.push({ path: p, text: t }); }
+        if (!staticTestCount(['node', '--test'], texts)) findings.push({ kind: 'acceptance_empty', severity: 'fail', detail: 'an acceptance task must add at least one test( / it( declaration in a test file' });
+      }
+      res = { findings, acceptFiles };
+    } catch (e) { // a failure of the analysis itself is not a verdict on the worker: record it and go on (the checks and the final re-runs still apply)
+      this.ev('orch.anticheat.warning', 'orchestrator', task.id, { error: `anti-cheat analysis failed: ${String(e.message).slice(0, 200)}` });
+      return { acceptFiles: [] };
+    }
+    const fails = failsOf(res.findings); const first = fails[0] || null;
+    entry.anticheat = attemptRecord({ findings: res.findings, failed: first ? first.kind : null });
+    if (first) {
+      this.ev('orch.anticheat.failed', 'orchestrator', task.id, { kind: first.kind, attempt: entry.n, reason: summarizeFindings(fails, 3), paths: fails.map((f) => f.path).filter(Boolean).slice(0, 10) });
+      return { fail: first, note: `anti-cheat ${first.kind}: ${summarizeFindings(fails, 3)}`.slice(0, 300), acceptFiles: res.acceptFiles };
+    }
+    const soft = res.findings.filter((f) => f.severity !== 'fail');
+    if (soft.length) this.ev('orch.anticheat.warning', 'orchestrator', task.id, { attempt: entry.n, kinds: [...new Set(soft.map((f) => `${f.kind}${f.severity === 'allowed' ? ':allowed' : ''}`))], count: soft.length, detail: summarizeFindings(soft, 2) });
+    return { acceptFiles: res.acceptFiles };
+  }
+
+  /** Judge the (passing) check results of an attempt: 0 tests, only skipped tests, fewer tests than the base commit. -> {kind, reason} for the first bad result, else null. */
+  _judgeChecks(goal, results, entry) {
+    const A = this._anti(goal); const tests = []; let bad = null;
+    for (const r of results) {
+      const sm = parseTestSummary(r.summary_text ?? r.output); const b = A.baselines?.[checkKey(r.argv)];
+      const v = judgeRun(r.argv, sm, b);
+      if (sm) tests.push({ check: checkKey(r.argv).slice(0, 120), tests: sm.tests, pass: sm.pass, skipped: sm.skipped, todo: sm.todo, baseline: b ? b.tests : null });
+      if (!v.ok && !bad) bad = { kind: v.kind, reason: v.reason };
+    }
+    const rec = entry.anticheat || attemptRecord({});
+    entry.anticheat = attemptRecord({ findings: rec.findings, failed: bad ? bad.kind : rec.failed, tests });
+    if (bad) this.ev('orch.anticheat.failed', 'orchestrator', null, { kind: bad.kind, attempt: entry.n, reason: bad.reason.slice(0, 200) });
+    else this.ev('orch.anticheat.passed', 'orchestrator', null, { attempt: entry.n, tests: tests.map((t) => t.tests), warnings: rec.findings.filter((f) => f.severity !== 'fail').length });
+    return bad;
+  }
+
+  /** Re-run the acceptance test files from the commit of the task that wrote them (not from whatever the integration tree now holds). */
+  async _runAcceptanceTests(S) {
+    const goal = S.goal; const o = goal.orch; const A = this._anti(goal);
+    const wt = this._integrationWt(goal);
+    const files = []; for (const i of A.acceptance.items) for (const f of i.files) files.push({ f, commit: i.commit });
+    const js = files.filter((x) => /\.(m?js|cjs)$/.test(x.f));
+    const res = { ok: true, files: js.length, not_executed: files.filter((x) => !js.includes(x)).map((x) => x.f).slice(0, 20), at: iso(this.now()) };
+    try {
+      for (const { f, commit } of js) { const b = await G.showBlob(o.repo, commit, f); if (b) { fs.mkdirSync(path.dirname(path.join(wt, f)), { recursive: true }); fs.writeFileSync(path.join(wt, f), b); } }
+      if (js.length) {
+        const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js.map((x) => x.f)]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('acceptance') }), ...this._sandboxOpts(goal, wt, 'acceptance') });
+        const sm = parseTestSummary(r.summary_text ?? r.output); res.tests = sm ? sm.tests : null;
+        res.ok = r.ok; if (!r.ok) res.output = tail(r.output || '', 2000);
+        else if (!(sm && sm.tests > 0 && sm.pass > 0)) { res.ok = false; res.output = `anti-cheat: the acceptance tests ran ${sm ? `${sm.tests} test(s) of which ${sm.pass} passed` : 'with no countable test summary'}`; }
+      }
+    } catch (e) { res.ok = false; res.output = `could not run the acceptance tests: ${String(e.message).slice(0, 300)}`; } finally { await G.discardChanges(wt).catch(() => {}); }
+    A.acceptance_result = res;
+    this.ev('orch.anticheat.acceptance', 'orchestrator', null, { ok: res.ok, files: res.files, tests: res.tests ?? null, rerun: true });
     saveState(this.dir, S);
     return res;
   }
@@ -930,7 +1070,7 @@ export class Engine {
     const guard = this._configGuard(goal, wt);
     if (guard) return { error: guard };
     const rc = this._rulesView(goal)?.compiled;
-    const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), replan, constraints: { max_tasks: rc ? rc.plan.max_tasks : o.budgets.max_tasks, tiers: startableTiers(rc?.plan.tiers ?? TIERS, rc?.plan.max_start_tier), max_start_tier: rc?.plan.max_start_tier, scope_deny: (rc?.plan.scope_deny || []).map((d) => d.glob), protected_tests: o.protected_tests?.files || [], check_allowlist: this._checkAllowlist(goal) } });
+    const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), replan, constraints: { max_tasks: rc ? rc.plan.max_tasks : o.budgets.max_tasks, tiers: startableTiers(rc?.plan.tiers ?? TIERS, rc?.plan.max_start_tier), max_start_tier: rc?.plan.max_start_tier, scope_deny: (rc?.plan.scope_deny || []).map((d) => d.glob), protected_tests: o.protected_tests?.files || [], check_allowlist: this._checkAllowlist(goal), acceptance_first: rc?.checks.acceptance_first === true && goal.success_criteria.some((c) => c.check) } });
     const sessionId = crypto.randomUUID();
     const policyFile = path.join(this.P.workers, 'planner.policy.json');
     atomicWrite(policyFile, { ...this._policyHead(goal), ctx: { worktree: realpathDeepest(wt), path_scope: [], allowed_tools: ['Read', 'Glob', 'Grep'], allowed_commands: [], grants: [], home: this.env.HOME, base_branch: o.base_branch } });
@@ -1001,6 +1141,7 @@ export class Engine {
         return;
       }
     }
+    if (S.tasks.some((t) => t.status === 'ready') && !o.anticheat?.baselines_done && S.tasks.every((t) => t.attempts === 0)) await this._ensureBaselines(S, await this._ensureIntegration(S));
     const running = () => S.tasks.filter((t) => t.status === 'running');
     let slots = B.max_parallel - running().length;
     for (const task of S.tasks) {
@@ -1177,7 +1318,7 @@ export class Engine {
       }
       const decisions = (() => { try { return fs.readFileSync(path.join(this.P.workers, 'decisions.ndjson'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((d) => d.decision === 'deny'); } catch { return []; } })();
       const criteria = readJSON(path.join(this.dir, 'criteria.json'), {});
-      const md = buildReport({ goal, tasks: S.tasks, approvals: listApprovals(this.P.approvals), denials: decisions, diffStat, criteriaResults: criteria, events: readEvents(this.dir), governor: this.gov.load() });
+      const md = buildReport({ goal, tasks: S.tasks, state: S, approvals: listApprovals(this.P.approvals), denials: decisions, diffStat, criteriaResults: criteria, events: readEvents(this.dir), governor: this.gov.load() });
       atomicWrite(this.P.report, md);
       o.reported = true;
       this.ev('orch.report.written', 'orchestrator', null, { path: this.P.report, status: goal.status });
@@ -1198,7 +1339,7 @@ export function summarize(S, hb) {
   const counts = {}; for (const t of S.tasks) counts[t.status] = (counts[t.status] || 0) + 1;
   return { id: S.goal.id, title: S.goal.title, status: S.goal.status, blocked_reason: S.goal.blocked_reason || null, plan_state: S.goal.orch.plan_state,
     heartbeat: { seq: hb.seq, status: hb.status, ts: hb.ts }, tasks: counts, usage: S.goal.orch.usage, paused_reason: S.goal.orch.paused_reason, resume_at: S.goal.orch.resume_at || null,
-    task_list: S.tasks.map((t) => ({ id: t.id, status: t.status, tier: t.orch.model_tier, attempts: t.attempts })),
+    task_list: S.tasks.map((t) => ({ id: t.id, status: t.status, tier: t.orch.model_tier, attempts: t.attempts })), anticheat: rollup(S),
     plan_review: reviewView(S.tasks), plan_approval: S.goal.orch.plan_approval || null, trust_repo_config: !!S.goal.orch.trust_repo_config, unsandboxed_checks: !!S.goal.orch.unsandboxed_checks, sandbox_workers: !!S.goal.orch.sandbox_workers };
 }
 

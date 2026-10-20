@@ -11,11 +11,12 @@ import { ID_RE, iso } from './state.mjs';
 import { scopeHitsDeny, globCompileProblem, MAX_SCOPE_LEN } from './glob.mjs';
 import { CTRL_RE, escCtrl } from './ctrl.mjs';
 import { untrustedBlocks } from './untrusted.mjs';
+import { isTestPath } from './protect.mjs';
 
 export const TIERS = ['haiku', 'sonnet', 'opus'];
 export const PLANNER_SYSTEM = 'You are the planner for an AOS-1 goal. You do not edit files. Output ONLY one JSON object.';
 const OUTPUT_SCHEMA = '{"tasks":[{"id","title","description","depends_on":[],"model_tier":"haiku|sonnet|opus","path_scope":["glob"],'
-  + '"allowed_commands":["..."],"checks":[{"argv":[],"timeout_s":n}],"output_contract","acceptance":["..."]}], "risks":["..."]}';
+  + '"allowed_commands":["..."],"checks":[{"argv":[],"timeout_s":n}],"output_contract","acceptance":["..."],"role":"implementation|acceptance (optional)","allow_skip":["reason (optional)"]}], "risks":["..."]}';
 
 /** Repo facts for the planner: file tree depth 2 (tracked files) and Makefile targets. Bounded and read-only. */
 export function gatherRepoFacts(dir) {
@@ -55,6 +56,9 @@ export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: []
       + 'allowed_commands are ONLY for read-only inspection. Creating or editing files needs NO command: workers write files with their Write/Edit tools within path_scope, so never add printf/echo/tee/redirect/sed-style commands. '
       + 'Leave allowed_commands empty unless a read-only command is really needed. Put ALL verification (tests, builds, linters) in each task\'s `checks`: the engine runs those itself, in an OS sandbox (no network, writes only inside the task worktree). '
       + 'A human reviews every plan that has commands before anything is dispatched.',
+    ...(c.acceptance_first ? ['ACCEPTANCE TESTS FIRST (checks.acceptance_first): emit at least one task with "role":"acceptance" that ONLY writes test files (path_scope: test files/directories only) describing the goal\'s behaviour with concrete expected values, and no implementation. '
+      + 'Its check must not require the new tests to pass yet (e.g. `node --check <file>`), because the code does not exist. EVERY other task must depend (directly or through other tasks) on an acceptance task. '
+      + 'Implementation tasks may READ the acceptance tests but their path_scope must never reach them: the engine rejects such a plan, fails any attempt that changes them, and re-runs them from their committed version at the end.'] : []),
     'Produce tasks that are small (one concern, ideally < 200 changed lines), have disjoint path_scope where possible, start at the cheapest plausible tier, and each have at least one check from the allowed commands.',
     'Every task must create or change files within its path_scope. Do NOT add verification-only tasks (run the tests, check the output, review): the engine already runs each task\'s checks after the task and the goal\'s success-criteria checks at the end.',
     `OUTPUT SCHEMA: ${OUTPUT_SCHEMA}`,
@@ -148,6 +152,11 @@ export function validatePlan(plan, opts) {
     if (!TIERS.includes(t.model_tier)) bad(`${at}: model_tier must be one of ${TIERS.join('|')}`);
     else if (R && !R.plan.tiers.includes(t.model_tier)) bad(`${at}: model_tier ${t.model_tier} is not allowed by the rules (plan.tiers: ${R.plan.tiers.join(', ')})`);
     else if (R && TIERS.indexOf(t.model_tier) > TIERS.indexOf(R.plan.max_start_tier)) bad(`${at}: model_tier ${t.model_tier} is above plan.max_start_tier ${R.plan.max_start_tier}`);
+    if (t.role !== undefined && t.role !== 'implementation' && t.role !== 'acceptance') bad(`${at}: role must be "implementation" or "acceptance"`);
+    if (t.allow_skip !== undefined) {
+      if (!Array.isArray(t.allow_skip) || t.allow_skip.length > 5 || t.allow_skip.some((r) => typeof r !== 'string' || !r.trim() || r.length > 200)) bad(`${at}: allow_skip must be 1-5 reason strings (at most 200 characters each)`);
+      else t.allow_skip.forEach((r, k) => ctrl(r, `allow_skip[${k}]`));
+    }
     if (!Array.isArray(t.acceptance) || !t.acceptance.length || t.acceptance.some((a) => typeof a !== 'string' || !a.trim())) bad(`${at}: acceptance needs at least one non-empty string`);
     if (!Array.isArray(t.path_scope) || !t.path_scope.length) bad(`${at}: path_scope must be a non-empty array`);
     else for (const g of t.path_scope) {
@@ -174,6 +183,21 @@ export function validatePlan(plan, opts) {
     }
     if (Array.isArray(t.depends_on) && typeof t.id === 'string') tasks.push(t);
   }
+  // acceptance tests first (anti-cheat e): acceptance tasks only write test files; every other task depends on one and may not write what they write
+  const acc = tasks.filter((t) => t.role === 'acceptance'); const impl = tasks.filter((t) => t.role !== 'acceptance');
+  if (opts.acceptance_first && !acc.length) bad('checks.acceptance_first is on: the plan needs at least one task with "role":"acceptance" that writes the tests first');
+  for (const a of acc) {
+    for (const g of Array.isArray(a.path_scope) ? a.path_scope : []) if (typeof g === 'string' && !isTestPath(g)) bad(`${a.id}: an acceptance task may only write test files, but its path_scope "${g}" does not look like one (test/, tests/, __tests__/, *.test.*, *.spec.*)`);
+    for (const d of Array.isArray(a.depends_on) ? a.depends_on : []) if (impl.some((x) => x.id === d)) bad(`${a.id}: an acceptance task must not depend on an implementation task ("${d}")`);
+  }
+  if (acc.length) {
+    const byId = new Map(tasks.map((t) => [t.id, t]));
+    const reachesAcc = (t, seen = new Set()) => (Array.isArray(t.depends_on) ? t.depends_on : []).some((d) => { const x = byId.get(d); if (!x || seen.has(d)) return false; seen.add(d); return x.role === 'acceptance' || reachesAcc(x, seen); });
+    for (const t of impl) {
+      if (!reachesAcc(t)) bad(`${t.id}: with acceptance tests, every other task must depend on an acceptance task (${acc.map((a) => a.id).join(', ')})`);
+      for (const g of Array.isArray(t.path_scope) ? t.path_scope : []) for (const a of acc) for (const ag of Array.isArray(a.path_scope) ? a.path_scope : []) if (typeof g === 'string' && typeof ag === 'string' && scopeHitsDeny(g, ag)) bad(`${t.id}: path_scope "${g}" can reach the acceptance tests of ${a.id} ("${ag}"), which are read-only for every other task`);
+    }
+  }
   for (const t of tasks) for (const d of t.depends_on) {
     if (typeof d !== 'string' || !ids.has(d)) bad(`${t.id}: depends_on "${d}" is not a task in the plan`);
     else if (d === t.id) bad(`${t.id}: depends on itself`);
@@ -194,6 +218,7 @@ export function toTasks(planTasks, goal, nowMs, ladder = TIERS) {
       description: t.description, model_tier: t.model_tier, tier_ladder: [...ladder], path_scope: [...t.path_scope], read_scope: ['**'],
       allowed_tools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'], allowed_commands: [...(t.allowed_commands || [])],
       checks: t.checks.map((c) => ({ argv: [...c.argv], timeout_s: c.timeout_s })), branch: `aos/${goal.id}/${t.id}`, worktree: null,
+      ...(t.role === 'acceptance' ? { role: 'acceptance' } : {}), ...(Array.isArray(t.allow_skip) && t.allow_skip.length ? { allow_skip: [...t.allow_skip] } : {}),
       phase: null, attempt_log: [], grants: [], result_summary: null, tokens: { new: 0, cache_read: 0 }, denial_retries: 0, note: null,
     },
   }));
@@ -245,7 +270,7 @@ export function beyondPrompt(scope, text) {
 export function reviewView(tasks, goal = null) {
   const text = goal ? goalPromptText(goal) : null;
   const W = goal?.orch?.plan_warnings || {};
-  const view = tasks.map((t) => { const o = t.orch || t; return { ...(text === null ? {} : beyondPrompt(o.path_scope, text)), ...(W[t.id]?.length ? { warnings: [...W[t.id]] } : {}), id: t.id, title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
+  const view = tasks.map((t) => { const o = t.orch || t; return { ...(text === null ? {} : beyondPrompt(o.path_scope, text)), ...(W[t.id]?.length ? { warnings: [...W[t.id]] } : {}), id: t.id, ...(o.role === 'acceptance' ? { role: 'acceptance' } : {}), ...(o.allow_skip?.length ? { allow_skip: [...o.allow_skip] } : {}), title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
     allowed_commands: [...(o.allowed_commands || [])], checks: (o.checks || []).map((c) => ({ command: c.argv.join(' '), argv: c.argv, timeout_s: c.timeout_s })) }; });
   view.goal_warnings = [...(W.goal || [])]; // not serialised with the array: renderReview prints them
   return view;
@@ -253,7 +278,7 @@ export function reviewView(tasks, goal = null) {
 /** Hash of everything the approval covers in the engine's tasks (tier excluded: the retry ladder escalates it legitimately). */
 export function tasksHash(tasks, v = 1) {
   return sha256(canonical(tasks.map((t) => { const o = t.orch || t; return { id: t.id, depends_on: t.depends_on || [], path_scope: o.path_scope, allowed_commands: o.allowed_commands || [],
-    allowed_tools: o.allowed_tools || null, checks: (o.checks || []).map((c) => ({ argv: c.argv, timeout_s: c.timeout_s })),
+    allowed_tools: o.allowed_tools || null, ...(o.role === 'acceptance' ? { role: 'acceptance' } : {}), ...(o.allow_skip?.length ? { allow_skip: o.allow_skip } : {}), checks: (o.checks || []).map((c) => ({ argv: c.argv, timeout_s: c.timeout_s })),
     // v2: the text that reaches the worker prompt is covered too (a tasks.json edit of the description or the done-criteria is a plan change). v1 (goals approved before) omits it.
     ...(v >= 2 ? { title: t.title ?? null, description: o.description ?? null, output_contract: t.output_contract ?? null, acceptance: t.acceptance || [] } : {}) }; })));
 }
@@ -269,6 +294,8 @@ export function renderReview(view, rulesText) {
     for (const w of t.warnings || []) L.push(`!! WARNING (task ${e(t.id)}): ${e(w)}`);
     L.push(`task ${e(t.id)}  tier=${e(t.model_tier)}  scope=${t.path_scope.map(e).join(', ')}${t.depends_on.length ? `  after=${t.depends_on.map(e).join(',')}` : ''}`);
     const block = (label, text) => { const ls = String(text ?? '').slice(0, 2000).split('\n'); ls.forEach((ln, i) => L.push(i ? `    ${ln}` : `  ${label}: ${ln}`)); }; // what the worker is told (covered by the tasks hash)
+    if (t.role === 'acceptance') L.push('  ACCEPTANCE TASK: writes the tests first; every other task gets these test files read-only and the engine re-runs them from their committed version at verify');
+    if (t.allow_skip?.length) L.push(`  !! ALLOW_SKIP: this task may add skipped/todo tests (the anti-cheat check would otherwise fail it). Reason(s): ${t.allow_skip.map(e).join(' | ')}`);
     if (t.beyond_prompt) L.push(`  BEYOND THE PROMPT (heuristic, informational): scope ${t.beyond_paths.map(e).join(', ')} is not mentioned in the goal text; check it is intended`);
     if (t.title) block('title', t.title);
     if (t.description) block('description', t.description);

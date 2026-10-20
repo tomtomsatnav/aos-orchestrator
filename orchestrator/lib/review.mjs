@@ -11,26 +11,27 @@ export const REVIEW_USD_CAP = 0.25;
 export const MAX_DIFF_CHARS = 60000;
 export const MAX_NOTES_CHARS = 3000;
 
-export function buildReviewPrompt({ goal, diff, nonce = null }) {
+export function buildReviewPrompt({ goal, diff, nonce = null, anticheat = '' }) {
   const crit = goal.success_criteria.map((c) => `- ${c.id}: ${c.text}`).join('\n');
-  const U = untrustedBlocks([{ label: 'git diff base..integration', text: diff || '(no changes)', max: MAX_DIFF_CHARS }], { nonce });
+  const U = untrustedBlocks([{ label: 'git diff base..integration', text: diff || '(no changes)', max: MAX_DIFF_CHARS }, ...(anticheat ? [{ label: 'engine anti-cheat warnings', text: anticheat, max: 4000 }] : [])], { nonce });
   return [
     REVIEW_MARKER,
     `Review the change below for goal "${goal.title}". Success criteria (already verified by the engine's checks):\n${crit}`,
     U.notice,
     U.blocks[0],
+    ...(anticheat ? ['The engine flagged these possible shortcuts (heuristics, quoting worker-written code). Check first whether the code hard-codes answers the tests expect, or weakens what is tested:', U.blocks[1]] : []),
     'Write at most 12 short bullet lines of reviewer notes: scope creep beyond the goal, correctness risks the checks would not catch, missing or weak tests, anything a human should look at first. '
       + 'If you see nothing worth flagging, say "No concerns." Your notes are advisory and a human reads them; do not output anything else.',
   ].join('\n');
 }
 
 /** Runs the review. Returns {tier, text?, error?, usage}; never throws. */
-export async function runAdvisoryReview({ goal, orchDir, env, bin, tier = 'haiku', spawnFn, timeoutMs = 120000, killGraceMs = 2000, usdCap = REVIEW_USD_CAP }) {
+export async function runAdvisoryReview({ goal, anticheat = '', orchDir, env, bin, tier = 'haiku', spawnFn, timeoutMs = 120000, killGraceMs = 2000, usdCap = REVIEW_USD_CAP }) {
   try {
     const o = goal.orch;
     let diff = (await G.git(o.repo, ['diff', '-U2', `${o.base_commit}..${o.integration_branch}`], { allowFail: true })).stdout;
     if (!diff.trim()) diff = await G.diffStat(o.repo, o.base_commit, o.integration_branch);
-    const r = await callModel({ orchDir, env, bin, tier, prompt: buildReviewPrompt({ goal, diff }), usdCap, timeoutMs, killGraceMs, spawnFn, system: REVIEW_SYSTEM });
+    const r = await callModel({ orchDir, env, bin, tier, prompt: buildReviewPrompt({ goal, diff, anticheat }), usdCap, timeoutMs, killGraceMs, spawnFn, system: REVIEW_SYSTEM });
     if (r.error) return { tier, error: r.error, usage: r.usage };
     return { tier, text: sanitizeUntrusted(String(r.text || '').trim(), MAX_NOTES_CHARS), usage: r.usage };
   } catch (e) { return { tier, error: `review failed: ${String(e.message).slice(0, 200)}`, usage: { new_tokens: 0, notional_usd: 0 } }; }

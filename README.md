@@ -34,6 +34,22 @@ Unset `AOS_CLAUDE_BIN` and the same commands launch the real `claude` (needs it 
 
 Engine design, state layout and CLI details: [orchestrator/README.md](orchestrator/README.md), [docs/orchestrator-design.md](docs/orchestrator-design.md), verified CLI facts in [orchestrator/spike/README.md](orchestrator/spike/README.md). The on-disk layout other tools can rely on: [docs/orch-state-contract.md](docs/orch-state-contract.md).
 
+## How it stops cheating
+
+A worker is rewarded when the engine's checks pass, so the engine makes sure a pass is honest (`orchestrator/lib/anticheat.mjs`). Each rule is tested against a fake-claude worker that cheats.
+
+| Rule | Failure reason | Status |
+|---|---|---|
+| A `node --test` check runs with the TAP reporter and must run >= 1 test, with >= 1 passing; skipped/todo-only or a test file that declares nothing is a fail | `vacuous_pass` | enforced |
+| The check must count at least as many tests as the base commit (recorded by running the check on the base commit before the first dispatch; static `test(` count as fallback) | `tests_reduced` | enforced |
+| Added `.skip(` `.only(` `{ skip` `{ todo` `test.todo` `xit(` `xdescribe(` ... in a test file (unless the plan task has `allow_skip: [reason]`, shown at approval) | `tests_skipped` | enforced |
+| Changed `package.json` scripts, runner config (`.mocharc*`, `jest.config*`, `vitest.config*`, `.c8rc*`, `.npmrc` ...), or a script/Makefile a check runs (unless `path_scope` names that exact file; approval highlights it) | `check_config_changed` | enforced |
+| A test file deleted or renamed | `tests_deleted` | enforced |
+| `checks.acceptance_first: true` (on in `node-library` for goals with code criteria): the plan needs an `acceptance` task that writes the tests first; every other task depends on it, cannot reach its files, and the engine re-runs them from the committed version at verify | `acceptance_modified`, `acceptance_empty`, goal blocked | enforced |
+| Values the tests expect pasted into new source lines (`if (x === 'Hello World!') return 'hello-world'`) | `literal_copy` | advisory (`checks.literal_copy: fail` enforces it); shown in `report.md` and given to the advisory reviewer |
+
+Outcomes are in `report.md` ("Anti-cheat"), `aos-orch status` (`anticheat`), events `orch.anticheat.*` and `attempt_log[].anticheat` (see [docs/orch-state-contract.md](docs/orch-state-contract.md)). Limits: these are heuristics on a diff, not proof of honesty. A command that is not `node --test` (for example `make test`) is only judged when its output carries a node test summary; tests in other languages are not counted; a determined worker can still write a weak test that passes honestly.
+
 ## Live view
 
 The read-only live dashboard (goals, tasks, workers, cost) is in https://github.com/tomtomsatnav/agent-orchestration-standard. Its GOALS panel talks to this repo's control server (`aos-orch serve`, 127.0.0.1:4319).

@@ -9,8 +9,10 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { tokenize } from './shell.mjs';
 import { sandboxAvailable, wrapCommand, SANDBOX_EXEC } from './sandbox.mjs';
+import { forceTapArgv } from './anticheat.mjs';
 
 export const OUTPUT_CAP = 64 * 1024;
+const TAIL_CAP = 8 * 1024;
 
 export function checkEnv({ base = process.env, tmpDir } = {}) {
   const env = { PATH: ['/usr/bin', '/bin', '/usr/sbin', '/sbin', path.dirname(process.execPath)].join(':'), TERM: 'dumb', CI: '1' };
@@ -39,7 +41,7 @@ export function runCheck(check, opts) {
   const { cwd, signalGroupKill = true } = opts;
   return new Promise((resolve) => {
     const t0 = Date.now();
-    let out = ''; let truncated = false; let timedOut = false; let settled = false;
+    let out = ''; let truncated = false; let timedOut = false; let settled = false; let tailBuf = '';
     let child; let bin = check.argv[0]; let args = check.argv.slice(1); let env = opts.env; let ownTmp = null;
     const sandboxed = !opts.unsandboxed;
     if (sandboxed) {
@@ -58,7 +60,7 @@ export function runCheck(check, opts) {
     try { child = spawn(bin, args, { cwd, env, detached: signalGroupKill, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) {
       return resolve({ argv: check.argv, ok: false, exit_code: null, timed_out: false, output: `spawn failed: ${e.message}`, duration_ms: 0, sandboxed });
     }
-    const add = (d) => { if (out.length < OUTPUT_CAP) out += d; else truncated = true; };
+    const add = (d) => { if (out.length < OUTPUT_CAP) out += d; else truncated = true; tailBuf = (tailBuf + d).slice(-TAIL_CAP); };
     child.stdout.on('data', add); child.stderr.on('data', add);
     const killTree = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
     const timer = setTimeout(() => { timedOut = true; killTree('SIGTERM'); setTimeout(() => killTree('SIGKILL'), 2000).unref(); }, Math.max(1, check.timeout_s * 1000));
@@ -67,7 +69,8 @@ export function runCheck(check, opts) {
       killTree('SIGKILL'); // reap stragglers of the check's own group
       if (ownTmp) { try { fs.rmSync(ownTmp, { recursive: true, force: true }); } catch { /* best effort */ } }
       resolve({ argv: check.argv, ok: code === 0 && !timedOut && !err, exit_code: code, signal: sig || null, timed_out: timedOut, sandboxed,
-        output: (err ? `spawn error: ${err}\n` : '') + out.slice(0, OUTPUT_CAP) + (truncated ? '\n[output truncated]' : ''), duration_ms: Date.now() - t0 });
+        output: (err ? `spawn error: ${err}\n` : '') + out.slice(0, OUTPUT_CAP) + (truncated ? '\n[output truncated]' : ''), duration_ms: Date.now() - t0,
+        summary_text: truncated ? tailBuf : out }); // what anticheat parses for the test summary (the END of the output when it was truncated)
     };
     child.on('error', (e) => finish(null, null, e.message));
     child.on('close', (code, sig) => finish(code, sig));
@@ -88,7 +91,9 @@ export async function runChecks(checks, opts) {
       fs.mkdirSync(perCheck, { recursive: true, mode: 0o700 });
       o = { ...opts, sandbox: { ...opts.sandbox, tmpDir: perCheck } };
     }
-    const r = await runCheck(c, o);
+    // node --test checks run with the TAP reporter so the engine can count tests (anticheat); the approved argv is never rewritten
+    const r = await runCheck(opts.forceTap === false ? c : { ...c, argv: forceTapArgv(c.argv) }, o);
+    r.argv = c.argv;
     if (perCheck) { try { fs.rmSync(perCheck, { recursive: true, force: true }); } catch { /* best effort */ } }
     results.push(r);
     if (!r.ok) return { ok: false, results };
