@@ -80,3 +80,18 @@ test('S2: snapshotHash covers inputs and layers; recompileSnapshot refuses input
   const r = recompileSnapshot(forged, [], goal); assert.equal(r.ok, false); assert.match(r.errors[0], /do not match/);
   assert.equal(recompileSnapshot(snap, [], { orch: { rules: goal.orch.rules, repo_rules: { sha256: 'f'.repeat(64) } } }).ok, false, 'repo_rules.sha256 is checked too');
 });
+
+test('S3: brace globs and root-relative deny globs bind (the reviewer probes)', async () => {
+  const { evaluate, DEFAULT_POLICY, isProtectedRel } = await import('../lib/policy.mjs');
+  const { globToRegex, matchGlob } = await import('../lib/glob.mjs');
+  const pol = { ...DEFAULT_POLICY, paths: { ...DEFAULT_POLICY.paths, deny: [...DEFAULT_POLICY.paths.deny, '**/*.{js,mjs}', 'node_modules/**'] } };
+  const ctx = { worktree: '/w', path_scope: ['**'], allowed_tools: ['Write'], grants: [] };
+  const w = (f) => evaluate(pol, { tool_name: 'Write', tool_input: { file_path: f }, cwd: '/w' }, ctx);
+  assert.equal(w('/w/lib/x.js').decision, 'deny'); assert.equal(w('/w/lib/x.mjs').decision, 'deny'); assert.equal(w('/w/node_modules/a.txt').decision, 'deny');
+  assert.equal(w('/w/lib/x.ts').decision, 'allow'); assert.equal(w('/w/src/node_modules/a.txt').decision, 'allow', 'a relative glob is anchored at the worktree root');
+  assert.equal(isProtectedRel(pol, 'node_modules/a.txt'), true); assert.equal(isProtectedRel(pol, 'lib/ok.txt'), false);
+  assert.equal(globToRegex('a{b,c{d,e}}f').test('acef'), true); assert.equal(globToRegex('a{b').test('a{b'), true, 'unbalanced brace is a literal');
+  assert.equal(matchGlob('src/*.{js,ts}', 'src/a.ts'), true); assert.equal(matchGlob('[ab].js', 'b.js'), true); assert.equal(matchGlob('[!a].js', 'a.js'), false);
+  assert.equal(validateRules(R({ worker: { paths: { deny: [{ id: 'x', glob: '{a,b}{a,b}{a,b}{a,b}{a,b}' }] } } })).ok, false, 'a regex-expensive glob is refused');
+  assert.equal(validateRules(R({ worker: { paths: { deny: [{ id: 'x', glob: '**/*.{js,mjs}' }] } } })).ok, true);
+});

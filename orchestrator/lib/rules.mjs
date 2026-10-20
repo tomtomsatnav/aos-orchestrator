@@ -188,6 +188,7 @@ function validateRulesRaw(rules, { layer = 'user' } = {}) {
 }
 
 function globProblem(glob, where, bad, absoluteOk = false) {
+  if ((glob.match(/\{/g) || []).length > 4 || (glob.match(/\*+/g) || []).length > 8) { bad(`${where}: too many braces or wildcards`); return; } // keeps the generated regex cheap
   if (glob.startsWith('/') && !absoluteOk) bad(`${where}: must be relative or start with ~/`);
   else if (glob.startsWith('~') && !glob.startsWith('~/')) bad(`${where}: must be relative or start with ~/`);
 }

@@ -112,12 +112,22 @@ function makeResolver(ctx) {
   };
 }
 
-const hits = (globs, ps) => globs.map(fold).some((g) => ps.map(fold).some((p) => globToRegex(g).test(p) || matchGlob(g, p)));
+/** A deny glob that is neither absolute nor `**`-led is relative to the worktree root (`node_modules/**`, `*.pem`), not to wherever the path happens to be. */
+export const isRootRelative = (g) => !g.startsWith('/') && !g.startsWith('**');
+const hits = (globs, ps, roots = []) => globs.map(fold).some((g) => {
+  if (isRootRelative(g)) {
+    const rg = g.replace(/^\.\//, '');
+    return roots.some((root) => ps.some((p) => isInside(p, root) && matchGlob(rg, fold(path.relative(root, p)).split(path.sep).join('/'))));
+  }
+  return ps.map(fold).some((p) => globToRegex(g).test(p) || matchGlob(g, p));
+});
 /** Which layer protects one of these paths: 'floor' (code), 'default' (the policy's own deny list) or null. Floor wins when both match. */
 function pathDeniedBy(policy, ctx, ...ps) {
   const exp = (l) => l.map((x) => expandHome(x, ctx.home));
-  if (hits(exp(BUILTIN_DENY_GLOBS), ps)) return 'floor';
-  return hits(exp(policy.paths?.deny || []), ps) ? 'default' : null;
+  const wt = ctx.worktree ? path.resolve(ctx.worktree) : null;
+  const roots = wt ? [...new Set([wt, typeof ctx.realpath === 'function' ? ctx.realpath(wt) : wt])] : [];
+  if (hits(exp(BUILTIN_DENY_GLOBS), ps, roots)) return 'floor';
+  return hits(exp(policy.paths?.deny || []), ps, roots) ? 'default' : null;
 }
 
 /** mode: 'read' | 'write'. Returns null when the path is acceptable, else a result. */
@@ -359,7 +369,8 @@ function evaluateRaw(policy, toolCall, ctx) {
 export function isProtectedRel(policy, rel) {
   const pol = mergePolicy(policy);
   const p = fold(`/${rel}`);
-  return [...(pol.paths?.deny || []), ...FLOOR_DENY_GLOBS].filter((g) => g.startsWith('**/')).map(fold).some((g) => globToRegex(g).test(p));
+  const globs = [...(pol.paths?.deny || []), ...FLOOR_DENY_GLOBS].map(fold);
+  return globs.some((g) => (g.startsWith('**/') ? globToRegex(g).test(p) : g.startsWith('~') ? false : isRootRelative(g) && matchGlob(g.replace(/^\.\//, ''), fold(rel))));
 }
 
 /** Stable short key identifying a tool call (used to de-duplicate approval requests). */

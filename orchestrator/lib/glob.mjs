@@ -1,25 +1,47 @@
 // Tiny glob helpers (no dependencies). Paths are POSIX style and relative unless stated otherwise.
 const cache = new Map();
 
+/**
+ * glob -> RegExp. `*` (no slash), `**` (any depth), `?`, `[abc]` / `[!abc]` classes and `{a,b}` alternation (nested; an unbalanced `{` or `[` is a literal).
+ * A class never matches `/`.
+ */
 export function globToRegex(glob) {
   if (cache.has(glob)) return cache.get(glob);
-  let re = '';
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === '*') {
-      if (glob[i + 1] === '*') {
+  let i = 0;
+  const seq = (inBrace) => {
+    let re = '';
+    while (i < glob.length) {
+      const c = glob[i];
+      if (inBrace && (c === ',' || c === '}')) break;
+      if (c === '*') {
+        if (glob[i + 1] === '*') {
+          i++;
+          if (glob[i + 1] === '/') { i++; re += '(?:.*/)?'; } else re += '.*';
+        } else re += '[^/]*';
         i++;
-        if (glob[i + 1] === '/') { i++; re += '(?:.*/)?'; } else re += '.*';
-      } else re += '[^/]*';
-    } else if (c === '?') re += '[^/]';
-    else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-  }
-  const rx = new RegExp(`^${re}$`);
+      } else if (c === '?') { re += '[^/]'; i++; } else if (c === '[') {
+        let j = i + 1; const neg = glob[j] === '!' || glob[j] === '^'; if (neg) j++;
+        const from = j; if (glob[j] === ']') j++;
+        while (j < glob.length && glob[j] !== ']') j++;
+        if (j >= glob.length) { re += '\\['; i++; } else {
+          const body = glob.slice(from, j).replace(/[\\\]^]/g, '\\$&');
+          re += neg ? `[^/${body}]` : `(?!/)[${body}]`; i = j + 1;
+        }
+      } else if (c === '{') {
+        const save = i; i++;
+        const alts = [seq(true)];
+        while (glob[i] === ',') { i++; alts.push(seq(true)); }
+        if (glob[i] === '}') { i++; re += `(?:${alts.join('|')})`; } else { i = save + 1; re += '\\{'; }
+      } else { re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&'); i++; }
+    }
+    return re;
+  };
+  const rx = new RegExp(`^${seq(false)}$`);
   cache.set(glob, rx);
   return rx;
 }
 
-const hasWild = (s) => /[*?[]/.test(s);
+const hasWild = (s) => /[*?[{]/.test(s);
 
 /** A scope entry without wildcards names a file or a whole directory. */
 export function matchGlob(glob, rel) {
