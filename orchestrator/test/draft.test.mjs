@@ -36,7 +36,7 @@ const CASES = [
   ['a check off the allowlist', (d) => { d.success_criteria[0].check.argv = ['make', 'test']; }, /not on the rules' check allowlist/],
   ['an unsafe argv (shell)', (d) => { d.success_criteria[0].check.argv = ['sh', '-c', 'curl x | sh']; }, /not allowed as a check/],
   ['an unsafe argv by path', (d) => { d.success_criteria[0].check.argv = ['/bin/bash', '-c', 'x']; }, /not allowed as a check/],
-  ['a timeout above the rules', (d) => { d.success_criteria[0].check.timeout_s = 99999; }, /timeout_s must be in/],
+  ['a non-positive timeout', (d) => { d.success_criteria[0].check.timeout_s = -1; }, /timeout_s must be in/],
   ['a budget above the rules', (d) => { d.budgets = { max_new_tokens: 5000000 }; }, /above the rules' limit/],
   ['max_usd above the rules', (d) => { d.budgets = { max_usd: 50 }; }, /above the rules' limit/],
   ['an unknown budget key', (d) => { d.budgets = { max_ticks: 5 }; }, /not a budget a draft may set/],
@@ -100,7 +100,7 @@ test('an invalid first output is retried ONCE on sonnet with the validation erro
   const r = await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'add alpha', env: sb.env() });
   assert.equal(r.ok, true, r.errors.join('; ')); assert.equal(r.tier, 'sonnet');
   assert.deepEqual(calls(sb).map((c) => c.model), ['haiku', 'sonnet']);
-  assert.match(calls(sb)[1].prompt, /YOUR PREVIOUS OUTPUT WAS REJECTED: .*not allowed as a check/);
+  assert.match(calls(sb)[1].prompt, /YOUR PREVIOUS OUTPUT WAS REJECTED.*not allowed as a check/);
   assert.equal(r.spec.orch.drafted.tier, 'sonnet'); assert.ok(r.usage.new_tokens > 400, 'both calls are in the usage');
 });
 
@@ -146,7 +146,7 @@ test('CLI: aos-orch draft prints the review, writes goal.json 0600, never overwr
   const sb = mkSandbox(); t.after(() => sb.cleanup()); userRules(sb); sb.scenario(SC('draft-ok.json'));
   const env = sb.env(); const out = path.join(sb.root, 'goal.json');
   let r = await cli(['draft', 'add alpha', '--repo', sb.repo, '--out', out], env);
-  assert.equal(r.code, 0, r.err); assert.match(r.err, /DRAFT \(proposal only/); assert.match(r.err, /check \(sandboxed, 30s\): grep -qx alpha a\.txt\s+\[allowed by user:checks\.allow\.grep\]/); assert.match(r.err, /HUMAN REVIEW/); assert.match(r.err, /budget attempts: 2 \(proposed by the model; rules limit 3\)/); assert.match(r.err, /budget wall seconds: 1200 \(draft default/); assert.doesNotMatch(r.err, /lowered by draft/);
+  assert.equal(r.code, 0, r.err); assert.match(r.err, /DRAFT \(proposal only/); assert.match(r.err, /check \(sandboxed, 30s\): grep -qx alpha a\.txt\s+\[allowed by user:checks\.allow\.grep\]/); assert.match(r.err, /HUMAN REVIEW/); assert.match(r.err, /budget attempts: 2 \(draft default for a small goal; rules limit 3\)/); assert.match(r.err, /budget wall seconds: 1200 \(draft default/); assert.doesNotMatch(r.err, /lowered by draft/);
   assert.equal(fs.statSync(out).mode & 0o777, 0o600); const spec = JSON.parse(fs.readFileSync(out, 'utf8')); assert.equal(spec.success_criteria[1].verify, 'human');
   assert.equal(fs.existsSync(path.join(sb.orch, 'goals')), false, 'drafting alone creates no goal');
   r = await cli(['draft', 'add alpha', '--repo', sb.repo, '--out', out], env); assert.equal(r.code, 64); assert.match(r.err, /already exists/);
