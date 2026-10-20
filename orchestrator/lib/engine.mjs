@@ -18,7 +18,8 @@ import { compileGoal, recompileSnapshot, previewGoal, parseRepoRules, REPO_RULES
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
 import { Governor, DEFAULTS as GOV_DEFAULTS, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
-import { buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHashFor, tasksHashV, reviewView, canonical, sha256 } from './plan.mjs';
+import { listTestFiles, runnerFor, scopeHitsTests, serverWarnings } from './protect.mjs';
+import { startableTiers, buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHashFor, tasksHashV, reviewView, canonical, sha256 } from './plan.mjs';
 import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
 import { sandboxAvailable, wrapWorkerCommand, SANDBOX_EXEC } from './sandbox.mjs';
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
@@ -30,6 +31,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_SCRIPT = path.join(HERE, 'policy-hook.mjs');
 const budgetRule = (why) => (/new-token/.test(why) ? 'budgets.max_new_tokens' : /wall-clock/.test(why) ? 'budgets.max_wall_clock_s' : /tick/.test(why) ? 'budgets.max_ticks' : /USD/.test(why) ? 'budgets.max_usd' : 'budgets');
 const backoffS = (interval, errors) => Math.min(interval * 2 ** Math.min(errors || 0, 20), 900);
+/** Automatic re-plans after a planner plan fails validation (the validation errors are fed back); `aos-orch run <goal> --replan` is the human's explicit extra attempt. */
+export const AUTO_REPLANS = 1;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export class Engine {
@@ -247,6 +250,16 @@ export class Engine {
         case 'confirm': this._confirmCriterion(S, c); break;
         case 'approve-plan':
           if (goal.orch.plan_state === 'awaiting_approval') { this._activate(S, 'human', c.reviewed); saveState(this.dir, S); }
+          break;
+        case 'replan': // a goal blocked at planning (plan rejected by the validator or by the human): back to 'none' so the next step asks the planner again
+          if (goal.status === 'blocked' && goal.orch.plan_state === 'rejected' && !this.workers.size) {
+            for (const t of S.tasks) if (t.orch.worktree) { try { await this._dropWorktree(S, t); } catch { /* best effort */ } }
+            S.tasks = []; S.agents = []; goal.status = 'draft'; goal.blocked_reason = null; goal.orch.plan_state = 'none'; goal.orch.replans = 0; goal.orch.reported = false;
+            delete goal.orch.plan_fingerprint; delete goal.orch.plan_approval;
+            this.ev('orch.plan.replan_requested', 'human', null, { by: c.by || 'cli', previous: 'rejected' }); this.ev('goal.updated', 'orchestrator', null, { status: 'draft', plan_state: 'none' });
+            saveState(this.dir, S);
+            atomicWrite(this.P.hb, { ...loadHeartbeat(this.dir), status: 'running' });
+          }
           break;
         case 'reject-plan':
           if (goal.orch.plan_state === 'awaiting_approval') {
@@ -778,7 +791,13 @@ export class Engine {
     if (goal.status !== 'active') return;
     const crit = goal.success_criteria;
     const allDone = S.tasks.length > 0 && S.tasks.every((t) => t.status === 'done');
-    if (allDone && !crit.every((c) => c.met) && !o.final_checked) { await this._runCriteria(S); o.final_checked = true; saveState(this.dir, S); }
+    if (allDone && !crit.every((c) => c.met) && !o.final_checked) { await this._runCriteria(S); if (o.protected_tests?.files?.length) await this._runProtectedTests(S); o.final_checked = true; saveState(this.dir, S); }
+    if (allDone && o.protected_tests?.files?.length && !o.protected_result) await this._runProtectedTests(S); // fail closed: protection on and never run -> run it before anything can be achieved
+    if (allDone && o.protected_result && o.protected_result.ok === false) {
+      goal.status = 'blocked'; goal.blocked_reason = `the ORIGINAL existing tests fail against the integration branch (a test was deleted, weakened or the code broke it): ${String(o.protected_result.output || '').split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 300)}`;
+      this.ev('goal.blocked', 'orchestrator', null, { reason: goal.blocked_reason });
+      return;
+    }
     if (crit.length && crit.every((c) => c.met) && allDone) {
       await Promise.all([...this.workers.values()].map((r) => W.killGroup(r.pgid, { graceMs: this.killGraceMs })));
       this.workers.clear();
@@ -830,8 +849,19 @@ export class Engine {
     }
     if (!this._rulesCheck(S).ok) return this._planRejected(S, ['rules.snapshot.json was modified or is missing']);
     const rv = this._rulesView(goal); // compiled rules and worker policy of the (intact) snapshot: the plan must lie inside them (R7, G4)
-    const v = validatePlan(plan, { max_tasks: rv ? rv.compiled.plan.max_tasks : o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal), ...(rv ? { rules: rv.compiled, policy: rv.policy } : {}) });
-    if (!v.ok) return this._planRejected(S, v.errors);
+    const validate = (pl) => validatePlan(pl, { max_tasks: rv ? rv.compiled.plan.max_tasks : o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal), ...(rv ? { rules: rv.compiled, policy: rv.policy } : {}) });
+    let v = validate(plan);
+    // a planner plan that breaks the rules gets AUTO_REPLANS automatic re-plan(s) with the exact validation errors fed back (its tokens are counted in the goal's usage like any planner call)
+    while (!v.ok && source === 'planner' && (o.replans || 0) < AUTO_REPLANS && !o.halt_reason && o.usage.new_tokens < o.budgets.max_new_tokens) {
+      o.replans = (o.replans || 0) + 1;
+      this.ev('orch.plan.replan', 'orchestrator', null, { attempt: o.replans, of: AUTO_REPLANS, errors: v.errors.slice(0, 20), counted_in_budget: true });
+      saveState(this.dir, S);
+      const r2 = await this._runPlanner(S, { errors: v.errors });
+      if (r2.error) return this._planRejected(S, [`re-plan failed: ${r2.error}`, ...v.errors]);
+      plan = r2.plan; v = validate(plan);
+    }
+    if (!v.ok) return this._planRejected(S, o.replans ? [`still invalid after ${o.replans} automatic re-plan(s)`, ...v.errors] : v.errors);
+    o.plan_warnings = await this._planWarnings(goal, v.tasks);
     o.tasks_hash_v = 2; // new plans are hashed with their description/output_contract/acceptance too (older goals keep v1 so their approval still verifies)
     S.tasks = toTasks(v.tasks, goal, this.now(), this._R(goal).retry.ladder);
     S.agents = S.tasks.map((t) => ({ id: t.assignee, role: 'worker', capabilities: ['edit', 'bash'], can_delegate: false, status: 'idle', current_task: null, last_event_at: null, orch: { tier: t.orch.model_tier } }));
@@ -849,6 +879,43 @@ export class Engine {
     saveState(this.dir, S);
   }
 
+  /** Informational warnings shown at plan approval: {taskId|'goal': [text]}. (a) a path_scope that includes an EXISTING test file; (b) a check on a test that looks like it needs a local server while checks.allow_loopback is false. */
+  async _planWarnings(goal, tasks) {
+    const o = goal.orch; const w = {}; const add = (k, m) => { (w[k] ||= []).push(m); };
+    const prot = o.protected_tests?.files || [];
+    for (const t of tasks) {
+      const hit = scopeHitsTests(t.path_scope, prot);
+      if (hit.length) add(t.id, `path_scope includes EXISTING test file(s) ${hit.slice(0, 5).join(', ')}${hit.length > 5 ? ` (+${hit.length - 5})` : ''}. Existing tests must stay unchanged: the originals from the base commit are re-run at verify and the goal cannot be achieved if one fails. Approve only if modifying them is really intended.`);
+    }
+    if (o.allow_loopback !== true && o.worktree_root) { // (a supplied plan has no integration worktree yet: nothing to read)
+      const wt = this._integrationWt(goal);
+      const read = async (rel) => { const f = path.join(wt, rel); return fs.existsSync(f) && fs.statSync(f).size < 200000 ? fs.readFileSync(f, 'utf8') : null; };
+      for (const t of tasks) for (const m of await serverWarnings(t.checks.map((c) => c.argv), read, { label: (i) => `check ${i + 1}` })) add(t.id, m);
+      for (const m of await serverWarnings(goal.success_criteria.filter((c) => c.check).map((c) => c.check.argv), read, { label: (i) => `success-criteria check ${i + 1}` })) add('goal', m);
+    }
+    for (const [k, v] of Object.entries(w)) this.ev('orch.plan.warning', 'orchestrator', k === 'goal' ? null : k, { warnings: v.slice(0, 5) });
+    return w;
+  }
+
+  /** Re-run the ORIGINAL test files (base_commit) against the integration branch: they are written over the integration tree, run sandboxed, and the tree is restored. */
+  async _runProtectedTests(S) {
+    const goal = S.goal; const o = goal.orch; const pt = o.protected_tests;
+    const wt = this._integrationWt(goal);
+    const { js, other } = runnerFor(pt.files);
+    const res = { ok: true, files: js.length, not_executed: other.slice(0, 20), at: iso(this.now()) };
+    if (js.length) {
+      try {
+        for (const f of js) { const b = await G.showBlob(o.repo, pt.base_commit, f); if (b) { fs.mkdirSync(path.dirname(path.join(wt, f)), { recursive: true }); fs.writeFileSync(path.join(wt, f), b); } }
+        const r = await runCheck({ argv: ['node', '--test', ...js], timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('protected') }), ...this._sandboxOpts(goal, wt, 'protected') });
+        res.ok = r.ok; if (!r.ok) res.output = tail(r.output || '', 2000);
+      } catch (e) { res.ok = false; res.output = `could not run the original tests: ${String(e.message).slice(0, 300)}`; } finally { await G.discardChanges(wt).catch(() => {}); }
+    }
+    o.protected_result = res;
+    this.ev('orch.protected_tests.checked', 'orchestrator', null, { ok: res.ok, files: res.files, not_executed: other.length });
+    saveState(this.dir, S);
+    return res;
+  }
+
   async _planRejected(S, errors) {
     const goal = S.goal;
     goal.orch.plan_state = 'rejected'; goal.status = 'blocked'; goal.blocked_reason = `plan rejected: ${errors.slice(0, 5).join('; ')}`;
@@ -857,12 +924,13 @@ export class Engine {
     saveState(this.dir, S);
   }
 
-  async _runPlanner(S) {
+  async _runPlanner(S, replan = null) {
     const goal = S.goal; const o = goal.orch; const PR = this._R(goal).plan; const pTier = PR.planner_tier;
     const wt = this._integrationWt(goal);
     const guard = this._configGuard(goal, wt);
     if (guard) return { error: guard };
-    const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), constraints: { max_tasks: o.budgets.max_tasks, tiers: this._rulesView(goal)?.compiled.plan.tiers ?? TIERS, check_allowlist: this._checkAllowlist(goal) } });
+    const rc = this._rulesView(goal)?.compiled;
+    const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), replan, constraints: { max_tasks: rc ? rc.plan.max_tasks : o.budgets.max_tasks, tiers: startableTiers(rc?.plan.tiers ?? TIERS, rc?.plan.max_start_tier), max_start_tier: rc?.plan.max_start_tier, scope_deny: (rc?.plan.scope_deny || []).map((d) => d.glob), protected_tests: o.protected_tests?.files || [], check_allowlist: this._checkAllowlist(goal) } });
     const sessionId = crypto.randomUUID();
     const policyFile = path.join(this.P.workers, 'planner.policy.json');
     atomicWrite(policyFile, { ...this._policyHead(goal), ctx: { worktree: realpathDeepest(wt), path_scope: [], allowed_tools: ['Read', 'Glob', 'Grep'], allowed_commands: [], grants: [], home: this.env.HOME, base_branch: o.base_branch } });
@@ -1028,7 +1096,7 @@ export class Engine {
   }
   _sandboxOpts(goal, wt, name) {
     const o = goal.orch;
-    return { sandbox: { worktree: wt, tmpDir: this._tmp(name), goalDir: this.dir, orchDir: this.orchDir, home: this.env.HOME, ports: o.check_localhost_ports || [], profileDir: path.join(this.dir, 'sandbox') },
+    return { sandbox: { worktree: wt, tmpDir: this._tmp(name), goalDir: this.dir, orchDir: this.orchDir, home: this.env.HOME, ports: o.check_localhost_ports || [], loopback: o.allow_loopback === true, profileDir: path.join(this.dir, 'sandbox') },
       sandboxBin: this.sandboxBin, unsandboxed: o.unsandboxed_checks === true };
   }
   async _hashInstructions(ref) {
@@ -1166,6 +1234,11 @@ export async function createGoal(orchDir, spec, { clock = realClock } = {}) {
   goal.orch.trust_repo_config = trusted;
   if (findings.length && !trusted) throw new Error(`refusing repo ${info.root}: it carries Claude Code configuration that could add hooks, permissions, env, MCP servers or commands to workers:\n  ${formatFindings(findings)}\nReview it; if you wrote it and trust it, set orch.trust_repo_config (CLI: --trust-repo-config)${spec.orch?.trust_repo_config ? ' (trust was requested, but the compiled rules forbid it: a rules.json with repo_config.trust false wins)' : ''}.`);
   goal.orch.repo_config_findings = findings.map((f) => ({ path: path.relative(info.root, f.path) || '.', kind: f.kind, detail: f.detail }));
+  // checks.protect_existing_tests: the test files of base_commit are listed now; at verify their ORIGINAL contents are re-run against the integration branch
+  if (pre.comp.compiled.checks.protect_existing_tests === true) {
+    const tf = await listTestFiles(info.root, info.base_commit);
+    goal.orch.protected_tests = { base_commit: info.base_commit, files: tf.files, truncated: tf.truncated };
+  }
   const dir = createGoalDir(orchDir, goal, spec.plan || null);
   if (rr.rules) atomicWrite(path.join(dir, REPO_RULES_FILE), rr.rules);
   const notices = instructionNotice(info.root, instructions);

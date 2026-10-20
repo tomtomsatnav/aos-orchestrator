@@ -437,7 +437,8 @@ function ruleMatches(rule, c) {
 
 function pickStep(scenario, taskId, prompt, isPlanner, counterKey, stateDir, isDraft = false, isReview = false) {
   let list; let source;
-  if (isReview) { list = scenario.review || [{}]; source = 'review'; } else if (isPlanner && scenario.planner) { list = [scenario.planner]; source = 'planner'; }
+  if (isReview) { list = scenario.review || [{}]; source = 'review'; }
+  else if (isPlanner && scenario.planner) { list = scenario.planner; source = 'planner'; } // a Step, or a list of Steps (one per planner call)
   else if (isDraft && scenario.draft) { list = scenario.draft; source = 'draft'; }
   else {
     const tasks = scenario.tasks || {};

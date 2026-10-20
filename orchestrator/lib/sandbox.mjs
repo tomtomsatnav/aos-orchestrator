@@ -20,7 +20,7 @@ export const SECRET_DIRS = ['.ssh', '.aws', '.config', '.claude', '.gnupg', '.ne
   '.zsh_history', '.bash_history', '.zhistory', '.history', '.python_history', '.node_repl_history', '.zsh_sessions'];
 
 /** Static profile text. `ports` = number of allowed loopback ports (each is the parameter PORT<i>). No caller data goes in here. */
-export function buildProfile({ ports = 0 } = {}) {
+export function buildProfile({ ports = 0, loopback = false } = {}) {
   const n = Math.max(0, Math.min(16, ports | 0));
   const L = [
     '(version 1)', '(deny default)',
@@ -39,6 +39,9 @@ export function buildProfile({ ports = 0 } = {}) {
   for (const h of ['HOME0', 'HOME1']) for (const d of SECRET_DIRS) L.push(`(deny file-read* file-write* (subpath (string-append (param "${h}") "/${d}")))`);
   L.push('(allow file-read* file-write* (subpath (param "WORKTREE")) (subpath (param "TMPDIR_CHECK")))');
   for (let i = 0; i < n; i++) L.push(`(allow network-outbound (remote ip (string-append "localhost:" (param "PORT${i}"))))`);
+  // checks.allow_loopback (human-visible rule): the check may listen on and connect to 127.0.0.1 / localhost on any port; nothing else on the network.
+  // TODO(linux): the bwrap sandbox (other branch) must offer the same: a private network namespace with only `lo` up when allow_loopback is true.
+  if (loopback) L.push('(allow network-bind (local ip "localhost:*"))', '(allow network-inbound (local ip "localhost:*"))', '(allow network-outbound (remote ip "localhost:*"))');
   return `${L.join('\n')}\n`;
 }
 
@@ -170,7 +173,7 @@ export function wrapCommand(argv, cfg) {
   if (/\0/.test(argv.join(''))) throw new Error('sandbox: NUL in argv');
   const ports = (cfg.ports || []).map(Number);
   if (ports.some((p) => !Number.isInteger(p) || p < 1 || p > 65535)) throw new Error('sandbox: invalid localhost port');
-  const profile = buildProfile({ ports: ports.length });
+  const profile = buildProfile({ ports: ports.length, loopback: cfg.loopback === true });
   const dir = cfg.profileDir;
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, `check-${crypto.createHash('sha256').update(profile).digest('hex').slice(0, 12)}.sb`);

@@ -33,7 +33,11 @@ export function gatherRepoFacts(dir) {
   return facts;
 }
 
-export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: [] }, constraints }) {
+/** The tiers a plan may use: plan.tiers, none above plan.max_start_tier (what validatePlan enforces). */
+export const startableTiers = (tiers, maxStart) => { const m = TIERS.indexOf(maxStart); return (tiers || TIERS).filter((t) => m < 0 || TIERS.indexOf(t) <= m); };
+
+/** `replan` = {errors[], plan?}: the previous plan was rejected by validatePlan; the exact errors are fed back (one automatic re-plan). */
+export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: [] }, constraints, replan = null }) {
   const B = goal.orch.budgets;
   const c = constraints || { max_tasks: B.max_tasks, tiers: TIERS, check_allowlist: goal.orch.check_allowlist || [] };
   const crit = goal.success_criteria.map((x) => `- ${x.id}: ${x.text}${x.check ? ` (check argv: ${JSON.stringify(x.check.argv)})` : ''}`).join('\n');
@@ -45,6 +49,7 @@ export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: []
     U.notice,
     `Repo facts (from the repository, so untrusted): ${U.blocks[0]}`,
     `Constraints: max_tasks=${c.max_tasks}; allowed tiers: ${c.tiers.join(', ')}; command allowlist candidates for checks: ${JSON.stringify(c.check_allowlist)}`,
+    `HARD LIMITS (a plan that breaks any of them is REJECTED, not repaired): every task's model_tier must be one of [${c.tiers.join(', ')}]${c.max_start_tier ? ` and never above "${c.max_start_tier}" (plan.max_start_tier)` : ''}; at most ${c.max_tasks} tasks; every check argv must START with one of ${JSON.stringify(c.check_allowlist)} (nothing else, no other runner)${c.scope_deny?.length ? `; path_scope must not reach any of ${JSON.stringify(c.scope_deny)}` : ''}${c.protected_tests?.length ? `; these EXISTING test files must stay unchanged, never put them in a path_scope (add new test files instead): ${JSON.stringify(c.protected_tests.slice(0, 30))}` : ''}.`,
     'WORKERS CANNOT RUN CODE: their Bash is limited to read-only inspection (ls, cat, head, tail, wc, grep, rg, find -name, diff, git status/diff/log/show). '
       + 'node, npm/npx/pnpm/yarn, make, python, ruby, perl, shells, env/xargs wrappers, find -exec and git hooks-running subcommands are rejected: a plan whose allowed_commands contain any of them is REJECTED. '
       + 'allowed_commands are ONLY for read-only inspection. Creating or editing files needs NO command: workers write files with their Write/Edit tools within path_scope, so never add printf/echo/tee/redirect/sed-style commands. '
@@ -53,6 +58,7 @@ export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: []
     'Produce tasks that are small (one concern, ideally < 200 changed lines), have disjoint path_scope where possible, start at the cheapest plausible tier, and each have at least one check from the allowed commands.',
     'Every task must create or change files within its path_scope. Do NOT add verification-only tasks (run the tests, check the output, review): the engine already runs each task\'s checks after the task and the goal\'s success-criteria checks at the end.',
     `OUTPUT SCHEMA: ${OUTPUT_SCHEMA}`,
+    ...(replan ? [`YOUR PREVIOUS PLAN WAS REJECTED by the validator: ${replan.errors.slice(0, 8).join(' | ')}. Output a corrected plan that fixes exactly these and respects the HARD LIMITS above.`] : []),
   ].join('\n');
   return { system: PLANNER_SYSTEM, prompt };
 }
@@ -238,8 +244,11 @@ export function beyondPrompt(scope, text) {
 /** What a human reviews, per task, in plain text: tier, path scope, allowed commands and the exact check commands. */
 export function reviewView(tasks, goal = null) {
   const text = goal ? goalPromptText(goal) : null;
-  return tasks.map((t) => { const o = t.orch || t; return { ...(text === null ? {} : beyondPrompt(o.path_scope, text)), id: t.id, title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
+  const W = goal?.orch?.plan_warnings || {};
+  const view = tasks.map((t) => { const o = t.orch || t; return { ...(text === null ? {} : beyondPrompt(o.path_scope, text)), ...(W[t.id]?.length ? { warnings: [...W[t.id]] } : {}), id: t.id, title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
     allowed_commands: [...(o.allowed_commands || [])], checks: (o.checks || []).map((c) => ({ command: c.argv.join(' '), argv: c.argv, timeout_s: c.timeout_s })) }; });
+  view.goal_warnings = [...(W.goal || [])]; // not serialised with the array: renderReview prints them
+  return view;
 }
 /** Hash of everything the approval covers in the engine's tasks (tier excluded: the retry ladder escalates it legitimately). */
 export function tasksHash(tasks, v = 1) {
@@ -255,7 +264,9 @@ export const tasksHashFor = (goal, tasks) => tasksHash(tasks, tasksHashV(goal));
 export function renderReview(view, rulesText) {
   const L = [];
   const e = escCtrl; const arg = (a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : e(JSON.stringify(String(a))));
+  for (const w of view.goal_warnings || []) L.push(`!! WARNING: ${e(w)}`);
   for (const t of view) {
+    for (const w of t.warnings || []) L.push(`!! WARNING (task ${e(t.id)}): ${e(w)}`);
     L.push(`task ${e(t.id)}  tier=${e(t.model_tier)}  scope=${t.path_scope.map(e).join(', ')}${t.depends_on.length ? `  after=${t.depends_on.map(e).join(',')}` : ''}`);
     const block = (label, text) => { const ls = String(text ?? '').slice(0, 2000).split('\n'); ls.forEach((ln, i) => L.push(i ? `    ${ln}` : `  ${label}: ${ln}`)); }; // what the worker is told (covered by the tasks hash)
     if (t.beyond_prompt) L.push(`  BEYOND THE PROMPT (heuristic, informational): scope ${t.beyond_paths.map(e).join(', ')} is not mentioned in the goal text; check it is intended`);

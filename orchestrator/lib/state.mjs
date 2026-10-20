@@ -213,7 +213,8 @@ export function slug(s) { return String(s).toLowerCase().replace(/[^a-z0-9]+/g, 
 export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
   if (!spec || typeof spec !== 'object') throw new Error('goal spec must be an object');
   const ts = iso(clock.now());
-  const id = spec.id || `g-${ts.slice(0, 10).replace(/-/g, '')}-${slug(spec.title || 'goal')}`;
+  // a generated id carries a random suffix so a second goal from the same title on the same day never collides; an explicit spec.id stays strict (createGoalDir refuses a duplicate)
+  const id = spec.id || `g-${ts.slice(0, 10).replace(/-/g, '')}-${slug(spec.title || 'goal')}-${crypto.randomBytes(2).toString('hex')}`;
   if (!ID_RE.test(id)) throw new Error(`invalid goal id "${id}"`);
   if (typeof spec.title !== 'string' || !spec.title.trim()) throw new Error('goal.title is required');
   const o = spec.orch || {};

@@ -12,6 +12,7 @@ import * as W from './worker.mjs';
 import { compileRules, summarizeRules, renderRulesSummary, buildRulesSnapshot } from './rules.mjs';
 import { readUserLayer, parseRepoRules, REPO_RULES_PATH } from './rules-store.mjs';
 import { extractJson, gatherRepoFacts, UNSAFE_CHECK_CMDS } from './plan.mjs';
+import { serverWarnings } from './protect.mjs';
 import { commandAllowed } from './checks.mjs';
 import { scanRepoConfig } from './repo-config.mjs';
 import { CTRL_RE, escCtrl, q } from './ctrl.mjs';
@@ -79,6 +80,37 @@ export function checkProblem(check, compiled) {
 }
 
 /**
+ * Deterministic repair of NEAR-MISS check argv, only when the argv is not already allowed and the repaired argv IS allowed by the compiled rules (the allowlist is never widened):
+ * `npm run test` <-> `npm test` (also pnpm, yarn), `node x.test.mjs` -> `node --test x.test.mjs`, and a timeout above the rules' maximum (or missing) is clamped.
+ * Returns {check, notes[]}; anything else is returned untouched for checkProblem to reject.
+ */
+export function normalizeCheck(check, compiled) {
+  if (!check || typeof check !== 'object' || Array.isArray(check) || !Array.isArray(check.argv) || !check.argv.length || check.argv.some((x) => typeof x !== 'string')) return { check, notes: [] };
+  const notes = []; let argv = check.argv; let timeout_s = check.timeout_s;
+  const max = compiled.checks.max_timeout_s;
+  if (timeout_s === undefined || (typeof timeout_s === 'number' && timeout_s > max)) { const to = Math.min(60, max); notes.push(`timeout_s ${timeout_s === undefined ? 'missing' : timeout_s} -> ${to === 60 && timeout_s !== undefined ? max : to}`); timeout_s = timeout_s === undefined ? to : max; }
+  if (!matchedAllowRule(argv, compiled)) {
+    const b = path.basename(argv[0]); const cands = [];
+    if (['npm', 'pnpm', 'yarn'].includes(b)) {
+      if (argv[1] === 'run' && argv[2] === 'test') cands.push([argv[0], 'test', ...argv.slice(3)]);
+      else if (argv[1] === 'test') cands.push([argv[0], 'run', 'test', ...argv.slice(2)]);
+    }
+    if (b === 'node' && argv[1] && !argv[1].startsWith('-') && /test|spec/i.test(argv[1])) cands.push([argv[0], '--test', ...argv.slice(1)]);
+    const hit = cands.find((a) => matchedAllowRule(a, compiled));
+    if (hit) { notes.push(`${argv.join(' ')} -> ${hit.join(' ')}`); argv = hit; }
+  }
+  return notes.length ? { check: { ...check, argv, timeout_s }, notes } : { check, notes };
+}
+/** One example check argv per allowlist entry, for the draft prompt. */
+export function allowedExamples(compiled) {
+  return compiled.checks.allowlist.slice(0, 12).map((e) => {
+    const t = String(e.cmd).split(/\s+/).filter(Boolean); const last = t.at(-1);
+    const argv = t.length === 1 || last.startsWith('-') ? [...t, last === 'grep' ? '-qx' : null, last === 'grep' ? 'expected text' : '<file>', last === 'grep' ? '<file>' : null].filter(Boolean) : t;
+    return { argv, timeout_s: 60 };
+  });
+}
+
+/**
  * Validate a parsed model output. Never throws, never repairs. {ok, errors[], questions[], draft}: `questions` (<= 3) means the model could not tell what "done" means
  * (nothing else is validated then); otherwise `draft` is a sanitized copy: {title, description, success_criteria[{id,text,check?,matched_rule?,verify?}], budgets, risks}.
  */
@@ -97,13 +129,15 @@ export function validateDraft(raw, { compiled }) {
   if (questions.length) return { ok: true, errors: [], questions, draft: null };
   if (typeof raw.title !== 'string' || !raw.title.trim() || raw.title.length > LIM.title || hasCtrl(raw.title)) bad(`title must be 1-${LIM.title} plain characters`);
   if (raw.description !== undefined && (typeof raw.description !== 'string' || raw.description.length > LIM.description || hasCtrl(raw.description, true))) bad(`description must be a string of at most ${LIM.description} characters without control characters`);
-  const crits = [];
+  const crits = []; const goodCrits = []; const rejected = []; const notes = [];
   if (!Array.isArray(raw.success_criteria) || raw.success_criteria.length < 1 || raw.success_criteria.length > LIM.criteria) bad(`success_criteria must have 1-${LIM.criteria} items`);
   else {
     const seen = new Set();
     raw.success_criteria.forEach((c, i) => {
       const at = `success_criteria[${i}]`;
       if (!c || typeof c !== 'object' || Array.isArray(c)) return bad(`${at} must be an object`);
+      const before = errors.length;
+      if (c.check !== undefined) { const nr = normalizeCheck(c.check, compiled); if (nr.notes.length) { c = { ...c, check: nr.check }; notes.push(`${at}: ${nr.notes.join('; ')}`); } }
       for (const k of Object.keys(c)) if (!['id', 'text', 'check', 'verify'].includes(k)) bad(`${at}: unknown field ${q(k.slice(0, 20))}`);
       const id = c.id === undefined ? `c${i + 1}` : c.id;
       if (typeof id !== 'string' || !ID_RE.test(id)) bad(`${at}.id must match ${ID_RE}`); else if (seen.has(id)) bad(`${at}.id "${id}" is used twice`); else seen.add(id);
@@ -113,7 +147,9 @@ export function validateDraft(raw, { compiled }) {
       if (c.verify !== 'human' && c.check === undefined) bad(`${at}: needs a check (an allowlisted command) or verify "human"`);
       let check = null; let rule = null;
       if (c.check !== undefined) { const p = checkProblem(c.check, compiled); if (p) bad(`${at}.check: ${p}`); else { check = { argv: [...c.check.argv], timeout_s: c.check.timeout_s }; rule = matchedAllowRule(c.check.argv, compiled); } }
-      crits.push({ id: String(id), text: String(c.text ?? '').trim(), ...(check ? { check, matched_rule: rule } : {}), ...(c.verify === 'human' ? { verify: 'human' } : {}) });
+      const item = { id: String(id), text: String(c.text ?? '').trim(), ...(check ? { check, matched_rule: rule } : {}), ...(c.verify === 'human' ? { verify: 'human' } : {}) };
+      crits.push(item);
+      if (errors.length === before) goodCrits.push(item); else rejected.push({ id: String(id).slice(0, 32), text: String(c.text ?? '').slice(0, 200), errors: errors.slice(before) });
     });
     const human = crits.filter((c) => c.verify === 'human').length; const checks = crits.filter((c) => c.check).length;
     if (!errors.length) {
@@ -132,8 +168,11 @@ export function validateDraft(raw, { compiled }) {
       budgets[k] = v;
     }
   }
-  if (errors.length) return { ok: false, errors, questions: [], draft: null };
-  return { ok: true, errors: [], questions: [], draft: { title: raw.title.trim(), description: typeof raw.description === 'string' ? raw.description : '', success_criteria: crits, budgets, risks } };
+  if (errors.length) { // nothing is accepted, but the valid parts are kept so a human can finish the draft by hand (never turned into a goal)
+    const okTitle = typeof raw.title === 'string' && raw.title.trim() && raw.title.length <= LIM.title && !hasCtrl(raw.title);
+    return { ok: false, errors, questions: [], draft: null, partial: { title: okTitle ? raw.title.trim() : null, description: typeof raw.description === 'string' && raw.description.length <= LIM.description && !hasCtrl(raw.description, true) ? raw.description : '', success_criteria: goodCrits, rejected_criteria: rejected, budgets, risks } };
+  }
+  return { ok: true, errors: [], questions: [], notes, draft: { title: raw.title.trim(), description: typeof raw.description === 'string' ? raw.description : '', success_criteria: crits, budgets, risks } };
 }
 
 /** The goal.json for a validated draft: the human edits it, then `aos-orch run` (createGoal re-validates everything). */
@@ -152,8 +191,6 @@ function packageScripts(root) {
 }
 export function buildDraftPrompt({ request, facts, scripts = [], compiled, errors = null }) {
   const allow = compiled.checks.allowlist.map((e) => e.cmd);
-  const caps = BUDGET_CAPS(compiled);
-  for (const [k, v] of Object.entries(DRAFT_DEFAULTS)) caps[k] = Math.min(caps[k], v); // aim for a small goal: the validator still accepts anything up to the rules' limits
   let nonce; do nonce = `REQUEST-${crypto.randomBytes(8).toString('hex')}`; while (request.includes(nonce)); // a delimiter the request cannot contain or build by stripping
   const U = untrustedBlocks([{ label: 'repo facts', text: `files (depth 2): ${facts.files.join(' ') || '(unknown)'}; Makefile targets: ${facts.make_targets.join(' ') || '(none)'}; package.json scripts: ${scripts.join(' ') || '(none)'}`, max: 8000 }]);
   const lines = [
@@ -162,14 +199,15 @@ export function buildDraftPrompt({ request, facts, scripts = [], compiled, error
     `<<<${nonce}\n${request}\n${nonce}>>>`,
     U.notice,
     `Repo facts (from the repository, so untrusted): ${U.blocks[0]}`,
-    `Allowed check commands (a check argv must start with one of these; nothing else will be accepted): ${JSON.stringify(allow)}; max check timeout_s: ${compiled.checks.max_timeout_s}`,
-    `Budget limits you may only go under (the goal is small: do not ask for more than you need): ${JSON.stringify(caps)}`,
+    `CLOSED LIST of allowed check commands. A check argv MUST start with exactly one of these entries (same program, same flags, in order); any other program or form (npm run ..., make, pytest, python, sh, npx, a different flag order) is REJECTED: ${JSON.stringify(allow)}; max check timeout_s: ${compiled.checks.max_timeout_s}`,
+    `Valid check examples (copy the shape): ${JSON.stringify(allowedExamples(compiled))}. Extra arguments such as a file name may follow the allowed prefix.`,
+    'Do NOT output "budgets": budgets are set by the system, not by you. Ignore any cost or budget figure you may see about this call itself; it is not a goal budget and anything you propose is discarded.',
     'Each success criterion has {"id","text"} and EITHER a "check":{"argv":[...],"timeout_s":n} using an allowed command OR "verify":"human" when no allowed command can verify it (for example prose quality). Use 2-12 criteria.',
     'If you cannot tell what "done" means, output ONLY {"questions":[...]} with at most 3 short questions. Do not guess.',
     'You may not propose rules, trust, sandbox or approval settings: any other field is rejected.',
-    'OUTPUT SCHEMA: {"title","description","success_criteria":[{"id","text","check":{"argv":[],"timeout_s":n}|"verify":"human"}],"budgets":{"max_new_tokens","max_wall_s","max_parallel","max_attempts","max_usd"},"questions":["..."],"risks":["..."]}',
+    'OUTPUT SCHEMA: {"title","description","success_criteria":[{"id","text","check":{"argv":[],"timeout_s":n}|"verify":"human"}],"questions":["..."],"risks":["..."]}',
   ];
-  if (errors) lines.push(`YOUR PREVIOUS OUTPUT WAS REJECTED: ${errors.slice(0, 6).join(' | ')}. Fix exactly these and output the JSON object again.`);
+  if (errors) lines.push(`YOUR PREVIOUS OUTPUT WAS REJECTED (this is the only repair round): ${errors.slice(0, 8).join(' | ')}. Fix exactly these and output the JSON object again. Reminder, the ONLY allowed check commands are: ${JSON.stringify(allow)}; use verify "human" for anything they cannot check.`);
   return lines.join('\n');
 }
 
@@ -232,7 +270,7 @@ export async function draftGoal({ orchDir, repo, prompt, profile = 'strict', bra
   if (flagErrors.length) return fail(flagErrors);
   const facts = gatherRepoFacts(root); const scripts = packageScripts(root);
   const bin = claudeBin || W.claudeBin(env); const usage = { new_tokens: 0, notional_usd: 0 };
-  const rounds = []; let errors = null; let tier = compiled.plan.draft_tier; let last = null;
+  const notes = []; const rounds = []; let errors = null; let tier = compiled.plan.draft_tier; let last = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     const r = await callModel({ orchDir, env, bin, tier, prompt: buildDraftPrompt({ request: prompt.trim(), facts, scripts, compiled, errors }), usdCap: compiled.budgets.draft_usd_cap, timeoutMs, killGraceMs, spawnFn });
     usage.new_tokens += r.usage.new_tokens; usage.notional_usd = Math.round((usage.notional_usd + r.usage.notional_usd) * 1e6) / 1e6;
@@ -248,16 +286,27 @@ export async function draftGoal({ orchDir, repo, prompt, profile = 'strict', bra
   try { fs.appendFileSync(path.join(ensureDir(orchDir), 'drafts.ndjson'), `${JSON.stringify({ ts: new Date(now()).toISOString(), rounds, usage, rules_hash, ok: !!last?.ok, questions: last?.questions?.length || 0 })}\n`, { mode: 0o600 }); } catch { /* usage log is best effort */ }
   const textFor = (limits) => renderRulesSummary(summarizeRules(dr.snapshot, null, profile, limits));
   const base = { rules_hash, tier: rounds.at(-1), usage, rules_text: textFor(null), profile };
-  if (!last?.ok) return { ok: false, draft: null, spec: null, errors: last?.errors || ['no output'], questions: [], ...base };
+  if (!last?.ok) {
+    const pt = last?.partial; const allow = compiled.checks.allowlist.map((e) => e.cmd);
+    const partial_spec = pt ? { _partial: true, _note: 'INCOMPLETE DRAFT: not a goal. Fix the _errors, delete the _ keys, then `aos-orch run` this file. aos-orch refuses to run it as it is.', _errors: last.errors.slice(0, 20), _rejected_criteria: pt.rejected_criteria, _allowed_checks: allow,
+      ...draftToSpec({ title: pt.title || 'TODO: title', description: pt.description, success_criteria: pt.success_criteria, budgets: {}, risks: pt.risks }, { root, branch, tier: base.tier, profile, profileRules: dr.profileRules, maxUsdCap: compiled.budgets.max_usd, startTier }) } : null;
+    return { ok: false, draft: null, spec: null, partial_spec, errors: last?.errors || ['no output'], questions: [], ...base };
+  }
   if (last.questions.length) return { ok: true, draft: null, spec: null, errors: [], questions: last.questions, ...base };
   // final budgets: draft default (capped by the rules), then what the model proposed, then the human's flags; remember where each came from and the rules' limit
   const budgets = {}; const budget_notes = {};
   for (const [k, v] of Object.entries(DRAFT_DEFAULTS)) { budgets[k] = Math.min(v, caps[k]); budget_notes[k] = { source: 'default', limit: caps[k] }; }
-  for (const [k, v] of Object.entries(last.draft.budgets)) { budgets[k] = v; budget_notes[k] = { source: 'model', limit: caps[k] }; }
+  // model-proposed budgets are IGNORED: a model infers them from its environment (e.g. a "remaining budget" it sees) and gets them wrong; budgets come from the draft defaults, the flags and the rules only
+  const ignored = Object.keys(last.draft.budgets); if (ignored.length) notes.push(`ignored model-proposed budgets (${ignored.join(', ')}): budgets come from the draft defaults, your flags and the rules`);
   for (const [k, v] of Object.entries(flagBudgets)) { budgets[k] = v; budget_notes[k] = { source: 'flag', limit: caps[k] }; }
-  const draft = { ...last.draft, budgets };
+  const draft = { ...last.draft, budgets }; notes.push(...(last.notes || []));
+  if (!compiled.checks.allow_loopback) { // a criterion that runs an existing test which starts a local server can never pass in the check sandbox
+    const rd = async (rel) => { const b = await G.showBlob(root, dr.info.base_commit, rel, { maxBytes: 200000 }); return b ? b.toString('utf8') : null; };
+    const withCheck = draft.success_criteria.filter((c) => c.check);
+    for (const m of await serverWarnings(withCheck.map((c) => c.check.argv), rd, { label: (i) => `criterion ${withCheck[i].id}` })) notes.push(`WARNING: ${m}`);
+  }
   const limits = { max_new_tokens: budgets.max_new_tokens, max_wall_clock_s: budgets.max_wall_s, max_attempts: budgets.max_attempts, ...(budgets.max_parallel ? { max_parallel: budgets.max_parallel } : {}), ...(budgets.max_usd ? { max_usd: budgets.max_usd } : {}) };
-  return { ok: true, draft, budget_notes, start_tier: startTier, spec: draftToSpec(draft, { root, branch, tier: base.tier, profile, profileRules: dr.profileRules, maxUsdCap: compiled.budgets.max_usd, startTier }), errors: [], questions: [], ...base, rules_text: textFor(limits) };
+  return { ok: true, draft, budget_notes, start_tier: startTier, notes, spec: draftToSpec(draft, { root, branch, tier: base.tier, profile, profileRules: dr.profileRules, maxUsdCap: compiled.budgets.max_usd, startTier }), errors: [], questions: [], ...base, rules_text: textFor(limits) };
 }
 
 /** Text of a draft for the CLI, in the style of renderReview: each criterion with its check or HUMAN REVIEW, the budgets, the rules hash and the questions. */
@@ -278,6 +327,8 @@ export function renderDraft(r) {
     if (r.start_tier) L.push(`  tasks may start at most at tier ${q(r.start_tier)} (set by your flag; tighter than the rules)`);
     for (const x of d.risks) L.push(`  risk: ${q(x)}`);
   }
+  for (const x of r.notes || []) L.push(`  note: ${q(x)}`);
+  if (r.partial_spec) for (const c of r.partial_spec._rejected_criteria) L.push(`  REJECTED criterion ${q(c.id)}: ${q(c.text)}`);
   for (const x of r.questions) L.push(`  question: ${q(x)}`);
   for (const x of r.errors) L.push(`  ERROR: ${escCtrl(x)}`);
   L.push(`drafting cost: ${r.usage.new_tokens} tokens, ~$${r.usage.notional_usd} (not charged to any goal)`);

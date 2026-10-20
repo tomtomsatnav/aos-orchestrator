@@ -3,7 +3,7 @@ const gl = (id, glob) => ({ id, glob }); const cm = (id, cmd, description) => ({
 export const PROFILES = Object.freeze({
   strict: null,
   'node-library': { rules_version: 1,
-    checks: { allowlist: [cm('node-test', 'node --test', 'built-in test runner'), cm('npm-test', 'npm test'), cm('node-check', 'node --check')], max_timeout_s: 600 },
+    checks: { allowlist: [cm('node-test', 'node --test', 'built-in test runner'), cm('npm-test', 'npm test'), cm('node-check', 'node --check')], max_timeout_s: 600, allow_loopback: false, protect_existing_tests: true },
     worker: { paths: { deny: [gl('lockfile', '**/package-lock.json'), gl('ci', '**/.github/**')] } },
     plan: { scope_deny: [gl('no-node-modules', 'node_modules/**')], max_tasks: 8 }, retry: { max_attempts: 3 } },
   'docs-only': { rules_version: 1,

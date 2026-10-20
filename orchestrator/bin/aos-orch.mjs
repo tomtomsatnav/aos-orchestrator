@@ -86,6 +86,7 @@ async function main() {
       let dir;
       if (fs.existsSync(arg1) && fs.statSync(arg1).isFile()) {
         const spec = JSON.parse(fs.readFileSync(arg1, 'utf8'));
+        if (spec._partial) die(`${arg1} is an INCOMPLETE draft (_partial): fix its _errors, then delete the keys starting with "_" before running it`, 64);
         if (flags['trust-repo-config']) spec.orch = { ...(spec.orch || {}), trust_repo_config: true };
         if (flags['unsandboxed-checks']) spec.orch = { ...(spec.orch || {}), unsandboxed_checks: true };
         if (flags['sandbox-workers']) spec.orch = { ...(spec.orch || {}), sandbox_workers: true };
@@ -96,6 +97,13 @@ async function main() {
       } else dir = resolveGoalDir(arg1);
       assertRepoTrusted(readJSON(paths(dir).goal));
       const id = readJSON(paths(dir).goal).id;
+      { // a goal blocked at planning (plan rejected by the validator or by a human) never re-plans by itself: say so, and re-plan on request
+        const g0 = readJSON(paths(dir).goal);
+        if (g0.status === 'blocked' && g0.orch.plan_state === 'rejected') {
+          if (flags.replan) { enqueueCommand(dir, { cmd: 'replan', by: 'cli' }); console.error(`aos-orch: ${id} was blocked at planning (${escCtrl(String(g0.blocked_reason || '').slice(0, 300))}); asking the planner again (--replan)`); }
+          else console.error(`aos-orch: ${id} is blocked at planning: ${escCtrl(String(g0.blocked_reason || '').slice(0, 300))}\naos-orch: nothing will change by itself. To ask the planner again (it is told what was wrong):  aos-orch run ${id} --replan`);
+        }
+      }
       const waiting = (s) => s.plan_state === 'awaiting_approval' || /^awaiting human confirmation/.test(String(s.blocked_reason || ''));
       let { status, s } = await driveOnce(dir);
       // --wait-approval: stay attached while a human decides. The engine is only run again once a command (approve-plan, confirm, ...) has been queued by the human's own CLI call;
@@ -176,6 +184,10 @@ async function main() {
       if (flags.tier !== undefined) overrides.tier = String(flags.tier);
       const r = await draftGoal({ orchDir: orch, repo: path.resolve(flags.repo), prompt: request, profile, branch: typeof flags.branch === 'string' ? flags.branch : 'main', overrides });
       console.error(renderDraft(r));
+      if (!r.ok && r.partial_spec) { // never a goal: a partial file with the valid parts and the errors, for the human to finish
+        const pf = out.replace(/(\.json)?$/, '.partial.json');
+        try { fs.writeFileSync(pf, `${JSON.stringify(r.partial_spec, null, 2)}\n`, { mode: 0o600, flag: 'wx' }); console.error(`\nwrote the PARTIAL draft ${pf} (0600; valid parts + the errors; it is not a goal and \`aos-orch run\` refuses it). Fix it by hand.`); } catch (e) { console.error(`\ncould not write ${pf}: ${e.code || e.message}`); }
+      }
       if (!r.ok) process.exit(2);
       if (r.questions.length) { console.error('\nThe model could not tell what "done" means. Answer and run again with --answers "..." (at most 2 rounds), or write goal.json by hand.'); process.exit(3); }
       fs.writeFileSync(out, `${JSON.stringify(r.spec, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
