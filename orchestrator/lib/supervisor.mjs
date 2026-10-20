@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Engine, createGoal } from './engine.mjs';
-import { TERMINAL, ID_RE, orchRoot, goalsRoot, goalDirOf, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, realClock, ensureDir,
+import { TERMINAL, ID_RE, orchRoot, goalsRoot, goalDirOf, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pendingCommands, realClock, ensureDir,
   validateBudgetPatch, appendEvent } from './state.mjs';
 import { Governor, checkBudgets } from './governor.mjs';
 import * as G from './git.mjs';
@@ -123,7 +123,7 @@ export class Supervisor {
   async _attach(id) {
     if (this.handles.has(id)) return this.handles.get(id);
     const engine = new Engine({ goalDir: goalDirOf(this.orchDir, id), orchDir: this.orchDir, env: this.env, clock: this.clock, intervalMs: this.intervalMs,
-      pid: this.pid, spawnFn: this.spawnFn, claudeBin: this.claudeBin, slotGate: this.gate, ...this.engineOpts });
+      pid: this.pid, spawnFn: this.spawnFn, claudeBin: this.claudeBin, slotGate: this.gate, ownerLabel: 'serve', ...this.engineOpts });
     try { await engine.start(); } catch { return null; } // owned by another live engine
     const h = { id, engine, stopped: false, idle: false, wakeFn: null };
     h.wake = () => { const f = h.wakeFn; h.wakeFn = null; if (f) f(); };
@@ -141,10 +141,22 @@ export class Supervisor {
       if (this.gate.hasDemand() && this.gate.total() < this.maxWorkers) for (const o of this.handles.values()) if (o !== h) o.wake();
       const g = readJSON(engine.P.goal);
       if (!g || TERMINAL.has(g.status)) { h.idle = true; break; }
-      if (engine.isDone()) { h.idle = true; await new Promise((res) => { h.wakeFn = res; }); h.idle = false; continue; }
+      if (engine.isDone()) { h.idle = true; await this._idleWait(h); h.idle = false; continue; }
       await new Promise((res) => { const t = setTimeout(res, this.pollMs); h.wakeFn = () => { clearTimeout(t); res(); }; engine._wakeFn = h.wakeFn; });
     }
     if (!h.stopped && !engine.dead) await this._release(h.id);
+  }
+
+  /** Parked goal (plan awaiting approval, blocked, ...): no ticking, but wake on wake() OR as soon as a command file is queued
+   *  (the CLI writes commands/ without any way to wake this process; waiting only for wake() wedged the goal while the lock stayed held). */
+  _idleWait(h) {
+    const { engine } = h; const every = Math.max(10, Math.min(this.pollMs, 1000));
+    return new Promise((res) => {
+      let t; const done = () => { clearTimeout(t); h.wakeFn = null; res(); };
+      h.wakeFn = done;
+      const poll = () => { if (h.stopped || engine.dead || pendingCommands(engine.dir).count) return done(); t = setTimeout(poll, every); };
+      poll();
+    });
   }
 
   async _release(id) {

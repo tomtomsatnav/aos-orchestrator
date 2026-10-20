@@ -115,12 +115,12 @@ export function loadHeartbeat(dir) {
 
 // ---------------------------------------------------------------- lock (O_EXCL + pid, stale takeover)
 /** Returns {ok:true} or {ok:false, holder}. Stale = holder pid dead, or lock not refreshed within ttlMs. */
-export function acquireLock(dir, { pid = process.pid, ttlMs = 60000, now = Date.now() } = {}) {
+export function acquireLock(dir, { pid = process.pid, ttlMs = 60000, now = Date.now(), label = null } = {}) {
   const file = paths(dir).lock;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const fd = fs.openSync(file, 'wx', 0o600);
-      fs.writeSync(fd, JSON.stringify({ pid, ts: now, token: crypto.randomBytes(6).toString('hex') }));
+      fs.writeSync(fd, JSON.stringify({ pid, ts: now, token: crypto.randomBytes(6).toString('hex'), ...(label ? { label } : {}) }));
       fs.closeSync(fd);
       return { ok: true, takeover: attempt > 0 };
     } catch (e) {
@@ -141,6 +141,41 @@ export function releaseLock(dir, { pid = process.pid } = {}) {
   const file = paths(dir).lock;
   const l = readJSON(file, null);
   if (l && l.pid === pid) { try { fs.unlinkSync(file); } catch { /* gone */ } }
+}
+
+/** Queued command files not yet drained, with the age (ms) of the oldest. */
+export function pendingCommands(dir, nowMs = Date.now()) {
+  let names = []; try { names = fs.readdirSync(paths(dir).commands).filter((n) => n.endsWith('.json')); } catch { /* none */ }
+  let oldest = 0; for (const n of names) { try { oldest = Math.max(oldest, nowMs - fs.statSync(path.join(paths(dir).commands, n)).mtimeMs); } catch { /* raced */ } }
+  return { count: names.length, oldest_age_ms: oldest };
+}
+
+/**
+ * Who owns the goal and is it healthy? `wedged`: the owner pid is alive but is not doing its job: a queued command is older than
+ * `staleTicks` heartbeat intervals, or (when the goal is not parked on purpose) the heartbeat is older than that. A goal parked at
+ * plan approval / blocked / terminal legitimately has an old heartbeat, so only unconsumed commands count there.
+ */
+export function lockStatus(dir, { staleTicks = 5, nowMs = Date.now() } = {}) {
+  const l = readJSON(paths(dir).lock, null);
+  const hb = loadHeartbeat(dir); const g = readJSON(paths(dir).goal, null);
+  const owner_alive = !!l && pidAlive(l.pid);
+  const interval_ms = Math.max(1, hb.interval_s || 10) * 1000;
+  const hb_age_ms = hb.ts ? nowMs - Date.parse(hb.ts) : null;
+  const parked = !g || TERMINAL.has(g.status) || g.status === 'blocked' || (g.status === 'draft' && g.orch?.plan_state === 'awaiting_approval') || hb.status === 'paused';
+  const cmds = pendingCommands(dir, nowMs);
+  const limit = staleTicks * interval_ms;
+  const wedged = owner_alive && (cmds.oldest_age_ms > limit || (!parked && hb_age_ms != null && hb_age_ms > limit));
+  return { owner_pid: l?.pid ?? null, owner_label: l?.label ?? null, owner_alive, lock_age_ms: l ? nowMs - l.ts : null, hb_seq: hb.seq, hb_age_ms, parked,
+    pending_commands: cmds.count, oldest_command_age_ms: cmds.oldest_age_ms, stale_after_ms: limit, wedged };
+}
+/** One-line human description of lockStatus (CLI + errors). */
+export function describeOwner(st) {
+  if (!st.owner_pid) return 'no engine owns this goal';
+  const who = `${st.owner_label === 'serve' ? '`aos-orch serve` (supervisor)' : st.owner_label === 'run' ? '`aos-orch run`' : 'an engine'} pid ${st.owner_pid}`;
+  if (!st.owner_alive) return `the lock is held by ${who} which is no longer running (stale lock; the next \`aos-orch run\` or \`serve\` takes it over)`;
+  const hb = `heartbeat seq ${st.hb_seq}${st.hb_age_ms != null ? `, last tick ${Math.round(st.hb_age_ms / 1000)}s ago` : ''}`;
+  if (st.wedged) return `WEDGED: ${who} is alive but not ticking (${hb}; ${st.pending_commands} queued command(s), oldest ${Math.round(st.oldest_command_age_ms / 1000)}s; limit ${Math.round(st.stale_after_ms / 1000)}s). Restart it (kill ${st.owner_pid}, then re-run) to recover`;
+  return `${who} owns it (${hb}${st.parked ? '; parked, no ticking needed until a command arrives' : ''})`;
 }
 
 // ---------------------------------------------------------------- command queue (CLI/control -> engine)

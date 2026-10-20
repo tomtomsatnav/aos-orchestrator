@@ -7,9 +7,10 @@ import { spawn } from 'node:child_process';
 import { mkSandbox, ptask, crit, edit, fakeCalls, sleep, procsAlive, HERE } from './helpers.mjs';
 import { until, request } from './server-helpers.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
-import { validateBudgetPatch, applyBudgetPatch, goalDirOf, readJSON, loadState, DEFAULT_BUDGETS } from '../lib/state.mjs';
+import { validateBudgetPatch, applyBudgetPatch, goalDirOf, readJSON, loadState, loadHeartbeat, paths, enqueueCommand, lockStatus, describeOwner, DEFAULT_BUDGETS } from '../lib/state.mjs';
 import { readCliToken } from '../server/auth.mjs';
 
+const runCli = (args, env) => new Promise((resolve) => { const c = spawn(process.execPath, [CLI, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] }); let out = ''; let err = ''; c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; }); c.on('close', (code) => resolve({ code, out, err })); });
 const mk = (t, scenario) => { const sb = mkSandbox('aos-sup'); sb.scenario(scenario); t.after(async () => { for (const s of sb.sups || []) await s.stop({ workers: 'kill' }).catch(() => {}); sb.cleanup(); }); return sb; };
 const sup = (sb, o = {}) => { const s = new Supervisor({ orchDir: sb.orch, env: sb.env(), pollMs: 40, intervalMs: 200, scanMs: 60000, engineOpts: { killGraceMs: 300, budgetGraceMs: 400 }, ...o }); (sb.sups ||= []).push(s); return s; };
 const plan3 = () => ({ tasks: [ptask('t1', 'a.txt', 'alpha'), ptask('t2', 'b.txt', 'beta'), ptask('t3', 'c.txt', 'gamma')], risks: [] });
@@ -133,4 +134,46 @@ test('cli: token (path unless --show), login-link, goals, serve (SIGTERM exits c
   const e = await exited; assert.equal(e.code, 0, err);
   assert.ok(!err.includes(tok));
   assert.equal(fs.existsSync(path.join(sb.orch, 'goals', 'g-a', '.tick.lock')), false);
+});
+
+// ---- regression: `aos-orch serve` stopped ticking a goal parked at plan approval, so a CLI-queued approve-plan was never consumed
+// while the lock stayed held (and `run` was refused with "already owned"). Commands written to commands/ must be applied within a tick.
+test('wedge regression: approve-plan queued as a file (CLI path, no wake) is applied by the supervisor engine within a tick', async (t) => {
+  const sb = mk(t, { tasks: { t1: edit('a.txt', 'alpha') } });
+  const { dir } = await sb.goal({ id: 'g-a', success_criteria: [{ id: 'c1', text: 'a', check: { argv: ['grep', '-qx', 'alpha', 'a.txt'], timeout_s: 30 } }], plan: { tasks: [ptask('t1', 'a.txt', 'alpha')], risks: [] } });
+  const s = sup(sb); await s.start();
+  await until(() => s.state('g-a').S.goal.orch.plan_state === 'awaiting_approval', { what: 'plan awaiting approval' });
+  await sleep(300); // the engine is parked: idle, lock held
+  const seq = loadHeartbeat(dir).seq;
+  const r = await runCli(['approve-plan', 'g-a'], sb.env());
+  assert.match(r.out, /queued/); assert.match(r.out, /supervisor/, 'says which engine applies it');
+  await until(() => s.state('g-a').S.goal.status === 'achieved', { what: 'goal achieved after file-queued approval', timeoutMs: 30000 });
+  assert.ok(loadHeartbeat(dir).seq > seq);
+});
+
+test('wedge regression: `run` against a goal owned by a live supervisor explains who owns it instead of silently failing', async (t) => {
+  const sb = mk(t, { tasks: { t1: edit('a.txt', 'alpha') } });
+  await sb.goal({ id: 'g-a', success_criteria: [{ id: 'c1', text: 'a', check: { argv: ['grep', '-qx', 'alpha', 'a.txt'], timeout_s: 30 } }], plan: { tasks: [ptask('t1', 'a.txt', 'alpha')], risks: [] } });
+  const s = sup(sb); await s.start();
+  await until(() => s.state('g-a').S.goal.orch.plan_state === 'awaiting_approval', { what: 'plan awaiting approval' });
+  const r = await runCli(['run', 'g-a'], sb.env());
+  assert.equal(r.code, 5); assert.match(r.err, /already owned by engine pid \d+/); assert.match(r.err, /aos-orch serve/); assert.match(r.err, /approve-plan/);
+});
+
+test('lockStatus: an alive owner with an unconsumed command older than N ticks (or a stale heartbeat on an active goal) is WEDGED and reported as such', async (t) => {
+  const sb = mk(t, { tasks: {} });
+  const { dir } = await sb.goal({ id: 'g-a', success_criteria: [crit3], plan: plan3() });
+  const P = paths(dir); const now = Date.now();
+  fs.writeFileSync(P.lock, JSON.stringify({ pid: process.pid, ts: now, token: 'x', label: 'serve' }));
+  fs.writeFileSync(P.hb, JSON.stringify({ seq: 2, ts: new Date(now - 600e3).toISOString(), interval_s: 10, status: 'running' }));
+  let st = lockStatus(dir); // draft goal: not awaiting approval yet, heartbeat 600 s old vs 50 s limit
+  assert.equal(st.wedged, true); assert.match(describeOwner(st), /WEDGED.*supervisor/);
+  fs.writeFileSync(P.hb, JSON.stringify({ seq: 2, ts: new Date(now).toISOString(), interval_s: 10, status: 'running' }));
+  assert.equal(lockStatus(dir).wedged, false);
+  enqueueCommand(dir, { cmd: 'pause' }); const f = fs.readdirSync(P.commands)[0];
+  fs.utimesSync(path.join(P.commands, f), new Date(now - 600e3), new Date(now - 600e3));
+  st = lockStatus(dir); assert.equal(st.wedged, true); assert.equal(st.pending_commands, 1);
+  const r = await runCli(['pause', 'g-a'], sb.env()); assert.match(r.out, /WEDGED/); assert.match(r.err, /wedged/i);
+  fs.writeFileSync(P.lock, JSON.stringify({ pid: 2147480001, ts: now, token: 'x', label: 'serve' }));
+  assert.match(describeOwner(lockStatus(dir)), /no longer running/);
 });

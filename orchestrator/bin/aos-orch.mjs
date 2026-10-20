@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Engine, createGoal, summarize, assertRepoTrusted } from '../lib/engine.mjs';
 import { reviewView, renderReview, planHash, tasksHash } from '../lib/plan.mjs';
-import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir } from '../lib/state.mjs';
+import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
 import { createControlServer, parsePort, DEFAULT_PORT } from '../server/index.mjs';
@@ -58,7 +58,16 @@ async function main() {
       let last = '';
       const timer = setInterval(() => { const s = eng.summary(); const line = `${s.status} tasks=${JSON.stringify(s.tasks)} tokens=${s.usage.new_tokens}${s.paused_reason ? ` paused: ${s.paused_reason}` : ''}`; if (line !== last) { console.error(line); last = line; } }, 1000);
       let status;
-      try { status = await eng.run({ pollMs: Number(flags['poll-ms']) || eng.intervalMs }); } finally { clearInterval(timer); await eng.stop(); }
+      try { status = await eng.run({ pollMs: Number(flags['poll-ms']) || eng.intervalMs }); } catch (e) {
+        if (e.code !== 'LOCKED') throw e;
+        clearInterval(timer);
+        const st = e.lock;
+        console.error(`aos-orch: ${e.message}`);
+        console.error(st.wedged ? `aos-orch: the owner is alive but not applying commands. Stop it (kill ${st.owner_pid}) and run again; its workers are re-adopted.`
+          : st.owner_label === 'serve' ? 'aos-orch: the running `aos-orch serve` already drives this goal: use `aos-orch approve-plan|pause|... <goal-id>` or the dashboard instead of `run`.'
+            : 'aos-orch: another engine is driving this goal; stop it first, or use `aos-orch approve-plan|pause|... <goal-id>` to talk to it.');
+        process.exit(5);
+      } finally { clearInterval(timer); await eng.stop(); }
       const s = eng.summary();
       out({ goal: s.id, status, plan_state: s.plan_state, blocked_reason: s.blocked_reason, report: fs.existsSync(paths(dir).report) ? paths(dir).report : null, dir });
       process.exit(status === 'achieved' ? 0 : status === 'cancelled' ? 3 : s.plan_state === 'awaiting_approval' ? 4 : 2);
@@ -70,7 +79,7 @@ async function main() {
         out(ids.map((id) => { const S = loadState(goalDirOf(orch, id)); return S.goal ? { id, status: S.goal.status, title: S.goal.title, engine: engineAlive(goalDirOf(orch, id)) } : null; }).filter(Boolean));
       } else {
         const d = resolveGoalDir(arg1); const S = loadState(d);
-        out({ ...summarize(S, loadHeartbeat(d)), engine_running: engineAlive(d), governor: readJSON(path.join(orch, 'governor.json'), null) });
+        out({ ...summarize(S, loadHeartbeat(d)), engine_running: engineAlive(d), engine: describeOwner(lockStatus(d)), governor: readJSON(path.join(orch, 'governor.json'), null) });
         if (S.tasks.length) console.error(`\nPLAN FOR REVIEW (exact commands, model tier and path scope per task):\n${renderReview(reviewView(S.tasks))}`);
       }
       break;
@@ -86,7 +95,12 @@ async function main() {
         console.error(`plan hash ${extra.reviewed.plan_hash.slice(0, 12)}`);
       }
       enqueueCommand(d, { cmd, by: 'cli', ...extra });
-      out(engineAlive(d) ? `${cmd}: queued; the running engine applies it at its next tick` : `${cmd}: queued, but no engine is running for this goal; it applies on the next \`aos-orch run ${arg1}\``);
+      const st = lockStatus(d);
+      if (!st.owner_alive) out(`${cmd}: queued, but no engine is running for this goal; it applies on the next \`aos-orch run ${arg1}\` (or when \`aos-orch serve\` is started)`);
+      else {
+        out(`${cmd}: queued; the running engine applies it at its next tick (${describeOwner(st)})`);
+        if (st.wedged) console.error(`aos-orch: WARNING the owning engine looks wedged; this command will not be applied until it is restarted (kill ${st.owner_pid}).`);
+      }
       break;
     }
     case 'approvals': {
