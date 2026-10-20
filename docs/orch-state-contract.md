@@ -31,8 +31,11 @@ the goal's repo (`orch.repo` basename) instead of the worktree, and count `worke
 
 - Monitor `127.0.0.1:4318` (override `PORT`): read-only. `Host` and any `Origin` must be `127.0.0.1` or `localhost` (any port), else 403.
   Non-GET/HEAD -> 405. No CORS headers are sent. Responses carry `nosniff`, `no-store`, `no-referrer`, `X-Frame-Options: DENY`.
-- Control server `127.0.0.1:4319` (orchestrator-owned, not required by the monitor): bearer token / one-time-nonce login at
-  `/login#<nonce>` (`aos-orch login-link`), session cookie + `X-AOS-CSRF`. The UI (`ui/orch.js`) calls it directly with
+- Control server `127.0.0.1:4319` (orchestrator-owned, not required by the monitor): browser login is `aos-orch login-link`, which prints
+  `/auth/login?code=<one-time code>` (code valid 2 min, stored hashed, consumed once). The login page POSTs the code to `/auth/exchange`
+  and receives a session token; every later call sends `Authorization: Bearer <session token>` (CLI uses a token file instead). Session
+  tokens live in server memory only, last 12 h, and at most 50 are kept (oldest evicted). No cookies and no CSRF header. CORS answers only
+  dashboard origins and allows only the `Authorization` and `Content-Type` request headers. The UI (`ui/orch.js`) calls it directly with
   `mode: cors`; override with `<html data-aos-control-url>`. The monitor only links to it and the token never goes to 4318.
 
 ## HTTP shapes
@@ -51,3 +54,7 @@ the goal's repo (`orch.repo` basename) instead of the worktree, and count `worke
 
 `tests-monitor/` runs against golden goal dirs in `tests-monitor/fixtures/` and has no orchestrator import. To regenerate them
 (needs the engine checked out), see `tests-monitor/fixtures/README.md`.
+
+## Coupling note
+
+`goalOutcome` in `monitor.mjs` counts plan waiting time (`waiting_on: plan`) only while the goal `status` is `draft`. This is coupled to the engine: an orchestrator that leaves `plan_state: awaiting_approval` set after the goal leaves `draft` will not show that wait.

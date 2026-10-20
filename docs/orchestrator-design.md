@@ -430,7 +430,7 @@ Out of scope: a malicious local process running as the same user (it can read th
 
 ## 10. Dashboard integration
 
-**Tagging.** The orchestrator's telemetry hook is the existing `plugin/hooks/aos-hook.mjs`, invoked from the worker
+**Tagging.** The orchestrator's telemetry hook is the dashboard repo's existing `plugin/hooks/aos-hook.mjs` (hooks live in https://github.com/tomtomsatnav/agent-orchestration-standard, not in this repo), invoked from the worker
 `settings.json` with `AOS_LIVE_DIR` pointing at the plugin's live dir, because isolated workers do not load the
 installed plugin **[S-8e]** (non-isolated ones do **[S-4a]**). One additive change: when `AOS_GOAL_ID`/`AOS_TASK_ID` match
 `^[A-Za-z0-9._-]{1,64}$`, the record gets `goal` and `task` fields **[S-4b]**.
@@ -476,7 +476,7 @@ can edit files in its cwd, run the real policy hook with synthetic payloads, sle
 | merge conflict | two tasks edit one line | second task back to `ready` with rebase context |
 | control auth | requests with bad Host/Origin/token/CSRF | 403/401, no state change |
 
-The policy hook gets table-driven unit tests (payload in → decision out), extending `08-hook-unit.sh`. All suites join `make test`.
+The policy hook gets table-driven unit tests (payload in → decision out), extending the hook unit tests in the dashboard repo. This repo's suites run with `npm test`.
 A small opt-in `make test-live` runs one real haiku worker (like spike E1) and is never part of CI.
 
 ## 12. Phased roadmap
