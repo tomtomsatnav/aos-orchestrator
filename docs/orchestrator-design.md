@@ -30,7 +30,7 @@ flowchart LR
     DUI[Dashboard UI<br/>127.0.0.1:4318]
   end
   subgraph Orchestrator["orchestrator/ (one Node process)"]
-    CS[Control server<br/>token + cookie auth]
+    CS[Control server<br/>token + bearer session auth]
     ENG[Engine<br/>heartbeat loop per goal]
     PLN[Planner runner]
     RUN[Worker runner]
@@ -47,7 +47,7 @@ flowchart LR
   MON[Monitor :4318<br/>read-only]
 
   CLI -- bearer token --> CS
-  CUI -- cookie + CSRF --> CS
+  CUI -- bearer session token --> CS
   CS --> ENG
   CS <--> APR
   ENG --> PLN --> ST
@@ -387,9 +387,9 @@ text match, and treats any unexplained `is_error` without usage as "possibly lim
 `Content-Type: application/json` and no CORS headers are ever sent.
 
 - **CLI:** `Authorization: Bearer <token>` read from the token file.
-- **Browser:** `aos open` prints `http://127.0.0.1:4319/login#<one-time nonce>` (60 s, single use, nonce stored hashed).
-  The page posts the nonce; the server sets `aos_s` (HttpOnly, SameSite=Strict, Path=/) and returns a CSRF token that must
-  be sent as `X-AOS-CSRF` on every mutating call (checked against the session). Sessions expire after 12 h idle.
+- **Browser:** `aos-orch login-link` prints `http://127.0.0.1:4319/auth/login?code=<one-time code>` (2 min, single use, stored hashed).
+  The page POSTs the code to `/auth/exchange` and receives a bearer session token (memory only, 12 h, revocable), sent as
+  `Authorization: Bearer` on every call. There are no cookies and no CSRF header.
 - **Same-origin choice:** the control UI is served by the control server, not by the monitor. Proxying `/orch/*` through
   the monitor would turn the read-only monitor into a write path and put a credential in a page that many tabs load.
   The monitor only *reads* goal state files and links to `:4319` ("Open control").
@@ -423,7 +423,7 @@ would let any session (or injected text in one) approve its own requests.
 | Worktree escape via `cd` | CLI already asks for `cd` outside the project **[S-8a]**; hook denies |
 | Runaway loops / fork bombs | Wall-clock and token caps, process-group kill **[S-7]**, global worker cap, `ulimit -u` via a wrapper (phase 2 option) |
 | Resource exhaustion (disk) | Worktrees removed after merge/failure; per-goal disk check before dispatch; stream files capped (rotate at 20 MB) |
-| Local CSRF / other local users | Token 0600, Host/Origin checks, SameSite=Strict cookie + CSRF header; loopback bind only |
+| Local CSRF / other local users | Token 0600, Host/Origin checks, bearer session token (no cookies, so no ambient credentials); loopback bind only |
 | Approval fatigue | Specific grants (exact argv / path), per-task scope, defaults that make most work need no approval |
 
 Out of scope: a malicious local process running as the same user (it can read the token file and the OAuth credentials).
@@ -474,7 +474,7 @@ can edit files in its cwd, run the real policy hook with synthetic payloads, sle
 | stall / wall clock | fake sleeps silently | SIGTERM → SIGKILL, process group empty |
 | scope violation | fake writes outside `path_scope` | attempt fails at snapshot, nothing committed |
 | merge conflict | two tasks edit one line | second task back to `ready` with rebase context |
-| control auth | requests with bad Host/Origin/token/CSRF | 403/401, no state change |
+| control auth | requests with bad Host/Origin/token | 403/401, no state change |
 
 The policy hook gets table-driven unit tests (payload in → decision out), extending the hook unit tests in the dashboard repo. This repo's suites run with `npm test`.
 A small opt-in `make test-live` runs one real haiku worker (like spike E1) and is never part of CI.
