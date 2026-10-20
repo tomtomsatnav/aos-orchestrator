@@ -183,7 +183,7 @@ test('worker: command line, environment, settings and stream parsing (usage dedu
   assert.ok(env.PATH.startsWith('/usr/bin:/bin:/usr/sbin:/sbin:'));
   const env2 = buildEnv({ base: { ...base, AOS_CLAUDE_BIN: '/fake' }, goalId: 'g', taskId: 't', attempt: 1, worktree: '/w', policyFile: '/p', approvalsDir: '/a', bin: '/fake' });
   assert.equal(env2.AOS_FAKE_SCENARIO, '/sc'); assert.equal(env2.ANTHROPIC_API_KEY, undefined);
-  const s = buildSettings('/h.mjs', '/n/node'); assert.equal(s.hooks.PreToolUse[0].matcher, '*'); assert.equal(s.hooks.PreToolUse[0].hooks[0].timeout, 30); assert.equal(s.hooks.PermissionRequest[0].hooks[0].command, '"/n/node" "/h.mjs"');
+  const s = buildSettings('/h.mjs', '/n/node'); assert.equal(s.hooks.PreToolUse[0].matcher, '*'); assert.equal(s.hooks.PreToolUse[0].hooks[0].timeout, 360); assert.equal(s.hooks.PermissionRequest[0].hooks[0].timeout, 30); assert.equal(s.hooks.PermissionRequest[0].hooks[0].command, '"/n/node" "/h.mjs"');
 
   const dir = tmp();
   try {

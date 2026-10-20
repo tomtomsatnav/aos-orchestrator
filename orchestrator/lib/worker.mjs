@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawn as nodeSpawn, execFileSync } from 'node:child_process';
 import { parseRateLimitEvent, usageOf } from './governor.mjs';
 import { untrustedBlocks } from './untrusted.mjs';
+import { HOOK_TIMEOUT_S } from './selfcheck.mjs';
 
 export const WORKER_TOOLS = 'Read,Edit,Write,Glob,Grep,Bash';
 export const READ_ONLY_TOOLS = 'Read,Glob,Grep';
@@ -57,14 +58,15 @@ export function buildEnv({ base = process.env, goalId, taskId, attempt, worktree
   return { ...env, ...extra };
 }
 
-/** Settings file registering exactly the policy hook (telemetry hook arrives in phase 2). */
+/** Settings file registering exactly the policy hook (telemetry hook arrives in phase 2). PreToolUse may block for a whole
+ *  engine-run self-check (worker.self_check), so its timeout is HOOK_TIMEOUT_S; approval waits inside the hook stay capped at 25 s. */
 export function buildSettings(hookScript, nodePath = process.execPath) {
   const cmd = `${JSON.stringify(nodePath)} ${JSON.stringify(hookScript)}`;
-  const entry = [{ matcher: '*', hooks: [{ type: 'command', command: cmd, timeout: 30 }] }];
-  return { hooks: { PreToolUse: entry, PermissionRequest: entry } };
+  const entry = (timeout) => [{ matcher: '*', hooks: [{ type: 'command', command: cmd, timeout }] }];
+  return { hooks: { PreToolUse: entry(HOOK_TIMEOUT_S), PermissionRequest: entry(30) } };
 }
 
-export function buildWorkerPrompt({ goal, task, deps = [], previous = null }) {
+export function buildWorkerPrompt({ goal, task, deps = [], previous = null, selfCheck = null }) {
   const o = task.orch;
   // Everything below that a model or a repo wrote (task text, dependency summaries, check output) goes into UNTRUSTED blocks.
   const parts = [{ label: 'task description', text: o.description || '', max: 4000 }];
@@ -80,6 +82,11 @@ export function buildWorkerPrompt({ goal, task, deps = [], previous = null }) {
     `YOU MAY CHANGE ONLY: ${o.path_scope.join(', ')}        COMMANDS YOU MAY RUN: ${(o.allowed_commands || []).join(', ') || '(none)'}`,
     `DONE MEANS: ${task.acceptance.join('; ')}; the engine will run: ${(o.checks || []).map((c) => c.argv.join(' ')).join(' ; ')}`,
   ];
+  if (selfCheck && (o.checks || []).length) {
+    lines.push(`SELF-CHECK: you may run your task's checks yourself, at most ${selfCheck.max} times in total, by running with Bash EXACTLY one of these commands, `
+      + `from the directory you started in, with nothing added (no cd, pipes, redirects, env variables, extra arguments or chaining): ${o.checks.map((c) => `\`${c.argv.join(' ')}\``).join(' ; ')}. `
+      + 'The engine runs it for you in its sandbox and shows you the output (as the denial message of that Bash call: that is expected). It is information only: the engine runs every check again after you finish. Use it to fix failures before you finish.');
+  }
   const ctx = [];
   for (const d of deps) ctx.push(`dependency ${d.id} (${d.title}): ${U.blocks[i++]}`);
   if (previous) {
