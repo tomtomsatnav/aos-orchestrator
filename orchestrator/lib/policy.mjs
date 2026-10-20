@@ -2,6 +2,7 @@
 // file system (symlink resolution) is injected as ctx.realpath. Result: {decision:'allow'|'deny'|'ask', reason, rule}.
 // Order: deny rules -> per-task grants -> allow rules -> ask -> default deny (fail closed).
 import path from 'node:path';
+import vm from 'node:vm';
 import { parseShell, tokenize, WRITE_REDIRECTS } from './shell.mjs';
 import { matchAny, matchGlob, globToRegex } from './glob.mjs';
 
@@ -67,6 +68,16 @@ const EXEC_ARG = {
 };
 const INLINE_CODE = /^-(c|e|E|-eval|-command|-exec)$/;
 const MAX_COMMAND = 16384;
+/** Deny patterns only ever see this many characters; a longer command asks (it is not scanned by user regexes, but every other check still runs). */
+export const MAX_REGEX_INPUT = 4096;
+const BUILTIN_PATTERNS = new Set(DEFAULT_POLICY.bash.deny_patterns);
+const reCtx = vm.createContext({});
+/** true / false, or 'error' (does not compile, or ran longer than 100 ms: fail closed). Non-built-in patterns run under a vm timeout (ReDoS backstop). */
+function regexTest(src, s) {
+  let re; try { re = new RegExp(src); } catch { return 'error'; }
+  if (BUILTIN_PATTERNS.has(src)) return re.test(s);
+  try { reCtx.re = re; reCtx.s = s; return vm.runInContext('re.test(s)', reCtx, { timeout: 100 }); } catch { return 'error'; }
+}
 /** Deny globs match case- and compatibility-insensitively: APFS (macOS default) treats .CLAUDE, .Git or .ſsh as the protected name. */
 const fold = (s) => String(s).normalize('NFKC').toLowerCase();
 
@@ -82,12 +93,12 @@ export function mergePolicy(...layers) {
   return out;
 }
 
-const res = (decision, reason, rule, layer) => (layer ? { decision, reason, rule, layer } : { decision, reason, rule });
+const res = (decision, reason, rule, layer, id) => ({ decision, reason, rule, ...(layer ? { layer } : {}), ...(id ? { id } : {}) });
 // Rule ids (docs/rules-design.md section 5): `<layer>:<rule>`. The legacy `rule` strings are the ids. Rules not listed here are enforced by
 // code (the floor); the listed ones are driven by the policy (default layer, later user/repo/goal).
 const DEFAULT_LAYER_RULES = new Set(['tool_not_allowed', 'outside_scope', 'bash_allow', 'write_in_scope', 'read_in_worktree', 'dangerous_pattern', 'substitution', 'unknown_command', 'default']);
 const POLICY_DENY_REASON = 'command is on the policy deny list';
-const withId = (r) => { const layer = r.layer || (DEFAULT_LAYER_RULES.has(r.rule) ? 'default' : 'floor'); return { ...r, layer, rule_id: `${layer}:${r.rule}` }; };
+const withId = (r) => { const { id, ...rest } = r; const layer = r.layer || (DEFAULT_LAYER_RULES.has(r.rule) ? 'default' : 'floor'); return { ...rest, layer, rule_id: `${layer}:${id || r.rule}` }; };
 const lex = (p) => p;
 const isInside = (p, root) => p === root || p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
 const expandHome = (p, home) => (home && (p === '~' || p.startsWith('~/')) ? path.join(home, p.slice(1)) : p);
@@ -117,8 +128,9 @@ function checkPath(policy, ctx, R, arg, mode, base) {
   const inside = isInside(real, R.wt);
   if (mode === 'read') {
     if (inside) return null;
-    const extra = (policy.paths?.read_extra || []).map((x) => path.resolve(expandHome(x, ctx.home)));
-    if (extra.some((r) => isInside(real, r))) return null;
+    // read_extra entries are globs (docs/rules-design.md): a plain path is a directory root, `*` `**` `?` match the resolved real path
+    const extra = (policy.paths?.read_extra || []).map((x) => path.resolve(R.wt, expandHome(x, ctx.home)));
+    if (extra.some((r) => (/[*?[]/.test(r) ? globToRegex(r).test(real) || globToRegex(`${r}/**`).test(real) : isInside(real, r)))) return null;
     return res('deny', 'read outside the task worktree', 'outside_read_root');
   }
   if (!inside) return res('deny', 'write outside the task worktree', 'outside_worktree');
@@ -222,11 +234,15 @@ function evaluateBash(policy, command, ctx) {
   const askOn = new Set(policy.bash?.ask_on || []);
   let out = res('allow', 'all commands match the allowlist', 'bash_allow');
   const note = (r) => { out = worst(out, r); };
-  const askOrDeny = (key, reason) => note(res(askOn.has(key) ? 'ask' : 'deny', reason, key, 'default'));
+  const askOrDeny = (key, reason) => note(res(askOn.has(key) ? 'ask' : 'deny', reason, key, key === 'unparsed' ? 'floor' : 'default'));
 
-  for (const rx of policy.bash?.deny_patterns || []) {
-    let re; try { re = new RegExp(rx); } catch { return res('deny', 'invalid deny pattern in policy', 'policy_error'); }
-    if (re.test(p.raw)) return res('deny', 'command matches a dangerous pattern', 'dangerous_pattern');
+  if (p.raw.length > MAX_REGEX_INPUT) note(res('ask', `command longer than ${MAX_REGEX_INPUT} characters (deny patterns are not run on it)`, 'command_too_long', 'floor'));
+  else {
+    for (const rx of policy.bash?.deny_patterns || []) {
+      const m = regexTest(rx, p.raw);
+      if (m === 'error') return res('deny', 'invalid or too slow deny pattern in policy', 'policy_error');
+      if (m) return res('deny', 'command matches a dangerous pattern', 'dangerous_pattern');
+    }
   }
   if (!isInside(R.resolve('.', cwd).real, R.wt)) return res('deny', 'hook cwd is outside the task worktree', 'cwd_outside');
   if (!p.commands.length) return res('deny', 'empty command', 'unparsed');
@@ -272,7 +288,7 @@ function evaluateBash(policy, command, ctx) {
       const v = m ? m[1] : (/^-[A-Za-z]./.test(f) ? f.slice(2) : null);
       if (v && (v.startsWith('/') || v.startsWith('~') || v.split('/').includes('..'))) { const r = checkPath(policy, ctx, R, v, 'read', cwd); if (r) note(r); }
     }
-    if (name === 'find' && c.argv.some((a) => ['-exec', '-execdir', '-delete', '-ok', '-okdir', '-fprint'].includes(a))) { note(res('ask', 'find with an action', 'unknown_command')); continue; }
+    if (name === 'find' && c.argv.some((a) => ['-exec', '-execdir', '-delete', '-ok', '-okdir', '-fprint'].includes(a))) { note(res('ask', 'find with an action', 'unknown_command', 'floor', 'find_action')); continue; }
     if (name === 'cd') { if (!operands.length) note(res('deny', 'cd without target', 'outside_read_root')); continue; }
 
     const granted = (ctx.grants || []).some((g) => g.kind === 'command' && (g.command === p.raw.trim() || (Array.isArray(g.argv) && prefixMatch(g.argv.join(' '), c.argv))));

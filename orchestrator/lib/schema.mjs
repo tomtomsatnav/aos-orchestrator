@@ -27,9 +27,9 @@ export function validateSchema(value, schema, at = '$', errs = []) {
   if (schema.maxItems !== undefined && Array.isArray(value) && value.length > schema.maxItems) errs.push(`${at}: more than ${schema.maxItems} item(s)`);
   if (schema.minItems !== undefined && Array.isArray(value) && value.length < schema.minItems) errs.push(`${at}: needs >= ${schema.minItems} item(s)`);
   if (value && typeof value === 'object' && !Array.isArray(value)) {
-    for (const k of schema.required || []) if (!(k in value)) errs.push(`${at}: missing "${k}"`);
-    if (schema.additionalProperties === false) for (const k of Object.keys(value)) if (!(k in (schema.properties || {}))) errs.push(`${at}: unknown key "${k}"`);
-    for (const [k, s] of Object.entries(schema.properties || {})) if (k in value) validateSchema(value[k], s, `${at}.${k}`, errs);
+    for (const k of schema.required || []) if (!Object.hasOwn(value, k)) errs.push(`${at}: missing "${k}"`);
+    if (schema.additionalProperties === false) for (const k of Object.keys(value)) if (!Object.hasOwn(schema.properties || {}, k)) errs.push(`${at}: unknown key "${k}"`);
+    for (const [k, s] of Object.entries(schema.properties || {})) if (Object.hasOwn(value, k)) validateSchema(value[k], s, `${at}.${k}`, errs);
   }
   if (Array.isArray(value) && schema.items) value.forEach((it, i) => validateSchema(it, schema.items, `${at}[${i}]`, errs));
   return errs;

@@ -65,13 +65,13 @@ export const RULES_SCHEMA = obj({
     tools: obj({ allow: list(str(40), 32) }),
     paths: obj({ deny: globRules, read_extra: globRules, on_outside_scope: enums('ask', 'deny') }),
     bash: obj({ allow: cmdRules, deny: cmdRules, deny_patterns: entry('regex'), ask_on: list(enums('substitution', 'unparsed', 'unknown_command'), 8) }),
-    approval: obj({ wait_in_hook_s: int(0, 25), ttl_s: int(60, 604800), grant_scopes: list(enums('once', 'task'), 2) }),
+    approval: obj({ wait_in_hook_s: num(0, 25), ttl_s: int(1, 604800), grant_scopes: list(enums('once', 'task'), 2) }),
     sandbox: enums('off', 'required'),
   }),
   plan: obj({ approval: enums('required', 'auto'), planner_tier: enums(...TIER), draft_tier: enums('haiku', 'sonnet'), planner_timeout_s: int(1, 1800), max_tasks: int(1, 50),
-    tiers: list(enums(...TIER), 3), max_start_tier: enums(...TIER), scope_deny: globRules, auto_approvable_checks: cmdRules }),
+    tiers: { ...list(enums(...TIER), 3), minItems: 1 }, max_start_tier: enums(...TIER), scope_deny: globRules, auto_approvable_checks: cmdRules }),
   checks: obj({ allowlist: cmdRules, max_timeout_s: int(1, 3600), sandbox: enums('required', 'off'), localhost_ports: list(int(1, 65535), 16) }),
-  retry: obj({ max_attempts: int(1, 10), ladder: list(enums(...TIER), 3), same_tier_retries: { type: 'object' }, no_escalate: list(str(48), 32), uncertain_limit_max: int(1, 5) }),
+  retry: obj({ max_attempts: int(1, 10), ladder: { ...list(enums(...TIER), 3), minItems: 1 }, same_tier_retries: { type: 'object' }, no_escalate: list(str(48), 32), uncertain_limit_max: int(1, 5) }),
   budgets: obj({ max_new_tokens: int(1, 1e10), max_wall_clock_s: int(1, 31536000), max_ticks: int(1, 1e7), max_usd: num(0, 10000), attempt_usd_cap: num(0, 10000), task_wall_clock_s: int(1, 86400),
     stall_after_s: int(1, 86400), max_turns: int(1, 1000), soft_frac: num(0, 1), hard_grace_s: int(0, 3600), draft_usd_cap: num(0, 100) }),
   governor: obj({ reserve_5h: num(0, 1), hold_7d: num(0, 1), jitter_s: int(0, 3600), backoff_min: list(num(0, 100000), 16), overload_backoff_s: list(num(0, 100000), 16) }),
@@ -82,7 +82,53 @@ export const RULES_SCHEMA = obj({
   repo_config: obj({ trust: { type: 'boolean' } }),
 }, { required: ['rules_version'] });
 
-const NESTED_QUANTIFIER = /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*{]/;
+export const MAX_REGEX_LEN = 200;
+const BUILTIN_REGEX = new Set(DEFAULT_RULES.worker.bash.deny_patterns.map((e) => e.regex)); // the engine's own patterns (one uses a lookahead) are trusted
+/**
+ * RE2-style restrictions for a USER deny pattern (V8 backtracks, so the unsafe constructs are refused instead): no backreferences, no lookaround, no
+ * group that is quantified with * + {n,} while containing a quantifier or an alternation ((a+)+, (a|aa)+), at most 3 unbounded quantifiers, a length cap.
+ * Matching is additionally bounded at run time (policy.mjs: input cap and a vm timeout). Returns a problem string or null.
+ */
+export function regexProblem(src) {
+  if (typeof src !== 'string' || !src) return 'empty pattern';
+  if (BUILTIN_REGEX.has(src)) return null;
+  if (src.length > MAX_REGEX_LEN) return `longer than ${MAX_REGEX_LEN} characters`;
+  const stack = [{ q: false, alt: false }]; let unbounded = 0; let i = 0;
+  const top = () => stack[stack.length - 1];
+  const quantAt = (k) => { const c = src[k]; if (c === '*' || c === '+') return 'unbounded'; if (c === '?') return 'opt'; const m = /^\{(\d+)(,(\d*))?\}/.exec(src.slice(k)); if (!m) return null; return m[2] !== undefined && m[3] === '' ? 'unbounded' : 'bounded'; };
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '\\') {
+      if (/[1-9kK]/.test(src[i + 1] || '')) return 'backreferences are not allowed';
+      i += 2; continue;
+    }
+    if (c === '[') { i++; if (src[i] === '^') i++; if (src[i] === ']') i++; while (i < src.length && src[i] !== ']') i += src[i] === '\\' ? 2 : 1; i++; continue; }
+    if (c === '(') {
+      if (src[i + 1] === '?') { if (src[i + 2] === ':') i += 3; else return 'only plain and (?:...) groups are allowed (no lookaround or named groups)'; } else i++;
+      stack.push({ q: false, alt: false }); continue;
+    }
+    if (c === ')') {
+      if (stack.length < 2) return 'unbalanced parentheses';
+      const g = stack.pop(); i++;
+      const k = quantAt(i);
+      if (k === 'unbounded' || k === 'bounded') { if (g.q || g.alt) return 'a quantified group may not contain a quantifier or an alternation (ReDoS risk)'; }
+      const t = top(); t.q ||= g.q || !!k; t.alt ||= g.alt; if (k === 'unbounded') unbounded++;
+      continue;
+    }
+    if (c === '|') { top().alt = true; i++; continue; }
+    const k = quantAt(i);
+    if (k && (c === '*' || c === '+' || c === '?' || c === '{')) {
+      top().q = true; if (k === 'unbounded') unbounded++;
+      i += c === '{' ? /^\{[^}]*\}/.exec(src.slice(i))[0].length : 1; if (src[i] === '?') i++; // lazy suffix
+      continue;
+    }
+    i++;
+  }
+  if (stack.length !== 1) return 'unbalanced parentheses';
+  if (unbounded > 3) return 'more than 3 unbounded quantifiers';
+  return null;
+}
+const MAX_SAME_TIER_KEYS = 8;
 const dup = (arr, key) => { const seen = new Set(); for (const e of arr) { if (seen.has(e.id)) return e.id; seen.add(e.id); } return null; };
 const at = (p, i, f) => `$.${p}[${i}].${f}`;
 
@@ -99,7 +145,7 @@ export function validateRules(rules, { layer = 'user' } = {}) {
     const d = dup(a); if (d) bad(`$.${p}: duplicate id "${d}"`);
   }
   (rules.worker?.paths?.deny || []).forEach((e, i) => globProblem(e.glob, at('worker.paths.deny', i, 'glob'), bad));
-  (rules.worker?.paths?.read_extra || []).forEach((e, i) => globProblem(e.glob, at('worker.paths.read_extra', i, 'glob'), bad));
+  (rules.worker?.paths?.read_extra || []).forEach((e, i) => globProblem(e.glob, at('worker.paths.read_extra', i, 'glob'), bad, true));
   (rules.plan?.scope_deny || []).forEach((e, i) => globProblem(e.glob, at('plan.scope_deny', i, 'glob'), bad));
   (rules.worker?.bash?.allow || []).forEach((e, i) => { const w = allowlistEntryProblem(e.cmd); if (w) bad(`${at('worker.bash.allow', i, 'cmd')}: ${w}`); });
   (rules.checks?.allowlist || []).forEach((e, i) => {
@@ -110,22 +156,31 @@ export function validateRules(rules, { layer = 'user' } = {}) {
   (rules.worker?.bash?.deny_patterns || []).forEach((e, i) => {
     const w = at('worker.bash.deny_patterns', i, 'regex');
     try { new RegExp(e.regex); } catch (x) { bad(`${w}: does not compile (${x.message})`); return; }
-    if (NESTED_QUANTIFIER.test(e.regex)) bad(`${w}: nested quantifier (ReDoS risk)`);
+    const rp = regexProblem(e.regex); if (rp) bad(`${w}: ${rp}`);
   });
-  for (const [k, v] of Object.entries(rules.retry?.same_tier_retries || {})) if (!Number.isInteger(v) || v < 0 || v > 5) bad(`$.retry.same_tier_retries.${k}: must be an integer 0-5`);
+  const str_ = rules.retry?.same_tier_retries;
+  if (str_ && typeof str_ === 'object' && !Array.isArray(str_)) {
+    if (Object.keys(str_).length > MAX_SAME_TIER_KEYS) bad(`$.retry.same_tier_retries: more than ${MAX_SAME_TIER_KEYS} keys`);
+    for (const [k, v] of Object.entries(str_)) {
+      if (!/^[a-z][a-z_]{0,31}$/.test(k) || k in Object.prototype) bad(`$.retry.same_tier_retries: invalid key "${String(k).slice(0, 40)}"`);
+      else if (!Number.isInteger(v) || v < 0 || v > 5) bad(`$.retry.same_tier_retries.${k}: must be an integer 0-5`);
+    }
+  } else if (str_ !== undefined) bad('$.retry.same_tier_retries: expected object');
   if (rules.budgets?.soft_frac !== undefined && rules.budgets.soft_frac <= 0) bad('$.budgets.soft_frac: must be > 0');
   return { ok: errors.length === 0, errors };
 }
 
-function globProblem(glob, where, bad) {
+function globProblem(glob, where, bad, absoluteOk = false) {
   if (/[\0\n]/.test(glob)) bad(`${where}: contains control characters`);
-  else if (glob.startsWith('/') ) bad(`${where}: must be relative or start with ~/`);
+  else if (glob.startsWith('/') && !absoluteOk) bad(`${where}: must be relative or start with ~/`);
   else if (glob.startsWith('~') && !glob.startsWith('~/')) bad(`${where}: must be relative or start with ~/`);
 }
 
 // ---------------------------------------------------------------- merge
-const getPath = (o, p) => p.split('.').reduce((x, k) => (x && typeof x === 'object' ? x[k] : undefined), o);
+const getPath = (o, p) => p.split('.').reduce((x, k) => (x && typeof x === 'object' && Object.hasOwn(x, k) ? x[k] : undefined), o);
 function setPath(o, p, v) { const ks = p.split('.'); const last = ks.pop(); ks.reduce((x, k) => (x[k] ??= {}), o)[last] = v; }
+/** 8 hex characters of the new value: what an acceptance id is bound to. */
+export const bindHash = (v) => sha256(canonical(v)).slice(0, 8);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 // kind per path (docs/rules-design.md 2.2). entry lists are identified by their `key` field.
@@ -147,6 +202,7 @@ const SPEC = [
   ...Object.keys(DEFAULT_RULES.governor).map((k) => [`governor.${k}`, 'free']),
 ];
 // a repo may never loosen these, not even with human acceptance (design 3.3)
+const NON_EMPTY = new Set(['plan.tiers']);
 const NEVER_FROM_REPO = new Set(['worker.sandbox', 'checks.sandbox', 'plan.approval', 'repo_config.trust']);
 
 const tag = (e, layer) => (e && typeof e === 'object' ? { ...e, layer } : e);
@@ -160,12 +216,13 @@ function tagged(rules, layer) {
 }
 
 function applyOne(base, val, [p, kind, arg], L) {
-  const rid = (suffix) => `${L.layer}:${p}${suffix ? `.${suffix}` : ''}`;
+  // the id binds the CONTENT (a short hash of the new value): an acceptance of `repo:worker.bash.allow.sedn@1a2b3c4d` does not cover a changed body under the same id
+  const rid = (suffix, to) => `${L.layer}:${p}${suffix ? `.${suffix}` : ''}@${bindHash(to)}`;
   const permit = (id) => {
     if (L.layer !== 'repo') return true;
     return !NEVER_FROM_REPO.has(p) && L.accept.has(id);
   };
-  const loose = (suffix, from, to) => { const id = rid(suffix); const ok = permit(id); (ok ? L.loosenings : L.dropped).push({ layer: L.layer, path: p, from, to, rule_id: id }); return ok; };
+  const loose = (suffix, from, to) => { const id = rid(suffix, to); const ok = permit(id); (ok ? L.loosenings : L.dropped).push({ layer: L.layer, path: p, from, to, rule_id: id, ...(ok ? {} : { reason: 'loosening' }) }); return ok; };
   switch (kind) {
     case 'set': {
       const ident = (e) => (arg ? e[arg] : e);
@@ -173,7 +230,7 @@ function applyOne(base, val, [p, kind, arg], L) {
       const out = base.filter((e) => keep.has(ident(e)));
       const have = new Set(base.map(ident));
       for (const e of val) if (!have.has(ident(e)) && loose(arg ? e.id : String(e), null, ident(e))) out.push(tag(e, L.layer));
-      return out;
+      return out.length || !NON_EMPTY.has(p) ? out : base; // an emptied tier list must not mean "never run"
     }
     case 'union': {
       const ident = (e) => (arg ? e[arg] : e); const have = new Set(base.map(ident));
@@ -216,8 +273,12 @@ export function compileRules(layers = [], { accept = [] } = {}) {
       if (val === undefined) continue;
       setPath(compiled, spec[0], applyOne(getPath(compiled, spec[0]), clone(val), spec, L));
     }
-    if (l.rules.profile) compiled.profile = l.rules.profile;
-    if (l.rules.description) compiled.description = l.rules.description;
+    for (const k of ['profile', 'description']) { // labels shown on the approval screen: only the human's user layer may change them
+      const v = l.rules[k];
+      if (v === undefined || v === compiled[k]) continue;
+      if (l.layer === 'user') compiled[k] = v;
+      else dropped.push({ layer: l.layer, path: k, from: compiled[k], to: v, rule_id: `${l.layer}:${k}@${bindHash(v)}`, reason: 'ignored: only the user layer sets it' });
+    }
   }
   return { ok: true, compiled, loosenings, dropped, hash: rulesHash(compiled),
     layers: [{ layer: 'default', sha256: sha256(canonical(DEFAULT_RULES)) }, ...layers.map((l) => ({ layer: l.layer, source: l.source ?? null, sha256: sha256(canonical(l.rules)) }))] };

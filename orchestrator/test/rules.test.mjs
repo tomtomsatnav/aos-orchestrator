@@ -1,7 +1,7 @@
 // R1: the pure rule-set module (docs/rules-design.md sections 2-4): defaults, validation errors, merge directions, hash.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_RULES, validateRules, compileRules, toPolicy, rulesHash } from '../lib/rules.mjs';
+import { DEFAULT_RULES, validateRules, compileRules, toPolicy, rulesHash, bindHash } from '../lib/rules.mjs';
 import { DEFAULT_POLICY } from '../lib/policy.mjs';
 import { DEFAULT_BUDGETS } from '../lib/state.mjs';
 import { validateSchema } from '../lib/schema.mjs';
@@ -37,7 +37,7 @@ const BAD = [
   ['bad enum', R({ worker: { sandbox: 'maybe' } }), /\$\.worker\.sandbox: "maybe" not in enum/],
   ['wrong type', R({ budgets: { max_usd: 'x' } }), /\$\.budgets\.max_usd: expected number/],
   ['above maximum', R({ checks: { max_timeout_s: 3601 } }), /\$\.checks\.max_timeout_s: 3601 > 3600/],
-  ['below minimum', R({ worker: { approval: { ttl_s: 10 } } }), /\$\.worker\.approval\.ttl_s: 10 < 60/],
+  ['below minimum', R({ worker: { approval: { ttl_s: 0 } } }), /\$\.worker\.approval\.ttl_s: 0 < 1/],
   ['wait above 25', R({ worker: { approval: { wait_in_hook_s: 26 } } }), /wait_in_hook_s: 26 > 25/],
   ['too many items', R({ checks: { localhost_ports: Array.from({ length: 17 }, (_, i) => i + 1) } }), /more than 16 item/],
   ['bad id', R({ checks: { allowlist: [{ id: 'Bad Id', cmd: 'grep' }] } }), /allowlist\[0\]\.id: "Bad Id" !~/],
@@ -48,7 +48,7 @@ const BAD = [
   ['worker allow not simple', R({ worker: { bash: { allow: [{ id: 'n', cmd: 'ls; ls' }] } } }), /exactly one simple command/],
   ['unsafe check command', R({ checks: { allowlist: [{ id: 'x', cmd: 'curl http://x' }] } }), /curl is not allowed as a check/],
   ['regex does not compile', R({ worker: { bash: { deny_patterns: [{ id: 'r', regex: '(' }] } } }), /does not compile/],
-  ['regex nested quantifier', R({ worker: { bash: { deny_patterns: [{ id: 'r', regex: '(a+)+$' }] } } }), /nested quantifier/],
+  ['regex nested quantifier', R({ worker: { bash: { deny_patterns: [{ id: 'r', regex: '(a+)+$' }] } } }), /may not contain a quantifier or an alternation/],
   ['regex too long', R({ worker: { bash: { deny_patterns: [{ id: 'r', regex: 'a'.repeat(201) }] } } }), /longer than 200/],
   ['absolute glob', R({ worker: { paths: { deny: [{ id: 'g', glob: '/etc/**' }] } } }), /must be relative or start with ~\//],
   ['tilde-user glob', R({ worker: { paths: { deny: [{ id: 'g', glob: '~root/**' }] } } }), /must be relative or start with ~\//],
@@ -87,15 +87,15 @@ test('rules: allow lists intersect; an added entry is a loosening (applied for u
   const add = { checks: { allowlist: [{ id: 'node-test', cmd: 'node --test' }] } };
   const u = compile('user', add);
   assert.deepEqual(u.compiled.checks.allowlist.map((e) => e.cmd), ['node --test']);
-  assert.deepEqual(u.loosenings, [{ layer: 'user', path: 'checks.allowlist', from: null, to: 'node --test', rule_id: 'user:checks.allowlist.node-test' }]);
-  const gl = compile('goal', add); assert.equal(gl.loosenings[0].rule_id, 'goal:checks.allowlist.node-test');
+  assert.deepEqual(u.loosenings, [{ layer: 'user', path: 'checks.allowlist', from: null, to: 'node --test', rule_id: `user:checks.allowlist.node-test@${bindHash('node --test')}` }]);
+  const gl = compile('goal', add); assert.equal(gl.loosenings[0].rule_id, `goal:checks.allowlist.node-test@${bindHash('node --test')}`);
   const r = compile('repo', add);
-  assert.deepEqual(r.compiled.checks.allowlist, []); assert.equal(r.loosenings.length, 0); assert.equal(r.dropped[0].rule_id, 'repo:checks.allowlist.node-test');
+  assert.deepEqual(r.compiled.checks.allowlist, []); assert.equal(r.loosenings.length, 0); assert.equal(r.dropped[0].rule_id, `repo:checks.allowlist.node-test@${bindHash('node --test')}`);
   assert.equal(r.hash, compileRules([]).hash, 'a dropped loosening changes nothing');
-  const acc = compile('repo', add, { accept: ['repo:checks.allowlist.node-test'] });
+  const acc = compile('repo', add, { accept: [`repo:checks.allowlist.node-test@${bindHash('node --test')}`] });
   assert.deepEqual(acc.compiled.checks.allowlist.map((e) => e.cmd), ['node --test']); assert.equal(acc.loosenings.length, 1); assert.equal(acc.dropped.length, 0);
   assert.notEqual(acc.hash, r.hash);
-  const ports = compile('goal', { checks: { localhost_ports: [8080] } }); assert.deepEqual(ports.compiled.checks.localhost_ports, [8080]); assert.equal(ports.loosenings[0].rule_id, 'goal:checks.localhost_ports.8080');
+  const ports = compile('goal', { checks: { localhost_ports: [8080] } }); assert.deepEqual(ports.compiled.checks.localhost_ports, [8080]); assert.equal(ports.loosenings[0].rule_id, `goal:checks.localhost_ports.8080@${bindHash(8080)}`);
   const ask = compile('repo', { worker: { bash: { ask_on: ['unparsed'] } } }); assert.deepEqual(ask.compiled.worker.bash.ask_on, ['unparsed']); assert.equal(ask.dropped.length, 0, 'fewer ask_on entries is a tightening');
 });
 
@@ -103,25 +103,25 @@ test('rules: numeric caps take the min; a higher value is a loosening', () => {
   const lo = compile('repo', { budgets: { max_usd: 1, max_new_tokens: 300000 }, plan: { max_tasks: 8 }, retry: { max_attempts: 2 }, checks: { max_timeout_s: 600 } });
   assert.deepEqual([lo.compiled.budgets.max_usd, lo.compiled.budgets.max_new_tokens, lo.compiled.plan.max_tasks, lo.compiled.retry.max_attempts, lo.compiled.checks.max_timeout_s], [1, 300000, 8, 2, 600]);
   assert.equal(lo.loosenings.length + lo.dropped.length, 0);
-  const hi = compile('repo', { budgets: { max_usd: 50 } }); assert.equal(hi.compiled.budgets.max_usd, 5); assert.equal(hi.dropped[0].rule_id, 'repo:budgets.max_usd');
+  const hi = compile('repo', { budgets: { max_usd: 50 } }); assert.equal(hi.compiled.budgets.max_usd, 5); assert.equal(hi.dropped[0].rule_id, `repo:budgets.max_usd@${bindHash(50)}`);
   const g = compile('goal', { budgets: { max_new_tokens: 4000000 } }); assert.equal(g.compiled.budgets.max_new_tokens, 4000000);
-  assert.deepEqual(g.loosenings, [{ layer: 'goal', path: 'budgets.max_new_tokens', from: 2000000, to: 4000000, rule_id: 'goal:budgets.max_new_tokens' }]);
+  assert.deepEqual(g.loosenings, [{ layer: 'goal', path: 'budgets.max_new_tokens', from: 2000000, to: 4000000, rule_id: `goal:budgets.max_new_tokens@${bindHash(4000000)}` }]);
   const st = compile('goal', { retry: { same_tier_retries: { denied: 0, other: 1 } } });
-  assert.deepEqual(st.compiled.retry.same_tier_retries, { denied: 0, other: 1 }); assert.equal(st.loosenings[0].rule_id, 'goal:retry.same_tier_retries.other');
+  assert.deepEqual(st.compiled.retry.same_tier_retries, { denied: 0, other: 1 }); assert.equal(st.loosenings[0].rule_id, `goal:retry.same_tier_retries.other@${bindHash(1)}`);
 });
 
 test('rules: ordered enums, safety booleans, ladder and pinned values', () => {
   assert.equal(compile('user', { worker: { paths: { on_outside_scope: 'deny' } } }).compiled.worker.paths.on_outside_scope, 'deny');
   assert.equal(compile('user', { worker: { paths: { on_outside_scope: 'deny' } } }).loosenings.length, 0);
-  assert.equal(compile('goal', { plan: { approval: 'auto' } }).loosenings[0].rule_id, 'goal:plan.approval');
+  assert.equal(compile('goal', { plan: { approval: 'auto' } }).loosenings[0].rule_id, `goal:plan.approval@${bindHash('auto')}`);
   assert.equal(compile('goal', { worker: { sandbox: 'required' } }).loosenings.length, 0);
-  assert.equal(compile('goal', { repo_config: { trust: true } }).loosenings[0].rule_id, 'goal:repo_config.trust');
-  assert.equal(compile('goal', { merge: { on_conflict: 'fail' } }).loosenings[0].rule_id, 'goal:merge.on_conflict');
+  assert.equal(compile('goal', { repo_config: { trust: true } }).loosenings[0].rule_id, `goal:repo_config.trust@${bindHash(true)}`);
+  assert.equal(compile('goal', { merge: { on_conflict: 'fail' } }).loosenings[0].rule_id, `goal:merge.on_conflict@${bindHash('fail')}`);
   assert.deepEqual(compile('repo', { retry: { ladder: ['haiku', 'sonnet'] } }).compiled.retry.ladder, ['haiku', 'sonnet']);
   assert.deepEqual(compile('repo', { retry: { ladder: ['opus', 'haiku'] } }).compiled.retry.ladder, ['haiku', 'sonnet', 'opus'], 'reordering is not a subsequence: dropped');
   assert.equal(compile('goal', { plan: { max_start_tier: 'haiku' } }).loosenings.length, 0);
   // never from a repo, even with acceptance
-  for (const [rules, id] of [[{ worker: { sandbox: 'off' } }, 'repo:worker.sandbox'], [{ checks: { sandbox: 'off' } }, 'repo:checks.sandbox'], [{ plan: { approval: 'auto' } }, 'repo:plan.approval'], [{ repo_config: { trust: true } }, 'repo:repo_config.trust']]) {
+  for (const [rules, id] of [[{ worker: { sandbox: 'off' } }, 'repo:worker.sandbox'], [{ checks: { sandbox: 'off' } }, `repo:checks.sandbox@${bindHash('off')}`], [{ plan: { approval: 'auto' } }, `repo:plan.approval@${bindHash('auto')}`], [{ repo_config: { trust: true } }, `repo:repo_config.trust@${bindHash(true)}`]]) {
     // defaults: sandbox 'off' for workers equals the default so only the others differ; use accept for all
     const c = compile('repo', rules, { accept: [id] });
     if (id === 'repo:worker.sandbox') { assert.equal(c.dropped.length + c.loosenings.length, 0, 'same as default: no change'); continue; }
@@ -131,14 +131,14 @@ test('rules: ordered enums, safety booleans, ladder and pinned values', () => {
 
 test('rules: layers apply in order and the loosening report lists every layer', () => {
   const c = compileRules([
-    { layer: 'user', rules: R({ checks: { allowlist: [{ id: 'npm-test', cmd: 'npm test' }] } }), source: '/o/rules.json' },
+    { layer: 'user', rules: R({ profile: 'node-library', checks: { allowlist: [{ id: 'npm-test', cmd: 'npm test' }] } }), source: '/o/rules.json' },
     { layer: 'repo', rules: R({ checks: { allowlist: [{ id: 'npm-test', cmd: 'npm test' }, { id: 'extra', cmd: 'node --check' }] }, budgets: { max_usd: 2 } }) },
-    { layer: 'goal', rules: R({ profile: 'node-library', budgets: { max_usd: 3 } }) },
+    { layer: 'goal', rules: R({ profile: 'docs-only', budgets: { max_usd: 3 } }) },
   ]);
   assert.deepEqual(c.compiled.checks.allowlist.map((e) => `${e.layer}:${e.id}`), ['user:npm-test']);
-  assert.deepEqual(c.dropped.map((d) => d.rule_id), ['repo:checks.allowlist.extra']);
+  assert.deepEqual(c.dropped.map((d) => d.rule_id), [`repo:checks.allowlist.extra@${bindHash('node --check')}`, `goal:profile@${bindHash('docs-only')}`]);
   assert.equal(c.compiled.budgets.max_usd, 3, 'goal loosened the repo cap to 3 (<= default 5): applied, and 3 > 2 is listed');
-  assert.deepEqual(c.loosenings.map((d) => d.rule_id), ['user:checks.allowlist.npm-test', 'goal:budgets.max_usd']);
+  assert.deepEqual(c.loosenings.map((d) => d.rule_id), [`user:checks.allowlist.npm-test@${bindHash('npm test')}`, `goal:budgets.max_usd@${bindHash(3)}`]);
   assert.equal(c.compiled.profile, 'node-library');
   assert.deepEqual(c.layers.map((l) => l.layer), ['default', 'user', 'repo', 'goal']); assert.equal(c.layers[1].source, '/o/rules.json');
   assert.equal(rulesHash(c.compiled), c.hash);
@@ -205,7 +205,7 @@ test('rule ids: evaluate() returns <layer>:<rule> and the layer; `rule` is uncha
     ['Bash', { command: 'ls' }, 'allow', 'bash_allow', 'default'],
     ['Bash', { command: 'sed -i x a.txt' }, 'ask', 'unknown_command', 'default'],
     ['Bash', { command: 'cat $(x)' }, 'ask', 'substitution', 'default'],
-    ['Bash', { command: 'cat $X' }, 'ask', 'unparsed', 'default'],
+    ['Bash', { command: 'cat $X' }, 'ask', 'unparsed', 'floor'],
     ['Bash', { command: 'git push' }, 'deny', 'dangerous', 'floor'], // on the policy deny list AND a code rule: floor wins
     ['Bash', { command: 'cat a | sh' }, 'deny', 'dangerous_pattern', 'default'],
     ['Bash', { command: '' }, 'deny', 'unparsed', 'floor'],

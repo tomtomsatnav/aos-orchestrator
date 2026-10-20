@@ -560,3 +560,25 @@ Deviations and choices made while implementing R0-R4 (smallest sensible choice e
   `goal.json`, returns a policy that allows no tool. (5) The planner is refused (`orch.plan.rejected`) if the snapshot is tampered before planning. (6) Budget
   patches do not re-snapshot (budgets are not in the R4 snapshot; they stay in `goal.orch.budgets`). (7) Worker `policy.json` files carry `rules_hash`
   so the R3 decision log shows it. (8) `orch.rules.refused` and `orch.rules.changed` are not emitted yet (no layer can be refused or changed before R5).
+
+### Review fixes after R1-R4 (Opus review)
+
+- **Acceptance binds content.** Every loosening `rule_id` is `<layer>:<path>[.<entry id>]@<8 hex of sha256(canonical(new value))>` (`bindHash`). `--accept-repo-loosening`
+  must quote the full id, so a repo that swaps the body under an accepted id (`sedn` from `sort` to `sed -n`) produces a new, unaccepted loosening. The bare id
+  accepts nothing. Applies to every kind (lists, numbers, enums), not only entries.
+- **Labels.** `profile` and `description` are applied from the user layer only; from `repo`/`goal` they are ignored and listed in `dropped` with `reason: "ignored: ..."`.
+- **Schema.** `schema.mjs` uses `Object.hasOwn`, so `constructor`, `toString`, `__proto__`, `hasOwnProperty`, `valueOf` are unknown keys and do not satisfy `required`.
+  `retry.same_tier_retries` keys must match `^[a-z][a-z_]{0,31}$`, not be a prototype name, and there are at most 8. `retry.ladder` and `plan.tiers` need >= 1 entry; a repo
+  `plan.tiers` that would merge to an empty list leaves the previous list. `worker.approval.wait_in_hook_s` is now any number 0-25 (legacy goals use 0.3) and `ttl_s` starts at 1.
+- **ReDoS.** `regexProblem()`: user deny patterns may not use backreferences, lookaround or named groups, a quantified group that contains a quantifier or alternation
+  (`(a|aa)+`, `(a+)+`), more than 3 unbounded quantifiers, or exceed 200 characters. The engine's own two default patterns are exempt (one uses a lookahead). At run time
+  non-built-in patterns run under a `vm` 100 ms timeout (a timeout or a bad pattern is `deny/policy_error`), and a Bash command longer than 4096 characters is not scanned by deny
+  patterns and **asks** (`floor:command_too_long`; every other check still runs, a deny elsewhere still wins). Documented tightening: commands of 4097-16384 characters used to be
+  allowed when they matched the allowlist; they now ask.
+- **Tampered snapshot.** The worker/planner policy file is `{policy, rules_hash: <hash of the snapshot as found on disk>, rules_invalid?: true}`. With `rules_invalid` the hook denies
+  everything with `rule=rules_snapshot_invalid`, `rule_id=floor:rules_snapshot_invalid`, and logs it. An unreadable snapshot hashes to `invalid`.
+- **Nits.** `unparsed` is always `floor:unparsed`. The find-action ask carries `rule_id` `floor:find_action` (currently shadowed: `-exec/-ok` are denied earlier and `-delete/-fprint` ask
+  through the exec-flag rule first, so it is a label for the day those change). The hook's `policy_error`, `approved` and `ask_unresolved` returns carry `rule_id`.
+  `read_extra` entries are globs as declared: a plain path is a directory root, `*`/`**`/`?` match the resolved real path, `~/` expands, a relative entry is relative to the worktree (it
+  was relative to the process cwd); absolute paths are valid for `read_extra` only. `approval_ttl_s` is not a patchable budget key (`BUDGET_LIMITS` has no such key), so there is no
+  patch to honour: the TTL is fixed in the snapshot, as designed.

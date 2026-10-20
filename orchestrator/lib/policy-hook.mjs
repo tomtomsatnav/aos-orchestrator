@@ -53,7 +53,11 @@ function logDecision(env, rec) {
 export async function decideForPayload(payload, env = process.env) {
   const event = payload.hook_event_name || 'PreToolUse';
   let cfg;
-  try { cfg = JSON.parse(fs.readFileSync(env.AOS_POLICY_FILE, 'utf8')); } catch { return { event, decision: 'deny', reason: 'AOS policy: policy file unreadable (fail closed)', rule: 'policy_error' }; }
+  try { cfg = JSON.parse(fs.readFileSync(env.AOS_POLICY_FILE, 'utf8')); } catch { return { event, decision: 'deny', reason: 'AOS policy: policy file unreadable (fail closed)', rule: 'policy_error', rule_id: 'floor:policy_error' }; }
+  if (cfg?.rules_invalid) { // the engine found the goal's rules snapshot tampered or missing: nothing is allowed, and the log says why
+    logDecision(env, { event, decision: 'deny', rule: 'rules_snapshot_invalid', rule_id: 'floor:rules_snapshot_invalid', rule_layer: 'floor', rules_hash: typeof cfg.rules_hash === 'string' ? cfg.rules_hash.slice(0, 12) : null, label: safeLabel({ tool_name: payload.tool_name, tool_input: payload.tool_input }) });
+    return { event, decision: 'deny', reason: 'AOS policy: the rules snapshot of this goal is invalid (fail closed)', rule: 'rules_snapshot_invalid', rule_id: 'floor:rules_snapshot_invalid' };
+  }
   const ctx = { ...cfg.ctx, home: cfg.ctx?.home || process.env.HOME, realpath: realpathDeepest };
   const call = { tool_name: payload.tool_name, tool_input: payload.tool_input, cwd: payload.cwd };
   const v = evaluate(cfg.policy, call, ctx);
@@ -64,18 +68,18 @@ export async function decideForPayload(payload, env = process.env) {
   // ask: file an approval request, wait up to wait_in_hook_s, then deny
   const ap = cfg.policy?.approval || {};
   const dir = env.AOS_APPROVALS_DIR;
-  if (!dir) return { event, decision: 'deny', reason: 'AOS policy: approval needed but no inbox configured', rule: 'policy_error' };
+  if (!dir) return { event, decision: 'deny', reason: 'AOS policy: approval needed but no inbox configured', rule: 'policy_error', rule_id: 'floor:policy_error' };
   const rec = createApproval(dir, { goal_id: env.AOS_GOAL_ID || null, task_id: env.AOS_TASK_ID || null, attempt: Number(env.AOS_ATTEMPT) || 0,
     tool: call.tool_name, input: call.tool_input, cwd: call.cwd || null, reason: v.reason, rule: v.rule, rule_id: v.rule_id }, { ttl_s: ap.ttl_s || 86400 });
   const pollMs = Number(env.AOS_APPROVAL_POLL_MS) || 100;
   const done = rec.status !== 'pending' ? rec : await waitForDecision(dir, rec.id, { timeoutMs: hookWaitMs(cfg.policy), pollMs });
   if (done && done.status === 'approved') {
     logDecision(env, { event, decision: 'allow', rule: 'approved', rule_id: 'grant:approved', rule_layer: 'grant', rules_hash: ids(v, cfg).rules_hash, asked_by: v.rule_id, approval: rec.id, label: safeLabel(call) });
-    return { event, decision: 'allow', reason: `AOS policy: approved (${rec.id})`, rule: 'approved', approval: rec.id };
+    return { event, decision: 'allow', reason: `AOS policy: approved (${rec.id})`, rule: 'approved', rule_id: 'grant:approved', approval: rec.id };
   }
   const why = done && done.status === 'denied' ? `approval ${rec.id} was denied` : `approval ${rec.id} pending; do not retry; finish and report what you needed`;
   logDecision(env, { event, decision: 'deny', rule: 'ask_unresolved', rule_id: 'floor:ask_unresolved', rule_layer: 'floor', rules_hash: ids(v, cfg).rules_hash, asked_by: v.rule_id, approval: rec.id, label: safeLabel(call) });
-  return { event, decision: 'deny', reason: `AOS policy: ${why}`, rule: 'ask_unresolved', approval: rec.id };
+  return { event, decision: 'deny', reason: `AOS policy: ${why}`, rule: 'ask_unresolved', rule_id: 'floor:ask_unresolved', approval: rec.id };
 }
 
 async function main() {

@@ -750,7 +750,7 @@ export class Engine {
     const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), constraints: { max_tasks: o.budgets.max_tasks, tiers: TIERS, check_allowlist: this._checkAllowlist(goal) } });
     const sessionId = crypto.randomUUID();
     const policyFile = path.join(this.P.workers, 'planner.policy.json');
-    atomicWrite(policyFile, { policy: this._policy(goal), rules_hash: goal.orch.rules?.sha256 ?? null, ctx: { worktree: realpathDeepest(wt), path_scope: [], allowed_tools: ['Read', 'Glob', 'Grep'], allowed_commands: [], grants: [], home: this.env.HOME, base_branch: o.base_branch } });
+    atomicWrite(policyFile, { ...this._policyHead(goal), ctx: { worktree: realpathDeepest(wt), path_scope: [], allowed_tools: ['Read', 'Glob', 'Grep'], allowed_commands: [], grants: [], home: this.env.HOME, base_branch: o.base_branch } });
     const stdout = this.wpath('planner', 1, 'stream.ndjson'); const stderr = this.wpath('planner', 1, 'stderr');
     for (const f of [stdout, stderr]) { try { fs.unlinkSync(f); } catch { /* none */ } }
     const args = W.buildArgs({ prompt, tier: 'opus', sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, tools: W.READ_ONLY_TOOLS, allowedTools: W.READ_ONLY_TOOLS, appendSystemPrompt: 'You are the planner for an AOS-1 goal. You do not edit files. Output ONLY one JSON object.', settingsFile: path.join(this.P.workers, 'settings.json') });
@@ -857,7 +857,7 @@ export class Engine {
     task.orch.worktree = wt;
     const real = realpathDeepest(wt);
     const policyFile = this.wpath(task.id, seq, 'policy.json');
-    atomicWrite(policyFile, { policy: this._policy(goal), rules_hash: goal.orch.rules?.sha256 ?? null, ctx: { worktree: real, path_scope: task.orch.path_scope, allowed_tools: task.orch.allowed_tools,
+    atomicWrite(policyFile, { ...this._policyHead(goal), ctx: { worktree: real, path_scope: task.orch.path_scope, allowed_tools: task.orch.allowed_tools,
       allowed_commands: task.orch.allowed_commands, grants: task.orch.grants, home: this.env.HOME, base_branch: o.base_branch } });
     const deps = task.depends_on.map((d) => S.tasks.find((x) => x.id === d)).filter(Boolean).map((d) => ({ id: d.id, title: d.title, summary: d.orch.result_summary }));
     const prompt = W.buildWorkerPrompt({ goal, task, deps, previous: task.orch.last_failure ? { check_output: task.orch.last_failure.check_output, denials: task.orch.last_failure.denials, note: task.orch.last_failure.note } : null });
@@ -942,10 +942,12 @@ export class Engine {
     return [...base, ...crit];
   }
   /** The worker policy of a goal: read ONLY from its rules snapshot (never re-reads policy files). Fails closed (no tool allowed) if the snapshot does not match goal.json. */
-  _policy(goal) {
-    const snap = readJSON(this.P.rules, null);
-    if (snap && goal.orch.rules && snapshotHash(snap) === goal.orch.rules.sha256 && snap.policy) return snap.policy;
-    return mergePolicy({ tools: { allow: [] } });
+  _policy(goal) { return this._policyHead(goal).policy; }
+  /** {policy, rules_hash, rules_invalid?} for a worker policy file: the ACTUAL hash of the snapshot on disk (never the expected one), and rules_invalid when it does not match goal.json (the hook then logs floor:rules_snapshot_invalid). */
+  _policyHead(goal) {
+    const snap = readJSON(this.P.rules, null); const actual = snapshotHash(snap);
+    if (snap && goal.orch.rules && actual === goal.orch.rules.sha256 && snap.policy) return { policy: snap.policy, rules_hash: actual };
+    return { policy: mergePolicy({ tools: { allow: [] } }), rules_hash: actual, rules_invalid: true };
   }
   _effectivePolicy(goal, file, over) {
     return mergePolicy(file, over, { approval: { ttl_s: goal.orch.budgets.approval_ttl_s, ...(over?.approval || {}) } });
