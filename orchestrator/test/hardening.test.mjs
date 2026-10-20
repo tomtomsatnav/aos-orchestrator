@@ -214,9 +214,9 @@ test('condition 2: aos-orch run refuses a hostile repo; --trust-repo-config proc
   sb.scenario({ planner: { behavior: 'success', plan: onePlan(ptask('t1', 'a.txt', 'alpha')) }, tasks: {} });
   const spec = { id: 'g-cli-h', title: 'hostile', success_criteria: [crit('a.txt', 'alpha')], orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec));
-  let r = await run(['run', gf, '--poll-ms', '50', '--interval-s', '0.2'], sb.env());
+  let r = await run(['run', gf, '--no-wait', '--poll-ms', '50', '--interval-s', '0.2'], sb.env());
   assert.equal(r.code, 1); assert.match(r.err, /refusing repo/); assert.match(r.err, /\.mcp\.json/);
-  r = await run(['run', gf, '--trust-repo-config', '--poll-ms', '50', '--interval-s', '0.2'], sb.env());
+  r = await run(['run', gf, '--no-wait', '--trust-repo-config', '--poll-ms', '50', '--interval-s', '0.2'], sb.env());
   assert.equal(r.code, 4, r.err); // parked at plan approval (the plan has node checks)
   assert.match(r.err, /WARNING: --trust-repo-config/); assert.match(r.err, /repo instructions will be loaded by workers: .*CLAUDE\.md [0-9a-f]{12}/);
   assert.equal(readJSON(paths(path.join(sb.orch, 'goals', 'g-cli-h')).goal).orch.trust_repo_config, true);
@@ -317,7 +317,7 @@ test('condition 3: status / approvals / approve-plan print the exact commands, t
   sb.scenario({ planner: { behavior: 'success', plan: onePlan(task) }, tasks: { t1: [edit('a.txt', 'alpha')] } });
   const spec = { id: 'g-rev', title: 'review', success_criteria: [crit('a.txt', 'alpha')], orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec)); const env = sb.env();
-  let r = await run(['run', gf, '--auto-approve', '--poll-ms', '50', '--interval-s', '0.2'], env);
+  let r = await run(['run', gf, '--no-wait', '--auto-approve', '--poll-ms', '50', '--interval-s', '0.2'], env);
   assert.equal(r.code, 4, r.err); assert.equal(JSON.parse(r.out).plan_state, 'awaiting_approval');
   r = await run(['status', 'g-rev'], env);
   const st = JSON.parse(r.out);

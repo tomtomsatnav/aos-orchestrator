@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// aos-orch: minimal CLI for the AOS orchestrator engine (phase 1, headless, no HTTP server).
-//   aos-orch run <goal.json | goal-id> [--wait-approval] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--poll-ms N] [--interval-s N]
+// aos-orch: CLI for the AOS orchestrator engine (`aos-orch --help` lists every command).
+//   aos-orch run <goal.json | goal-id> [--no-wait] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--replan] [--poll-ms N] [--interval-s N]
+//   aos-orch doctor [--live]
 //   aos-orch status [goal-id]
 //   aos-orch plan <goal-id>            (read-only: the plan review and rules summary, approves nothing)
 //   aos-orch pause|resume|cancel|kill|approve-plan|reject-plan <goal-id>
@@ -10,7 +11,7 @@
 //   aos-orch confirm <goal-id> <criterion-id>
 //   aos-orch rules show [goal-id] | rules check <file> [--layer user|repo|goal] | rules explain <goal-id> <task-id> '<tool json>'
 //   aos-orch approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
-// State lives under AOS_ORCH_DIR (default ${CLAUDE_PLUGIN_DATA or ~/.claude/plugins/data/aos-dashboard-aos-local}/orch).
+// State lives under AOS_ORCH_DIR (default ~/.aos/orch, or $XDG_STATE_HOME/aos/orch; an existing ~/.claude/plugins/data/aos-dashboard-aos-local/orch is still used when ~/.aos/orch does not exist).
 // The real `claude` binary is used only when AOS_CLAUDE_BIN is unset.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,20 +21,41 @@ import { rulesFingerprint } from '../lib/rules.mjs';
 import { renderRulesFor, renderUserRules, checkRulesFile, explainCall } from '../lib/rules-store.mjs';
 import { q, escCtrl, escBeyondC0 } from '../lib/ctrl.mjs';
 import { draftGoal, renderDraft, PROFILES } from '../lib/draft.mjs';
-import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
+import { orchLocation, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
 import { createControlServer, parsePort, DEFAULT_PORT } from '../server/index.mjs';
 import { ensureCliToken, readCliToken, createLoginCode } from '../server/auth.mjs';
 
+const USAGE = `usage: aos-orch <command> ...   (node orchestrator/bin/aos-orch.mjs when not on your PATH; \`npm link\` installs \`aos-orch\`)
+  draft "<prompt>" --repo <path>   write a goal.json from a sentence (one small model call; review it)
+        [--out goal.json] [--profile strict|node-library|docs-only] [--answers "..."] [--branch main] [--max-tokens N] [--max-wall-s N] [--tier haiku|sonnet|opus]
+  run <goal.json|goal-id>          plan and run a goal. Stays attached and waits for your approvals (plan, human-verified criteria)
+        [--no-wait] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--accept-repo-loosening ids] [--replan] [--poll-ms N] [--interval-s N]
+                                   --replan: ask the planner again for a goal blocked at planning
+                                   --no-wait: exit at the first approval gate (code 4 for a plan), as before
+  status [goal-id] | goals [--json]   list goals / show one
+  plan <goal-id>                   read-only plan review; approve-plan | reject-plan <goal-id> decide it
+  pause | resume | cancel | kill <goal-id>
+  approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>   answer a worker permission request
+  confirm <goal-id> <criterion-id> sign off a human-verified criterion
+  rules show [goal-id] | rules check <file> [--layer user|repo|goal] | rules explain <goal-id> <task-id> '<tool json>'
+  doctor [--live]                  preflight: node, git, claude version/flags/login, sandbox, state dir, port (--live: one tiny Haiku call)
+  serve [--port 4319] [--max-workers N] [--dashboard-url URL] [--origins a,b] [--leave-workers|--kill-workers] [--drain-s N]
+  login-link [--port N] | token [--show]   control server for the dashboard (127.0.0.1:4319)
+  help, --help, -h                 this text
+State lives in $AOS_ORCH_DIR (default ~/.aos/orch; the old dashboard-plugin folder is used if it exists and ~/.aos/orch does not). Docs: orchestrator/README.md`;
 const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h') || argv[0] === 'help') { console.log(USAGE); process.exit(0); }
 const flags = {}; const pos = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s', 'accept-repo-loosening', 'layer', 'repo', 'out', 'profile', 'answers', 'branch', 'max-tokens', 'max-wall-s', 'tier'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
 }
 const [cmd, arg1, arg2] = pos;
-const orch = flags['orch-dir'] ? path.resolve(flags['orch-dir']) : orchRoot();
+const loc = flags['orch-dir'] ? { dir: path.resolve(flags['orch-dir']), legacy: false } : orchLocation();
+const orch = loc.dir;
+if (loc.legacy) console.error(`aos-orch: using the existing state in ${orch} (the new default is ${loc.fresh}; move the folder there, or set AOS_ORCH_DIR, to silence this)`);
 
 // worker- and model-controlled strings reach the terminal: JSON output escapes what JSON.stringify leaves raw (C1, bidi, invisible characters), text output escapes every control character
 const out = (o) => console.log(typeof o === 'string' ? escCtrl(o).replace(/\\u000a/g, '\n') : JSON.stringify(o, (k, v) => (typeof v === 'string' ? escBeyondC0(v) : v), 2));
@@ -50,10 +72,19 @@ const rulesSummaryOf = (dir, goal) => renderRulesFor(dir, goal);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** The exact next human command when `run` stops waiting on a human (plan approval, or a verify:"human" criterion). */
 function nextSteps(id, s) {
-  if (s.plan_state === 'awaiting_approval') return [`the plan is waiting for YOU. Review it:   aos-orch plan ${id}`, `then approve it:       aos-orch approve-plan ${id}   (or reject-plan)`, `then continue:         aos-orch run ${id}   (run with --wait-approval to stay attached and continue in the same process)`];
+  if (s.plan_state === 'awaiting_approval') return [`the plan is waiting for YOU. Review it:   aos-orch plan ${id}`, `then approve it:       aos-orch approve-plan ${id}   (or reject-plan)`, `then continue:         aos-orch run ${id}   (not needed while an attached run is waiting: it continues by itself)`];
   const m = /^awaiting human confirmation: (.+)$/.exec(String(s.blocked_reason || ''));
   if (m) return [`the goal is waiting for YOUR confirmation of: ${m[1]}`, ...m[1].split(',').map((c) => c.trim()).filter((c) => /^[a-z][a-z0-9_-]{0,31}$/.test(c)).map((c) => `confirm it (only if true): aos-orch confirm ${id} ${c}`), `then continue:         aos-orch run ${id}`];
   return [];
+}
+/** A \`run\` waiting for a human (between engine runs it holds no lock) leaves this marker, refreshed twice a second. */
+const attachedFile = (dir) => path.join(dir, 'attached.json');
+/** The live attached \`run\` that will apply a queued command, or null. */
+function attachedRun(dir) {
+  const st = lockStatus(dir);
+  if (st.owner_alive && st.owner_label === 'run' && !st.wedged) return st.owner_pid;
+  const a = readJSON(attachedFile(dir), null);
+  return a && pidAlive(a.pid) && Date.now() - a.ts < 5000 ? a.pid : null;
 }
 const engineAlive = (dir) => { const l = readJSON(paths(dir).lock, null); return !!l && pidAlive(l.pid); };
 
@@ -82,7 +113,7 @@ async function main() {
   ensureDir(orch);
   switch (cmd) {
     case 'run': {
-      if (!arg1) die('usage: aos-orch run <goal.json | goal-id> [--wait-approval]');
+      if (!arg1) die('usage: aos-orch run <goal.json | goal-id> [--no-wait]');
       let dir;
       if (fs.existsSync(arg1) && fs.statSync(arg1).isFile()) {
         const spec = JSON.parse(fs.readFileSync(arg1, 'utf8'));
@@ -106,15 +137,18 @@ async function main() {
       }
       const waiting = (s) => s.plan_state === 'awaiting_approval' || /^awaiting human confirmation/.test(String(s.blocked_reason || ''));
       let { status, s } = await driveOnce(dir);
-      // --wait-approval: stay attached while a human decides. The engine is only run again once a command (approve-plan, confirm, ...) has been queued by the human's own CLI call;
+      // default: stay attached (--no-wait exits at the gate instead) while a human decides. The engine is only run again once a command (approve-plan, confirm, ...) has been queued by the human's own CLI call;
       // it applies that command itself, so nothing proceeds without it.
-      while (flags['wait-approval'] && waiting(s) && status !== 'cancelled') {
+      while (!flags['no-wait'] && waiting(s) && status !== 'cancelled') {
         if (s.plan_state === 'awaiting_approval') { const S = loadState(dir); console.error(`PLAN FOR REVIEW:\n${renderReview(reviewView(S.tasks, S.goal), rulesSummaryOf(dir, S.goal))}\n`); }
         for (const l of nextSteps(id, s)) console.error(`aos-orch: ${l}`);
         console.error('aos-orch: waiting for your command (Ctrl-C to stop; nothing runs until you give it)...');
-        while (!(fs.existsSync(paths(dir).commands) && fs.readdirSync(paths(dir).commands).some((n) => n.endsWith('.json')))) await sleep(500);
+        const mark = () => { try { fs.writeFileSync(attachedFile(dir), JSON.stringify({ pid: process.pid, ts: Date.now() })); } catch { /* best effort */ } };
+        while (!(fs.existsSync(paths(dir).commands) && fs.readdirSync(paths(dir).commands).some((n) => n.endsWith('.json')))) { mark(); await sleep(500); }
+        mark();
         ({ status, s } = await driveOnce(dir));
       }
+      try { fs.unlinkSync(attachedFile(dir)); } catch { /* none */ }
       out({ goal: s.id, status, plan_state: s.plan_state, blocked_reason: s.blocked_reason, report: fs.existsSync(paths(dir).report) ? paths(dir).report : null, dir });
       if (waiting(s)) for (const l of nextSteps(id, s)) console.error(`aos-orch: ${l}`);
       process.exit(status === 'achieved' ? 0 : status === 'cancelled' ? 3 : s.plan_state === 'awaiting_approval' ? 4 : 2);
@@ -156,8 +190,9 @@ async function main() {
         console.error(`plan hash ${extra.reviewed.plan_hash.slice(0, 12)}${rules_hash ? `  rules hash ${rules_hash.slice(0, 12)}` : ''}`);
       }
       enqueueCommand(d, { cmd, by: 'cli', ...extra });
-      const st = lockStatus(d);
-      if (!st.owner_alive) out(`${cmd}: queued, but no engine is running for this goal; it applies on the next \`aos-orch run ${arg1}\` (or when \`aos-orch serve\` is started). To continue now: \`aos-orch run ${arg1}\``);
+      const st = lockStatus(d); const att = attachedRun(d);
+      if (att) out(`${cmd}: queued; the attached run (pid ${att}) will apply it within one tick`);
+      else if (!st.owner_alive) out(`${cmd}: queued, but no engine is running for this goal; it applies on the next \`aos-orch run ${arg1}\` (or when \`aos-orch serve\` is started). To continue now: \`aos-orch run ${arg1}\``);
       else {
         out(`${cmd}: queued; the running engine applies it at its next tick (${describeOwner(st)})`);
         if (st.wedged) console.error(`aos-orch: WARNING the owning engine looks wedged; this command will not be applied until it is restarted (kill ${st.owner_pid}).`);
@@ -191,7 +226,7 @@ async function main() {
       if (!r.ok) process.exit(2);
       if (r.questions.length) { console.error('\nThe model could not tell what "done" means. Answer and run again with --answers "..." (at most 2 rounds), or write goal.json by hand.'); process.exit(3); }
       fs.writeFileSync(out, `${JSON.stringify(r.spec, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-      console.error(`wrote ${out} (0600). Review and edit it, then: aos-orch run ${out} --wait-approval   (stays attached: review with \`aos-orch plan <id>\`, approve with \`aos-orch approve-plan <id>\`)`);
+      console.error(`wrote ${out} (0600). Review and edit it, then: aos-orch run ${out}   (stays attached and waits for you: review with \`aos-orch plan <id>\`, approve with \`aos-orch approve-plan <id>\`)`);
       break;
     }
     case 'confirm': { // a human confirms a verify:"human" criterion once every task is done
@@ -203,7 +238,8 @@ async function main() {
       if (!(S.tasks.length && S.tasks.every((t) => t.status === 'done'))) die('confirm only after every task is done', 2);
       console.error(`CONFIRMING (you are saying this is true): ${q(c.text)}`);
       enqueueCommand(d, { cmd: 'confirm', by: 'cli', criterion: arg2 });
-      out(`confirm: queued; the engine applies it at its next tick${lockStatus(d).owner_alive ? '' : ` (no engine is running: it applies on the next \`aos-orch run ${arg1}\` or when \`aos-orch serve\` is started)`}`);
+      const att = attachedRun(d);
+      out(att ? `confirm: queued; the attached run (pid ${att}) will apply it within one tick` : `confirm: queued; the engine applies it at its next tick${lockStatus(d).owner_alive ? '' : ` (no engine is running: it applies on the next \`aos-orch run ${arg1}\` or when \`aos-orch serve\` is started)`}`);
       break;
     }
     case 'rules': {
@@ -266,18 +302,8 @@ async function main() {
       break;
     }
     default:
-      die(`usage: aos-orch <command> ...   (node orchestrator/bin/aos-orch.mjs when not on your PATH)
-  draft "<prompt>" --repo <path>   write a goal.json from a sentence (one small model call; review it)
-  run <goal.json|goal-id>          plan and run a goal; stops for your approval, then run it again (--wait-approval stays attached)
-  status [goal-id] | goals         list goals / show one
-  plan <goal-id>                   read-only plan review; approve-plan | reject-plan <goal-id> decide it
-  pause | resume | cancel | kill <goal-id>
-  approvals <goal-id> | approve | deny <goal-id> <A-n>   answer a worker permission request
-  confirm <goal-id> <criterion-id> sign off a human-verified criterion
-  rules show|check|explain         inspect the rules (what workers may do and the budgets)
-  doctor [--live]                  preflight: node, git, claude, flags, login, sandbox, state dir, port
-  serve | login-link | token       control server for the dashboard (127.0.0.1:4319)
-State lives in $AOS_ORCH_DIR (default ~/.claude/plugins/data/aos-dashboard-aos-local/orch). Docs: orchestrator/README.md`, 64);
+      process.stderr.write(`aos-orch: unknown command ${q(String(cmd ?? '').slice(0, 40))}\n${USAGE}\n`);
+      process.exit(2);
   }
 }
 main().catch((e) => die(e.message));

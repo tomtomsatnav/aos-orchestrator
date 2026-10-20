@@ -62,7 +62,7 @@ test('`run <goal> --replan` on a goal blocked at planning re-plans (without the 
   const id = goalOf(dir).id;
   let r = await cli(['run', id], sb.env());
   assert.match(r.err, /blocked at planning.*aos-orch run .* --replan/s); assert.equal(planners(sb).length, 2, 'no re-plan without the flag'); assert.equal(r.code, 2);
-  r = await cli(['run', id, '--replan'], sb.env());
+  r = await cli(['run', id, '--replan', '--no-wait'], sb.env());
   assert.equal(planners(sb).length, 3, r.err); assert.equal(r.code, 4, r.err + r.out); // awaiting plan approval
   assert.equal(goalOf(dir).orch.plan_state, 'awaiting_approval'); assert.equal(tasksOf(dir).length, 1);
   assert.ok(readEvents(dir).some((e) => e.type === 'orch.plan.replan_requested'));

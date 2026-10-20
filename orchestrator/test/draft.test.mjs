@@ -136,7 +136,7 @@ test('profile node-library lets a draft use node --test (a goal-layer rule liste
   const sc = SC('draft-ok.json'); sc.draft.draft.success_criteria[0].check.argv = ['node', '--test', 'x.test.mjs']; sc.draft.draft.success_criteria[0].check.timeout_s = 300; sb.scenario(sc);
   let r = await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'x', profile: 'node-library', env: sb.env() });
   assert.equal(r.ok, true, r.errors.join('; ')); assert.equal(r.draft.success_criteria[0].matched_rule, 'goal:checks.allow.node-test'); assert.deepEqual(r.spec.orch.rules, PROFILES['node-library']);
-  assert.match(r.rules_text, /LOOSENINGS YOU ARE APPROVING: none/); assert.match(r.rules_text, /PROFILE "?node-library"? ADDS TO THE CHECK ALLOWLIST \(3;/); assert.match(r.rules_text, /\+ node --test/);
+  assert.doesNotMatch(r.rules_text, /LOOSENINGS|NOT APPLIED/); assert.match(r.rules_text, /PROFILE "?node-library"? ADDS TO THE CHECK ALLOWLIST \(3;/); assert.match(r.rules_text, /\+ node --test/);
   r = await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'x', profile: 'strict', env: sb.env() }); assert.equal(r.ok, false); assert.match(r.errors.join(), /allowlist/);
   const g = await createGoal(sb.orch, { ...(await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'x', profile: 'node-library', env: sb.env() })).spec, id: 'g-prof' });
   assert.equal(g.goal.orch.drafted.tier, 'haiku');

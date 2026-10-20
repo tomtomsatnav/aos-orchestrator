@@ -62,7 +62,7 @@ test('a vacuous always-passing criterion does not achieve the goal until all 3 t
 import { chk, ptask, crit, edit, fakeCalls, worktreesOf, fakeClock, allowAllHook } from './helpers.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
 import { acquireLock, releaseLock } from '../lib/state.mjs';
-import { Engine } from '../lib/engine.mjs';
+import { Engine, summarize } from '../lib/engine.mjs';
 
 const onePlan = (...tasks) => ({ tasks, risks: [] });
 
@@ -254,7 +254,9 @@ test('budget: the new-token cap stops new dispatch and ends the goal blocked wit
   sb.scenario({ tasks: { t1: [edit('a.txt', 'alpha')], t2: [edit('b.txt', 'beta')], t3: [edit('c.txt', 'gamma')] } });
   const { dir } = await sb.goal({ success_criteria: [crit('c.txt', 'gamma')], orch: { budgets: { max_new_tokens: 1000 } },
     plan: onePlan(ptask('t1', 'a.txt', 'alpha'), ptask('t2', 'b.txt', 'beta', { deps: ['t1'] }), ptask('t3', 'c.txt', 'gamma', { deps: ['t2'] })) });
-  await drive(sb.engine(dir));
+  // the cap trips on the in-flight worker's first usage line; the grace period is what lets t1 finish and be merged. A loaded machine can need
+  // longer than the suite's 400 ms test grace just to start the fake claude, so this test gives it ample grace (the kill-after-grace path has its own test below)
+  await drive(sb.engine(dir, { budgetGraceMs: 20000 }));
   const g = goalOf(dir);
   assert.equal(g.status, 'blocked'); assert.match(g.blocked_reason, /^budget: new-token cap reached/);
   assert.deepEqual(tasksOf(dir).map((x) => x.status), ['done', 'ready', 'pending']);
@@ -672,4 +674,21 @@ test('two tasks with overlapping scopes touching one file are serialised: the se
   assert.equal(max, 1, 'overlapping scopes never run together'); assert.equal(goalOf(dir).status, 'achieved');
   assert.ok(!types(dir).includes('orch.integrate.conflict'));
   assert.equal(git(sb.repo, 'show', 'aos/g-test/integration:a.txt'), 'beta');
+});
+
+test('worker crash: the last ~20 stderr lines (escaped) reach the attempt_log, status and the report, not a bare "crashed"', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  const stderr = `${Array.from({ length: 30 }, (_, i) => `boom line ${i + 1}`).join('\n')}\nlast\u001b[31m words`;
+  sb.scenario({ tasks: { t1: [{ behavior: 'crash', stderr }, { behavior: 'crash', stderr }, { behavior: 'crash', stderr }] } });
+  const { dir } = await sb.goal({ success_criteria: [crit('a.txt', 'alpha')], plan: onePlan(ptask('t1', 'a.txt', 'alpha')) });
+  await drive(sb.engine(dir));
+  const t1 = tasksOf(dir)[0];
+  assert.equal(t1.orch.attempt_log[0].outcome, 'crashed');
+  const tail = t1.orch.attempt_log[0].stderr_tail.split('\n');
+  assert.equal(tail.length, 20); assert.equal(tail[0], 'boom line 12'); assert.equal(tail.at(-1), 'last\\u001b[31m words', 'control characters are escaped');
+  assert.ok(!t1.orch.attempt_log[0].stderr_tail.includes('\u001b'));
+  const sum = summarize({ goal: goalOf(dir), tasks: tasksOf(dir) }, { seq: 0 });
+  assert.equal(sum.task_list[0].last_stderr_outcome, 'crashed'); assert.match(sum.task_list[0].last_stderr, /boom line 30/);
+  const rep = fs.readFileSync(paths(dir).report, 'utf8');
+  assert.match(rep, /## Worker errors/); assert.match(rep, /t1 attempt 1 \(haiku\): crashed/); assert.match(rep, /boom line 30/);
 });

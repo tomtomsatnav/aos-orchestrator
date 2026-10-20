@@ -25,6 +25,11 @@ export function buildReport({ goal, tasks, approvals = [], denials = [], diffSta
     const out = (t.orch?.attempt_log || []).map((a) => `${a.n}:${a.tier}:${a.outcome || 'running'}`).join(', ');
     L.push(`| ${t.id} | ${t.status} | ${t.orch?.model_tier} | ${t.attempts}/${t.max_attempts} | ${t.orch?.tokens?.new ?? 0} | ${out} |`);
   }
+  const errs = tasks.flatMap((t) => (t.orch?.attempt_log || []).filter((a) => a.stderr_tail).map((a) => ({ t, a })));
+  if (errs.length) {
+    L.push('', '## Worker errors (last lines of stderr)');
+    for (const { t, a } of errs) L.push('', `${t.id} attempt ${a.n} (${a.tier}): ${a.outcome || 'running'}`, fence(String(a.stderr_tail).replace(/```/g, "'''")).replace(/\n$/, ''));
+  }
   L.push('', '## Approvals', '');
   if (!approvals.length) L.push('none');
   for (const a of approvals) L.push(`- ${a.id} ${a.task_id} ${a.tool}: ${a.status}${a.scope ? ` (${a.scope})` : ''} by ${a.decided_by || 'n/a'}`);
