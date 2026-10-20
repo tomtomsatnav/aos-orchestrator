@@ -7,7 +7,7 @@ import path from 'node:path';
 import { matchGlob, globsOverlap, scopesOverlap } from '../lib/glob.mjs';
 import { parseShell } from '../lib/shell.mjs';
 import { validatePlan, extractJson, findCycle, buildPlannerPrompt, validateScope } from '../lib/plan.mjs';
-import { Governor, parseRateLimitEvent, detectLimitFailure, usageOf, checkBudgets } from '../lib/governor.mjs';
+import { Governor, parseRateLimitEvent, detectLimitFailure, usageOf, checkBudgets, epochToMs } from '../lib/governor.mjs';
 import { buildWorkerPrompt, WORKER_RULES, buildArgs, buildEnv, StreamTail, buildSettings, killGroup, groupAlive } from '../lib/worker.mjs';
 import { runCheck, runChecks, commandAllowed } from '../lib/checks.mjs';
 import { appendEvent, readEvents, atomicWrite, readJSON, normalizeGoalSpec, orchRoot, enqueueCommand, drainCommands } from '../lib/state.mjs';
@@ -145,7 +145,7 @@ test('governor: rejected status pauses until resetsAt + jitter; without resetsAt
 });
 
 test('governor: limit-failure detection (matcher is UNVERIFIED and configurable), usage accounting, budgets', () => {
-  assert.deepEqual(detectLimitFailure({ is_error: true, api_error_status: 429, result: 'x' }), { limited: true, certain: true, why: 'api_error_status 429' });
+  assert.deepEqual(detectLimitFailure({ is_error: true, api_error_status: 429, result: 'x' }), { limited: true, overloaded: false, auth: false, certain: true, kind: 'limit', why: 'api_error_status 429' });
   assert.equal(detectLimitFailure({ is_error: true, result: '5-hour limit reached ∙ resets 3pm' }).limited, true);
   assert.equal(detectLimitFailure({ is_error: true, result: 'weird' }, '', { limit_text: 'weird' }).limited, true, 'matcher is configurable');
   assert.equal(detectLimitFailure({ is_error: true, result: 'boom', usage: { output_tokens: 5 } }).limited, false);
@@ -283,4 +283,58 @@ test('prompts: worker told to use Write/Edit not shell redirects; planner told c
   assert.match(args[args.indexOf('--tools') + 1], /Write/); assert.match(args[args.indexOf('--tools') + 1], /Edit/);
   const g = { title: 'G', success_criteria: [{ id: 'c1', text: 'x' }], orch: { budgets: { max_tasks: 3 }, check_allowlist: [] } };
   assert.match(buildPlannerPrompt({ goal: g }).prompt, /ONLY for read-only inspection\. Creating or editing files needs NO command/);
+});
+
+// ---- real (scrubbed) samples: test/fixtures/*.real.ndjson came from this machine's transcripts / orch worker streams; *.inferred.* were NOT observed
+const fx = (n) => JSON.parse(fs.readFileSync(new URL(`./fixtures/${n}`, import.meta.url), 'utf8').trim().split('\n')[0]);
+const tailOf = (...names) => { const f = path.join(os.tmpdir(), `aos-fx-${process.pid}-${Math.random().toString(36).slice(2)}.ndjson`); fs.writeFileSync(f, names.map((n) => JSON.stringify(fx(n))).join('\n') + '\n'); const t = new StreamTail(f); t.update(); fs.rmSync(f); return t; };
+
+test('real fixtures: epoch seconds (not ms) in resetsAt; allowed event, session/weekly rejections parse structurally', () => {
+  const ok = parseRateLimitEvent(fx('rate-limit-event-allowed.real.ndjson'));
+  assert.equal(ok.status, 'allowed'); assert.equal(ok.type, 'five_hour'); assert.equal(ok.resets_at_ms, 1792527600000); assert.equal(new Date(ok.resets_at_ms).toISOString(), '2026-10-20T20:20:00.000Z');
+  assert.equal(ok.five_hour.utilization, 0.06); assert.equal(ok.seven_day.resets_at_ms, 1792569600000);
+  assert.equal(epochToMs(1792527600), 1792527600000); assert.equal(epochToMs(1792527600000), 1792527600000, 'ms passes through'); assert.equal(epochToMs(null), null); assert.equal(epochToMs('x'), null);
+  const wk = parseRateLimitEvent(fx('api-error-weekly-limit.real.ndjson')); // "resets Oct 21 at 9am (Europe/London)" = 08:00Z
+  assert.equal(wk.status, 'rejected'); assert.equal(wk.type, 'seven_day'); assert.equal(new Date(wk.resets_at_ms).toISOString(), '2026-10-21T08:00:00.000Z');
+  assert.equal(parseRateLimitEvent(fx('api-error-auth.real.ndjson')), null);
+});
+
+test('real fixtures: StreamTail captures the api-error message; detection distinguishes 5h / 7d / auth without any text match', () => {
+  const five = tailOf('api-error-session-limit.real.ndjson'), week = tailOf('api-error-weekly-limit.real.ndjson'), auth = tailOf('api-error-auth.real.ndjson');
+  assert.equal(five.apiError.apiError, 'usage_limit_reached'); assert.equal(five.takeRateLimits().length, 1); assert.equal(auth.takeRateLimits().length, 0);
+  const noText = { is_error: true, result: '' }; // text deliberately absent: structure alone must decide
+  let d = detectLimitFailure(noText, '', {}, { rateLimit: five.lastRateLimit, apiError: { ...five.apiError, text: '' } });
+  assert.deepEqual([d.limited, d.certain, d.kind], [true, true, 'five_hour']);
+  d = detectLimitFailure(noText, '', {}, { rateLimit: week.lastRateLimit, apiError: { ...week.apiError, text: '' } });
+  assert.deepEqual([d.limited, d.certain, d.kind], [true, true, 'seven_day']);
+  d = detectLimitFailure(null, '', {}, { apiError: auth.apiError });
+  assert.deepEqual([d.limited, d.auth, d.kind], [false, true, 'auth']);
+});
+
+test('detection: 529 is overloaded (not a plan limit), 401 is auth, text fallback matches the REAL wording and is uncertain', () => {
+  let d = detectLimitFailure(fx('result-overloaded-529.inferred.ndjson'));
+  assert.deepEqual([d.limited, d.overloaded, d.certain], [false, true, true]);
+  d = detectLimitFailure({ is_error: true, result: 'x', api_error_status: 401 }); assert.deepEqual([d.limited, d.auth], [false, true]);
+  d = detectLimitFailure({ is_error: true, result: 'API Error: Overloaded' }); assert.deepEqual([d.overloaded, d.certain, d.limited], [true, false, false]);
+  d = detectLimitFailure(fx('result-limit-429.inferred.ndjson')); assert.deepEqual([d.limited, d.certain, d.kind], [true, true, 'five_hour']);
+  for (const [txt, kind] of [["You've hit your session limit · resets 4:50pm (Europe/London)", 'five_hour'], ["You've hit your weekly limit · resets Oct 21 at 9am (Europe/London)", 'seven_day']]) {
+    d = detectLimitFailure({ is_error: true, result: txt }); assert.deepEqual([d.limited, d.certain, d.kind], [true, false, kind], txt);
+  }
+  assert.equal(detectLimitFailure({ is_error: true, result: 'tests failed after 3 resets 4 times', usage: { output_tokens: 3 } }).limited, false, 'bare "resets <digit>" no longer matches');
+  assert.equal(detectLimitFailure({ is_error: true, result: 'boom', api_error_status: 500, usage: {} }).limited, false, '5xx without 429/limit text is a plain error');
+  d = detectLimitFailure(null, "You've hit your session limit", {}); assert.deepEqual([d.limited, d.certain], [true, false]);
+});
+
+test('governor: overloaded backs off 30 s -> 60 -> 120 -> 300 s and never shortens or replaces a longer plan pause; healthy event resets the ladder', () => {
+  const dir = tmp();
+  try {
+    const NOW = 1_800_000_000_000; const gov = new Governor(dir); const secs = [];
+    for (let i = 0; i < 5; i++) { const st = gov.noteOverloaded(NOW); secs.push((st.pause.until_ms - NOW) / 1000); gov.evaluate(st.pause.until_ms + 1); }
+    assert.deepEqual(secs, [30, 60, 120, 300, 300]);
+    gov.observe(info({ status: 'allowed' }), NOW); assert.equal(gov.load().overload_level, 0);
+    gov.noteLimitFailure(NOW, 'weekly', NOW / 1000 + 86400); const until = gov.load().pause.until_ms; // seconds are normalised
+    assert.equal(until, NOW + 86400_000 + 60_000);
+    gov.noteOverloaded(NOW); assert.equal(gov.load().pause.until_ms, until);
+    assert.equal(gov.noteLimitFailure(NOW, 'x', until + 1e6).pause.until_ms > until, true, 'ms input also accepted');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

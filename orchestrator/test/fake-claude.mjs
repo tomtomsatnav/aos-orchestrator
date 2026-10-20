@@ -288,7 +288,7 @@ async function main() {
 
   if (behavior === 'rate_limit') {
     const text = step.message || '5-hour limit reached ∙ resets 3pm'; // UNVERIFIED text
-    emitRateLimit(true);
+    if (!step.no_event) emitRateLimit(true); // no_event: e.g. 529 overloaded, which carries no rate_limit_event
     const zero = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
     return finish(mkResult({ subtype: 'success', is_error: true, result: text, usage: step.usage ? usage : zero, cost: step.usage ? totalCost : 0, turns: 1,
       apiErrorStatus: step.api_error_status === undefined ? 429 : step.api_error_status, terminalReason: 'completed' }), 1);

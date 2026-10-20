@@ -3,24 +3,31 @@
 import path from 'node:path';
 import { atomicWrite, readJSON } from './state.mjs';
 
-export const DEFAULTS = { reserve_5h: 0.8, hold_7d: 0.9, jitter_s: 60, backoff_min: [15, 30, 60, 240],
-  // UNVERIFIED: the real text/format of a rejected (plan-limited) call was never observed. Treated as a hint only.
-  limit_text: 'usage limit|limit reached|rate limit|too many requests|resets \\d' };
+// Real shapes (observed in ~/.claude/projects transcripts, CLI 2.1.299-302): a rejected call yields an assistant message with
+// apiError "usage_limit_reached", error "rate_limit", apiErrorStatus 429, apiErrorParams.rate_limit_info {status:"rejected", resetsAt:<epoch s>,
+// rateLimitType:"five_hour"|"seven_day"} and text "You've hit your session limit · resets 4:50pm (Europe/London)" / "You've hit your weekly limit · resets Oct 21 at 9am (Europe/London)".
+// Structured fields win; this text is only a fallback. Overloaded (529) and auth texts were NOT observed: they follow the public API shape.
+export const DEFAULTS = { reserve_5h: 0.8, hold_7d: 0.9, jitter_s: 60, backoff_min: [15, 30, 60, 240], overload_backoff_s: [30, 60, 120, 300],
+  limit_text: "hit your (session|weekly|usage|opus|sonnet)? ?limit|usage[ _]limit|limit reached|rate[ _]limit|too many requests",
+  overload_text: 'overloaded', auth_text: 'login expired|please run /login|authentication[_ ]failed|invalid api key|oauth token' };
 
-const emptyState = () => ({ five_hour: null, seven_day: null, status: null, updated_at: null, pause: null, backoff_level: 0, ack_7d_reset_ms: null });
+const emptyState = () => ({ five_hour: null, seven_day: null, status: null, updated_at: null, pause: null, backoff_level: 0, overload_level: 0, ack_7d_reset_ms: null });
 
 export const govFile = (orchDir) => path.join(orchDir, 'governor.json');
 export const loadGovernor = (orchDir) => ({ ...emptyState(), ...(readJSON(govFile(orchDir), {}) || {}) });
 export const saveGovernor = (orchDir, st) => atomicWrite(govFile(orchDir), st);
 
-const win = (w) => (w && Number.isFinite(w.utilization) ? { utilization: w.utilization, resets_at_ms: Number.isFinite(w.resetsAt) ? w.resetsAt * 1000 : null } : null);
+/** Epoch seconds (what the CLI emits, e.g. 1792527600) or ms -> ms. Anything below 1e11 is seconds (1e11 s is year 5138; 1e11 ms is 1973). */
+export const epochToMs = (v) => (Number.isFinite(v) && v > 0 ? (v < 1e11 ? v * 1000 : v) : null);
+const win = (w) => (w && Number.isFinite(w.utilization) ? { utilization: w.utilization, resets_at_ms: epochToMs(w.resetsAt) } : null);
 
-/** Normalise one stream-json rate_limit_event (spike row 9). resetsAt is epoch SECONDS in the CLI; we store ms. */
+/** Normalise one stream-json rate_limit_event (spike row 9) or an assistant api-error message carrying the same info
+ *  (apiErrorParams.rate_limit_info / quotaLimits). resetsAt is epoch SECONDS in the CLI; we store ms. */
 export function parseRateLimitEvent(ev) {
-  const i = ev && ev.rate_limit_info;
+  const i = ev && (ev.rate_limit_info || ev.apiErrorParams?.rate_limit_info || ev.quotaLimits);
   if (!i || typeof i !== 'object') return null;
   const out = { status: typeof i.status === 'string' ? i.status : null, five_hour: win(i.unifiedWindows?.five_hour), seven_day: win(i.unifiedWindows?.seven_day),
-    type: i.rateLimitType || null, resets_at_ms: Number.isFinite(i.resetsAt) ? i.resetsAt * 1000 : null, utilization: i.utilization ?? null };
+    type: i.rateLimitType || null, resets_at_ms: epochToMs(i.resetsAt), utilization: i.utilization ?? null };
   if (!out.five_hour && out.type === 'five_hour' && Number.isFinite(i.utilization)) out.five_hour = { utilization: i.utilization, resets_at_ms: out.resets_at_ms };
   if (!out.seven_day && out.type === 'seven_day' && Number.isFinite(i.utilization)) out.seven_day = { utilization: i.utilization, resets_at_ms: out.resets_at_ms };
   return out;
@@ -37,7 +44,7 @@ export class Governor {
     if (info.five_hour) st.five_hour = info.five_hour;
     if (info.seven_day) st.seven_day = info.seven_day;
     st.status = info.status; st.updated_at = nowMs;
-    if (/^allowed/.test(info.status || '')) st.backoff_level = 0; // a healthy event ends the backoff ladder
+    if (/^allowed/.test(info.status || '')) { st.backoff_level = 0; st.overload_level = 0; } // a healthy event ends the backoff ladders
     if (info.status && !/^allowed/.test(info.status)) {
       // rejected: pause until the relevant window resets (+jitter); else back off 15 -> 30 -> 60 -> 240 min
       const resets = [info.resets_at_ms, info.five_hour?.utilization >= 1 ? info.five_hour.resets_at_ms : null,
@@ -48,10 +55,19 @@ export class Governor {
     return st;
   }
 
-  /** A worker ended with what looks like a plan-limit failure (matcher is UNVERIFIED). */
+  /** A worker ended with a plan-limit failure. resetsMs may be epoch s or ms (normalised). */
   noteLimitFailure(nowMs, reason, resetsMs = null) {
-    const st = this.load();
+    const st = this.load(); resetsMs = epochToMs(resetsMs);
     this._pauseTimed(st, Number.isFinite(resetsMs) && resetsMs > nowMs ? resetsMs + this.cfg.jitter_s * 1000 : null, reason, nowMs);
+    saveGovernor(this.orchDir, st);
+    return st;
+  }
+
+  /** A worker hit API overload (HTTP 529): short escalating backoff (30 s -> 5 min), never an hours-long plan pause. */
+  noteOverloaded(nowMs, reason = 'API overloaded (529)') {
+    const st = this.load(); const lad = this.cfg.overload_backoff_s;
+    const s = lad[Math.min(st.overload_level, lad.length - 1)]; st.overload_level += 1;
+    this._pauseTimed(st, nowMs + s * 1000, `${reason}: retry in ${s} s`, nowMs);
     saveGovernor(this.orchDir, st);
     return st;
   }
@@ -99,21 +115,37 @@ export class Governor {
   }
 }
 
+const kindOf = (type, text) => (type === 'five_hour' || type === 'seven_day' ? type
+  : /weekly|seven.day|7.day/i.test(text) ? 'seven_day' : /session|five.hour|5.hour/i.test(text) ? 'five_hour' : null);
+
 /**
- * Does a finished worker look plan-limited? Combines api_error_status 429, a configurable text matcher (UNVERIFIED)
- * and "unexplained is_error without usage". Returns {limited:bool, certain:bool, why}.
+ * Classify a finished worker. Structured fields first, text only as a fallback.
+ * extra.rateLimit: last parsed rate_limit_event / api-error info (status 'rejected' is decisive). extra.apiError: assistant api-error message
+ * ({apiError, apiErrorStatus, error}). Returns {limited, overloaded, auth, certain, kind: 'five_hour'|'seven_day'|'limit'|'overloaded'|'auth'|null, why}.
  */
-export function detectLimitFailure(result, stderrText = '', cfg = {}) {
+export function detectLimitFailure(result, stderrText = '', cfg = {}, extra = {}) {
   const c = { ...DEFAULTS, ...cfg };
-  const re = new RegExp(c.limit_text, 'i');
-  if (!result) return { limited: false, certain: false, why: 'no result' };
-  const text = `${result.result || ''} ${(result.errors || []).join(' ')} ${stderrText}`;
-  if (result.api_error_status === 429) return { limited: true, certain: true, why: 'api_error_status 429' };
-  if (result.is_error && re.test(text)) return { limited: true, certain: false, why: 'limit text matched (UNVERIFIED matcher)' };
-  const u = result.usage || {};
-  const noUsage = !(u.input_tokens || u.output_tokens || u.cache_read_input_tokens || u.cache_creation_input_tokens);
-  if (result.is_error && result.subtype !== 'error_max_budget_usd' && noUsage && result.api_error_status != null) return { limited: true, certain: false, why: 'api error without usage' };
-  return { limited: false, certain: false, why: 'not limited' };
+  const no = (why) => ({ limited: false, overloaded: false, auth: false, certain: false, kind: null, why });
+  const rl = extra.rateLimit; const ae = extra.apiError;
+  const text = `${result?.result || ''} ${(result?.errors || []).join(' ')} ${stderrText} ${ae?.text || ''}`;
+  const status = result?.api_error_status ?? ae?.apiErrorStatus ?? null;
+  const rejected = rl && typeof rl.status === 'string' && !/^allowed/.test(rl.status);
+  const hit = (kind, certain, why) => ({ limited: true, overloaded: false, auth: false, certain, kind, why });
+  if (!result && !ae) return /usage limit|rate limit|limit reached|hit your .{0,12}limit/i.test(stderrText) ? hit(kindOf(rl?.type, stderrText) || 'limit', false, 'stderr limit text, no result') : no('no result');
+  if (result && result.subtype === 'error_max_budget_usd') return no('budget');
+  const isErr = result ? !!result.is_error : true;
+  if (!isErr) return no('not an error');
+  // structured: HTTP status / api error code
+  if (status === 529 || ae?.apiError === 'overloaded_error') return { limited: false, overloaded: true, auth: false, certain: true, kind: 'overloaded', why: 'api_error_status 529' };
+  if (status === 401 || status === 403 || ae?.error === 'authentication_failed') return { limited: false, overloaded: false, auth: true, certain: true, kind: 'auth', why: `auth failure (${status ?? ae.error})` };
+  if (ae?.apiError === 'usage_limit_reached') return hit(kindOf(rl?.type, text) || 'limit', true, 'apiError usage_limit_reached');
+  if (rejected) return hit(kindOf(rl.type, text) || 'limit', true, `rate_limit_event status ${rl.status}`);
+  if (status === 429) return hit(kindOf(rl?.type, text) || 'limit', true, 'api_error_status 429');
+  // fallback: text (uncertain)
+  if (new RegExp(c.overload_text, 'i').test(text)) return { limited: false, overloaded: true, auth: false, certain: false, kind: 'overloaded', why: 'overloaded text matched' };
+  if (new RegExp(c.auth_text, 'i').test(text)) return { limited: false, overloaded: false, auth: true, certain: false, kind: 'auth', why: 'auth text matched' };
+  if (new RegExp(c.limit_text, 'i').test(text)) return hit(kindOf(rl?.type, text) || 'limit', false, 'limit text matched (fallback)');
+  return no('not limited');
 }
 
 /** New tokens = input + cache_creation + output; cache reads are tracked separately (design section 5). */

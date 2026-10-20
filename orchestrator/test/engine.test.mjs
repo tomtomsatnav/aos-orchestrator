@@ -183,6 +183,20 @@ test('rate limit midway: governor pauses, writes the resume time, resumes at the
   assertValidState(assert, dir);
 });
 
+test('overloaded (529): short backoff (30 s), attempt not counted, retried -- not an hours-long plan pause', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  const clock = fakeClock();
+  sb.scenario({ tasks: { t1: [{ behavior: 'rate_limit', no_event: true, api_error_status: 529, message: 'API Error: 529 overloaded_error' }, edit('a.txt', 'alpha')] } });
+  const { dir } = await sb.goal({ success_criteria: [crit('a.txt', 'alpha')], plan: onePlan(ptask('t1', 'a.txt', 'alpha')) });
+  const eng = sb.engine(dir, { clock }); await eng.start();
+  await drive(eng, { until: () => goalOf(dir).orch.paused_reason && !eng.workers.size });
+  const gov = readJSON(path.join(sb.orch, 'governor.json'));
+  assert.match(gov.pause.reason, /overloaded/i); assert.equal(gov.pause.until_ms - clock.t, 30000);
+  const t1 = tasksOf(dir)[0]; assert.equal(t1.attempts, 0); assert.equal(t1.orch.attempt_log[0].outcome, 'overloaded'); assert.equal(t1.orch.attempt_log[0].counted, false);
+  clock.advance(31000); await drive(eng);
+  assert.equal(goalOf(dir).status, 'achieved'); assert.equal(tasksOf(dir)[0].attempts, 1);
+});
+
 test('utilisation reserve: >= 80% of the 5h window stops new dispatch (running work continues); 7d >= 90% needs a manual resume', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup());
   const clock = fakeClock();
@@ -599,4 +613,35 @@ test('review: protected files written outside any tool call (e.g. by test code) 
   await drive(sb.engine(dir, { hookScript: allowAllHook(sb.root) }));
   assert.deepEqual(tasksOf(dir)[0].orch.attempt_log.map((a) => a.outcome), ['scope_violation', 'success']);
   assert.throws(() => git(sb.repo, 'show', 'aos/g-test/integration:.claude/settings.json'));
+});
+
+test('merge conflict on the final attempt: goal ends blocked, the conflicting files are named, the integration branch is clean and unconflicted', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  sb.scenario({ tasks: { t1: [{ ...edit('a.txt', 'alpha'), delay_ms: 1200 }] } });
+  const { dir } = await sb.goal({ success_criteria: [crit('a.txt', 'alpha')], plan: onePlan(ptask('t1', 'a.txt', 'alpha')), orch: { budgets: { max_attempts: 1 } } });
+  const eng = sb.engine(dir);
+  await drive(eng, { until: () => tasksOf(dir)[0].status === 'running' });
+  const wt = path.join(sb.root, 'repo-aos-worktrees', 'g-test', 'integration');
+  fs.writeFileSync(path.join(wt, 'a.txt'), 'other\n'); git(wt, 'add', '-A'); git(wt, '-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'conflicting change');
+  await drive(eng);
+  const g = goalOf(dir); const t1 = tasksOf(dir)[0];
+  assert.equal(g.status, 'blocked'); assert.equal(t1.status, 'failed');
+  assert.match(g.blocked_reason, /merge_conflict/); assert.match(g.blocked_reason, /a\.txt/, 'blocked reason lists the conflicting file');
+  const ev = readEvents(dir).find((e) => e.type === 'orch.integrate.conflict'); assert.deepEqual(ev.data.files, ['a.txt']);
+  // integration branch is exactly what the other change left: no half merge, no conflict markers, no merge in progress
+  assert.equal(git(sb.repo, 'show', 'aos/g-test/integration:a.txt'), 'other');
+  assert.equal(git(sb.repo, 'rev-list', '--merges', '--count', 'aos/g-test/integration'), '0');
+  assert.throws(() => git(wt, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'));
+});
+
+test('two tasks with overlapping scopes touching one file are serialised: the second builds on the first, no conflict, clean history', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  const slow = (w) => ({ ...edit('a.txt', w), delay_ms: 400 });
+  sb.scenario({ tasks: { t1: [slow('alpha')], t2: [slow('beta')] } });
+  const { dir } = await sb.goal({ success_criteria: [crit('a.txt', 'beta')], plan: onePlan(ptask('t1', 'a.txt', 'alpha'), { ...ptask('t2', 'a.txt', 'beta', { scope: ['*.txt'] }) }) });
+  let max = 0; const eng = sb.engine(dir);
+  await drive(eng, { until: () => { max = Math.max(max, tasksOf(dir).filter((x) => x.status === 'running').length); return eng.isDone(); } });
+  assert.equal(max, 1, 'overlapping scopes never run together'); assert.equal(goalOf(dir).status, 'achieved');
+  assert.ok(!types(dir).includes('orch.integrate.conflict'));
+  assert.equal(git(sb.repo, 'show', 'aos/g-test/integration:a.txt'), 'beta');
 });

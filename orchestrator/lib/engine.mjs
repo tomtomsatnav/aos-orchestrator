@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   TERMINAL, paths, ensureDir, readJSON, atomicWrite, iso, realClock, loadState, saveState, loadHeartbeat, appendEvent, readEvents,
-  acquireLock, touchLock, releaseLock, drainCommands, enqueueCommand, pidAlive, goalDirOf, orchRoot, applyBudgetPatch, validateBudgetPatch,
+  acquireLock, touchLock, releaseLock, lockStatus, describeOwner, drainCommands, enqueueCommand, pidAlive, goalDirOf, orchRoot, applyBudgetPatch, validateBudgetPatch,
 } from './state.mjs';
 import * as G from './git.mjs';
 import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
@@ -47,6 +47,7 @@ export class Engine {
     this.slotGate = o.slotGate || null; // supervisor: global worker semaphore {acquire(goalId)->token|null, release(token)}
     this.sandboxBin = o.sandboxBin || SANDBOX_EXEC; // tests may point this at a missing binary
     this.hookScript = o.hookScript || HOOK_SCRIPT; // tests may substitute a stub hook
+    this.ownerLabel = o.ownerLabel || 'run';
     this.lockRefreshMs = o.lockRefreshMs ?? null; // default: a third of the lock TTL
     this.bin = o.claudeBin || W.claudeBin(this.env);
     this.workers = new Map(); // task id -> live worker record (in memory; rebuilt from pid files after a crash)
@@ -66,8 +67,8 @@ export class Engine {
   /** Take the per-goal lock. Throws when another live engine owns the goal. */
   async start() {
     if (this.started) return this;
-    const l = acquireLock(this.dir, { pid: this.pid, ttlMs: this.lockTtlMs(), now: Date.now() });
-    if (!l.ok) throw new Error(`goal ${this.goalId} is already owned by engine pid ${l.holder?.pid}`);
+    const l = acquireLock(this.dir, { pid: this.pid, ttlMs: this.lockTtlMs(), now: Date.now(), label: this.ownerLabel });
+    if (!l.ok) { const st = lockStatus(this.dir); throw Object.assign(new Error(`goal ${this.goalId} is already owned by engine pid ${l.holder?.pid}: ${describeOwner(st)}`), { code: 'LOCKED', lock: st }); }
     this.started = true;
     // keep the lock fresh while a long tick (checks up to 3600 s, merges, kills) is in progress: a stale-looking lock
     // would let a second engine take the goal over and verify/merge/dispatch the same tasks concurrently
@@ -418,7 +419,8 @@ export class Engine {
     const denials = res ? (res.permission_denials || []).map((d) => ({ tool_name: d.tool_name, tool_input_label: String(d.tool_input?.command ?? d.tool_input?.file_path ?? '').split(/\s+/)[0] })) : rec.tail.denials.map((d) => ({ tool_name: d.tool_name }));
     const collected = { task: task.id, seq: rec.seq, exit_code: rec.exited?.exit_code ?? null, signal: rec.exited?.signal ?? null, spawn_error: rec.exited?.error || null,
       killReason: rec.killReason, result: res ? { subtype: res.subtype, is_error: res.is_error, result: String(res.result ?? '').slice(0, 4000), errors: res.errors, api_error_status: res.api_error_status, usage: res.usage, total_cost_usd: res.total_cost_usd, num_turns: res.num_turns, terminal_reason: res.terminal_reason } : null,
-      denials, usage: u, notional_usd: rec.tail.notionalUsd(), stderr_tail: stderr.slice(-2000), resets_at_ms: rl?.resets_at_ms ?? null };
+      denials, usage: u, notional_usd: rec.tail.notionalUsd(), stderr_tail: stderr.slice(-2000), resets_at_ms: rl?.resets_at_ms ?? null,
+      rate_limit: rec.tail.lastRateLimit ? { status: rec.tail.lastRateLimit.status, type: rec.tail.lastRateLimit.type, resets_at_ms: rec.tail.lastRateLimit.resets_at_ms } : null, api_error: rec.tail.apiError };
     atomicWrite(this.wpath(task.id, rec.seq, 'result.json'), collected);
     if (!entry.accounted) {
       entry.accounted = true; entry.new_tokens = u.new_tokens; entry.notional_usd = collected.notional_usd; entry.exit_code = collected.exit_code; entry.denials = denials.length;
@@ -455,9 +457,14 @@ export class Engine {
       return this._failAttempt(S, task, entry, c.killReason, { escalate: true });
     }
     // plan-limit rejection: governor pauses, attempt not counted
-    const lim = detectLimitFailure(c.result, c.stderr_tail, this.gov.cfg);
-    if ((c.result?.is_error && lim.limited) || (!c.result && /usage limit|rate limit|limit reached/i.test(c.stderr_tail))) {
-      if (!this.gov.load().pause) this.gov.noteLimitFailure(this.now(), `plan limit suspected: ${lim.why}`, c.resets_at_ms);
+    const lim = detectLimitFailure(c.result, c.stderr_tail, this.gov.cfg, { rateLimit: c.rate_limit, apiError: c.api_error });
+    if (lim.overloaded) { // 529: short backoff, attempt not counted (never an hours-long plan pause)
+      if (!this.gov.load().pause) this.gov.noteOverloaded(this.now(), `API overloaded: ${lim.why}`);
+      this._governorStep(S);
+      return requeueUncounted('overloaded');
+    }
+    if (lim.limited) {
+      if (!this.gov.load().pause) this.gov.noteLimitFailure(this.now(), `plan limit${lim.kind && lim.kind !== 'limit' ? ` (${lim.kind})` : ''}: ${lim.why}`, c.rate_limit?.resets_at_ms ?? c.resets_at_ms);
       this._governorStep(S);
       return requeueUncounted('rate_limited');
     }
@@ -492,7 +499,7 @@ export class Engine {
     if (final) {
       task.status = 'failed';
       this.ev('task.failed', 'orchestrator', task.id, { cause, attempts: task.attempts, tier: entry.tier, final: true });
-      S.goal.orch.halt_reason ??= `task ${task.id} failed after ${task.attempts} attempt(s): ${cause}`;
+      S.goal.orch.halt_reason ??= `task ${task.id} failed after ${task.attempts} attempt(s): ${cause}${cause === 'merge_conflict' && note ? ` (${note})` : ''}`;
       S.goal.orch.halt_at_ms ??= this.now();
       this._dropWorktree(S, task).catch(() => {});
     } else {

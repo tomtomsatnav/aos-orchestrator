@@ -81,7 +81,7 @@ export class StreamTail {
     this.file = file; this.offset = 0; this.buf = '';
     this.init = null; this.result = null; this.lines = 0;
     this.assistant = new Map(); // message id -> usage (last value wins)
-    this.denials = []; this.rateLimits = []; this.invalid = 0;
+    this.denials = []; this.rateLimits = []; this.apiError = null; this.lastRateLimit = null; this.invalid = 0;
   }
   /** Reads new bytes; returns true when something new was parsed. */
   update() {
@@ -106,8 +106,14 @@ export class StreamTail {
     this.lines++;
     if (o.type === 'system' && o.subtype === 'init') this.init = o;
     else if (o.type === 'system' && o.subtype === 'permission_denied') this.denials.push({ tool_name: o.tool_name, reason: o.message || o.decision_reason, tool_use_id: o.tool_use_id });
+    else if (o.type === 'assistant' && (o.isApiErrorMessage || o.apiError || o.error)) {
+      // synthetic api-error message (real shape: apiError 'usage_limit_reached', error 'rate_limit', apiErrorStatus 429, apiErrorParams.rate_limit_info)
+      this.apiError = { apiError: o.apiError ?? null, error: typeof o.error === 'string' ? o.error : null, apiErrorStatus: o.apiErrorStatus ?? null,
+        text: (o.message?.content || []).map((x) => x.text || '').join(' ').slice(0, 300) };
+      const r = parseRateLimitEvent(o); if (r) { this.rateLimits.push(r); this.lastRateLimit = r; }
+    }
     else if (o.type === 'assistant' && o.message?.usage) this.assistant.set(o.message.id || `n${this.lines}`, o.message.usage);
-    else if (o.type === 'rate_limit_event') { const r = parseRateLimitEvent(o); if (r) this.rateLimits.push(r); }
+    else if (o.type === 'rate_limit_event') { const r = parseRateLimitEvent(o); if (r) { this.rateLimits.push(r); this.lastRateLimit = r; } }
     else if (o.type === 'result') this.result = o;
   }
   takeRateLimits() { const r = this.rateLimits; this.rateLimits = []; return r; }
