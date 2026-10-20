@@ -4,5 +4,10 @@
   "license": "MIT",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test orchestrator/test/*.test.mjs" }
+  "bin": {
+    "aos-orch": "orchestrator/bin/aos-orch.mjs"
+  },
+  "scripts": {
+    "test": "node --test orchestrator/test/*.test.mjs"
+  }
 }

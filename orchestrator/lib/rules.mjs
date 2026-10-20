@@ -528,7 +528,7 @@ export function renderRulesSummary(sm) {
   L.push(`  plan approval: ${sm.plan.approval}; max ${sm.plan.max_tasks} tasks; tiers ${sm.plan.tiers.map(q).join('/')}; start at most ${q(sm.plan.max_start_tier)}`);
   L.push(`  limits: $${sm.limits.max_usd}, ${sm.limits.max_new_tokens} tokens, ${sm.limits.max_wall_clock_s}s, ${sm.limits.max_attempts} attempts/task, ${sm.limits.max_parallel} parallel`);
   const prof = sm.loosenings.filter((l) => l.kind === 'profile_allowlist'); const real = sm.loosenings.filter((l) => l.kind !== 'profile_allowlist');
-  L.push(real.length ? `LOOSENINGS YOU ARE APPROVING (${real.length}):` : 'LOOSENINGS YOU ARE APPROVING: none');
+  if (real.length) L.push(`LOOSENINGS YOU ARE APPROVING (${real.length}):`);
   for (const l of real) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]`);
   if (prof.length) L.push(`PROFILE ${q(sm.profile)} ADDS TO THE CHECK ALLOWLIST (${prof.length}; expected for this profile, listed for completeness; checks run sandboxed):`);
   for (const l of prof) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]`);

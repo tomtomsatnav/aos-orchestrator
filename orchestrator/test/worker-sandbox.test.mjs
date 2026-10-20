@@ -137,7 +137,7 @@ test('worker sandbox: `aos-orch run goal.json --sandbox-workers` records the fie
   sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [edit('a.txt', 'alpha')] } });
   const spec = { id: 'g-cli-sbx', title: 'CLI sandboxed', success_criteria: [crit('a.txt', 'alpha')], orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec));
-  const r = spawnSync(process.execPath, [path.join(HERE, '..', 'bin', 'aos-orch.mjs'), 'run', gf, '--sandbox-workers', '--poll-ms', '50', '--interval-s', '0.2'], { env: sb.env(), encoding: 'utf8', timeout: 60000 });
+  const r = spawnSync(process.execPath, [path.join(HERE, '..', 'bin', 'aos-orch.mjs'), 'run', gf, '--no-wait', '--sandbox-workers', '--poll-ms', '50', '--interval-s', '0.2'], { env: sb.env(), encoding: 'utf8', timeout: 60000 });
   assert.equal(r.status, 4, r.stderr); assert.equal(JSON.parse(r.stdout).plan_state, 'awaiting_approval');
   const dir = path.join(sb.orch, 'goals', 'g-cli-sbx');
   assert.equal(goalOf(dir).orch.sandbox_workers, true);

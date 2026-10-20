@@ -5,7 +5,7 @@ hook env tags, and two ports. Anything that writes this layout (this engine, or 
 
 ## On-disk layout (read-only for the monitor)
 
-Root: `$AOS_ORCH_DIR`, else `${CLAUDE_PLUGIN_DATA:-~/.claude/plugins/data/aos-dashboard-aos-local}/orch`.
+Root: `$AOS_ORCH_DIR`, else `$XDG_STATE_HOME/aos/orch` (when set) or `~/.aos/orch`. Readers must also look in the legacy root `${CLAUDE_PLUGIN_DATA:-~/.claude/plugins/data/aos-dashboard-aos-local}/orch`: the orchestrator keeps using it when it exists and the new root does not.
 Goals: `<root>/goals/<gid>/`, `gid` matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (others are ignored). Only dirs containing a
 parseable `goal.json` count; the 50 most recently modified `goal.json` are read. Files are size-capped (2 MB), cached by
 mtime+size, rescanned at most once a second. A partial/corrupt write keeps the last good data; a missing file = empty.

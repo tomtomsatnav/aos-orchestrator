@@ -12,11 +12,17 @@ export const TERMINAL = new Set(['achieved', 'failed', 'cancelled']);
 // <repo>-aos-worktrees/.. = the repo's PARENT, which _finalize removes recursively), no '..', no trailing '.' or '.lock'.
 export const ID_RE = /^(?!.*\.\.)(?!.*\.lock$)[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?<!\.)$/;
 
-export function orchRoot(env = process.env) {
-  if (env.AOS_ORCH_DIR) return path.resolve(env.AOS_ORCH_DIR);
-  const data = env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.claude', 'plugins', 'data', 'aos-dashboard-aos-local');
-  return path.join(data, 'orch');
+/** Where state lives. AOS_ORCH_DIR wins. Otherwise ~/.aos/orch ($XDG_STATE_HOME/aos/orch when set); the old dashboard-plugin location
+ *  is kept only when it exists and the new one does not (so existing goals and the dashboard keep working). */
+export function orchLocation(env = process.env) {
+  if (env.AOS_ORCH_DIR) return { dir: path.resolve(env.AOS_ORCH_DIR), legacy: false };
+  const home = env.HOME || os.homedir();
+  const fresh = env.XDG_STATE_HOME ? path.join(env.XDG_STATE_HOME, 'aos', 'orch') : path.join(home, '.aos', 'orch');
+  const old = path.join(env.CLAUDE_PLUGIN_DATA || path.join(home, '.claude', 'plugins', 'data', 'aos-dashboard-aos-local'), 'orch');
+  if (!fs.existsSync(fresh) && fs.existsSync(old)) return { dir: old, legacy: true, fresh };
+  return { dir: fresh, legacy: false };
 }
+export const orchRoot = (env = process.env) => orchLocation(env).dir;
 
 export const goalsRoot = (orch) => path.join(orch, 'goals');
 export const goalDirOf = (orch, id) => path.join(goalsRoot(orch), id);

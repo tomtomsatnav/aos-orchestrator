@@ -303,7 +303,7 @@ async function main() {
 
   // ---- behaviors with tool execution
   const edited = await runTools(toolCalls, behavior === 'crash' ? Math.ceil(toolCalls.length / 2) : toolCalls.length);
-  if (behavior === 'crash') { startTurn(0); assistant(0, [{ type: 'text', text: 'Working on it...' }]); return flushExit(137); }
+  if (behavior === 'crash') { if (step.stderr) process.stderr.write(`${step.stderr}\n`); startTurn(0); assistant(0, [{ type: 'text', text: 'Working on it...' }]); return flushExit(137); }
   if (behavior === 'hang') {
     startTurn(0);
     assistant(0, [{ type: 'text', text: 'Working on it...' }]);

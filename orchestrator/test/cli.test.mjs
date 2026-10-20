@@ -23,10 +23,10 @@ test('cli: run <goal.json> to completion, then status / queued commands operate 
   const env = sb.env();
 
   // plan approval is required by default: the run stops cleanly at the approval gate (exit 4)
-  let r = await run(['run', gf, '--poll-ms', '50', '--interval-s', '0.2'], env);
+  let r = await run(['run', gf, '--no-wait', '--poll-ms', '50', '--interval-s', '0.2'], env);
   assert.equal(r.code, 4, r.err); assert.equal(JSON.parse(r.out).plan_state, 'awaiting_approval');
   r = await run(['approve-plan', 'g-cli'], env); assert.match(r.out, /queued/);
-  r = await run(['run', 'g-cli', '--poll-ms', '50', '--interval-s', '0.2'], env);
+  r = await run(['run', 'g-cli', '--no-wait', '--poll-ms', '50', '--interval-s', '0.2'], env);
   assert.equal(r.code, 0, r.err + r.out);
   const done = JSON.parse(r.out); assert.equal(done.status, 'achieved'); assert.ok(fs.existsSync(done.report));
   r = await run(['status', 'g-cli'], env); const st = JSON.parse(r.out);
@@ -35,7 +35,7 @@ test('cli: run <goal.json> to completion, then status / queued commands operate 
   r = await run(['pause', 'g-cli'], env); assert.match(r.out, /no engine is running/);
   assert.equal(fs.readdirSync(paths(path.join(sb.orch, 'goals', 'g-cli')).commands).length, 1);
   r = await run(['status', 'nope'], env); assert.equal(r.code, 1); assert.match(r.err, /no such goal/);
-  r = await run(['bogus'], env); assert.equal(r.code, 64);
+  r = await run(['bogus'], env); assert.equal(r.code, 2);
 });
 
 test('cli: --auto-approve runs plan-to-report without a gate; cancel from another process stops a running goal', async (t) => {
@@ -49,7 +49,7 @@ test('cli: --auto-approve runs plan-to-report without a gate; cancel from anothe
   const running = run(['run', gf, '--auto-approve', '--poll-ms', '50', '--interval-s', '0.2'], env);
   const dir = path.join(sb.orch, 'goals', 'g-cli2');
   for (let i = 0; i < 200; i++) { const ts = readJSON(paths(dir).tasks, []); if (ts[0]?.status === 'running') break; await new Promise((r) => setTimeout(r, 50)); }
-  const c = await run(['kill', 'g-cli2'], env); assert.match(c.out, /queued; the running engine applies it/);
+  const c = await run(['kill', 'g-cli2'], env); assert.match(c.out, /queued; the attached run \(pid \d+\) will apply it/);
   const r = await running;
   assert.equal(r.code, 3, r.err); assert.equal(JSON.parse(r.out).status, 'cancelled');
   const pf = readJSON(path.join(dir, 'workers', 't1.1.pid.json')); assert.throws(() => process.kill(-pf.pgid, 0), /ESRCH/);
@@ -59,7 +59,7 @@ test('cli rules: show (user layer and a goal), check (valid / invalid / layers),
   const sb = mkSandbox(); t.after(() => sb.cleanup());
   const env = sb.env();
   // show without a goal: the defaults; an invalid user file is reported (exit 2)
-  let r = await run(['rules', 'show'], env); assert.equal(r.code, 0, r.err); assert.match(r.out, /^rules [0-9a-f]{12}\s+profile=strict/); assert.match(r.out, /LOOSENINGS YOU ARE APPROVING: none/);
+  let r = await run(['rules', 'show'], env); assert.equal(r.code, 0, r.err); assert.match(r.out, /^rules [0-9a-f]{12}\s+profile=strict/); assert.doesNotMatch(r.out, /LOOSENINGS|NOT APPLIED/, 'empty blocks are hidden');
   fs.writeFileSync(path.join(sb.orch, 'rules.json'), JSON.stringify({ rules_version: 1, budgets: { max_usd: 1 } }));
   r = await run(['rules', 'show'], env); assert.match(r.out, /limits: \$1,/);
   fs.writeFileSync(path.join(sb.orch, 'rules.json'), '{ nope');
@@ -90,4 +90,10 @@ test('cli rules: show (user layer and a goal), check (valid / invalid / layers),
   r = await run(['rules', 'explain', 'g-ex', 'nope', '{"tool_name":"Bash"}'], env); assert.equal(r.code, 2); assert.match(r.err, /no such task/);
   r = await run(['rules', 'explain', 'g-ex', 't1', '{bad'], env); assert.equal(r.code, 2); assert.match(r.err, /does not parse/);
   r = await run(['rules', 'show', 'g-ex'], env); assert.match(r.out, /^rules [0-9a-f]{12}/);
+});
+
+test('cli: --help and -h list every command and exit 0; an unknown command exits 2', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup()); const env = sb.env();
+  for (const f of ['--help', '-h']) { const r = await run([f], env); assert.equal(r.code, 0); for (const w of ['draft', 'run', 'status', 'plan', 'approve-plan', 'confirm', 'rules', 'serve', '--no-wait']) assert.ok(r.out.includes(w), w); }
+  const r = await run(['frobnicate'], env); assert.equal(r.code, 2); assert.match(r.err, /unknown command/);
 });

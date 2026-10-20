@@ -81,20 +81,20 @@ test('cli: plan is read-only; run stops with the exact next command; run --wait-
   sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [{ behavior: 'success', edits: [{ path: 'a.txt', content: 'alpha\n' }] }] } });
   const spec = { id: 'g-ux', title: 'Create a.txt with alpha', success_criteria: [crit('a.txt', 'alpha')], budget: { max_ticks: 1000, max_usd: 5, max_wall_clock_s: 600 }, orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec)); const env = sb.env(); const dir = path.join(sb.orch, 'goals', 'g-ux');
-  let r = await cli(['run', gf, '--poll-ms', '50', '--interval-s', '0.2'], env);
+  let r = await cli(['run', gf, '--no-wait', '--poll-ms', '50', '--interval-s', '0.2'], env);
   assert.equal(r.code, 4, r.err); assert.match(r.err, /aos-orch plan g-ux/); assert.match(r.err, /aos-orch approve-plan g-ux/); assert.match(r.err, /aos-orch run g-ux/);
   const cmdsBefore = fs.existsSync(paths(dir).commands) ? fs.readdirSync(paths(dir).commands).length : 0;
   r = await cli(['plan', 'g-ux'], env); assert.equal(r.code, 0, r.err); assert.match(r.out, /PLAN FOR REVIEW \(read-only/); assert.match(r.out, /task t1 /); assert.match(r.out, /rules [0-9a-f]{12}/); assert.match(r.out, /aos-orch approve-plan g-ux/);
   assert.equal(fs.existsSync(paths(dir).commands) ? fs.readdirSync(paths(dir).commands).length : 0, cmdsBefore, 'plan queues nothing');
   assert.equal(readJSON(paths(dir).goal).orch.plan_state, 'awaiting_approval');
   r = await cli(['plan', 'nope'], env); assert.equal(r.code, 1);
-  // --wait-approval: stays attached; nothing proceeds until the human's command
-  const c = spawn(process.execPath, [CLI, 'run', 'g-ux', '--wait-approval', '--poll-ms', '50', '--interval-s', '0.2'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  // default: stays attached; nothing proceeds until the human's command
+  const c = spawn(process.execPath, [CLI, 'run', 'g-ux', '--poll-ms', '50', '--interval-s', '0.2'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let err = ''; let out = ''; c.stderr.on('data', (d) => { err += d; }); c.stdout.on('data', (d) => { out += d; }); const closed = new Promise((res) => c.on('close', res));
   const end = Date.now() + 20000; while (!/waiting for your command/.test(err) && Date.now() < end) await sleep(50);
   assert.match(err, /waiting for your command/); assert.match(err, /PLAN FOR REVIEW/);
   await sleep(1200); assert.equal(readJSON(paths(dir).goal).orch.plan_state, 'awaiting_approval', 'still waiting: the engine proceeds only on the human command'); assert.equal(c.exitCode, null);
-  r = await cli(['approve-plan', 'g-ux'], env); assert.match(r.out, /queued/);
+  r = await cli(['approve-plan', 'g-ux'], env); assert.match(r.out, /queued; the attached run \(pid \d+\) will apply it within one tick/);
   assert.equal(await closed, 0, err); assert.equal(JSON.parse(out).status, 'achieved');
 });
 
@@ -103,16 +103,32 @@ test('cli: run stops at "awaiting human confirmation" with the exact confirm com
   sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [{ behavior: 'success', edits: [{ path: 'a.txt', content: 'alpha\n' }] }] } });
   const spec = { id: 'g-hc', title: 'Create a.txt', success_criteria: [crit('a.txt', 'alpha'), { id: 'c2', text: 'reads well', verify: 'human' }], orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec)); const env = sb.env();
-  assert.equal((await cli(['run', gf, '--poll-ms', '50', '--interval-s', '0.2'], env)).code, 4);
+  assert.equal((await cli(['run', gf, '--no-wait', '--poll-ms', '50', '--interval-s', '0.2'], env)).code, 4);
   await cli(['approve-plan', 'g-hc'], env);
-  const r = await cli(['run', 'g-hc', '--poll-ms', '50', '--interval-s', '0.2'], env);
+  const r = await cli(['run', 'g-hc', '--no-wait', '--poll-ms', '50', '--interval-s', '0.2'], env);
   assert.equal(r.code, 2, r.err); assert.match(r.err, /aos-orch confirm g-hc c2/);
+});
+
+test('cli: an attached run stays attached through human-criterion confirmation and exits only when achieved', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [{ behavior: 'success', edits: [{ path: 'a.txt', content: 'alpha\n' }] }] } });
+  const spec = { id: 'g-hw', title: 'Create a.txt', success_criteria: [crit('a.txt', 'alpha'), { id: 'c2', text: 'reads well', verify: 'human' }], orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
+  const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec)); const env = sb.env();
+  const c = spawn(process.execPath, [CLI, 'run', gf, '--poll-ms', '50', '--interval-s', '0.2'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let err = ''; let out = ''; c.stderr.on('data', (d) => { err += d; }); c.stdout.on('data', (d) => { out += d; }); const closed = new Promise((res) => c.on('close', res));
+  const waitFor = async (re) => { const end = Date.now() + 30000; while (!re.test(err) && Date.now() < end) await sleep(50); assert.match(err, re); };
+  await waitFor(/aos-orch approve-plan g-hw/);
+  assert.match((await cli(['approve-plan', 'g-hw'], env)).out, /attached run/);
+  await waitFor(/aos-orch confirm g-hw c2/);
+  await sleep(500); assert.equal(c.exitCode, null, 'still attached while the criterion awaits confirmation');
+  assert.match((await cli(['confirm', 'g-hw', 'c2'], env)).out, /attached run \(pid \d+\)/);
+  assert.equal(await closed, 0, err); assert.equal(JSON.parse(out).status, 'achieved');
 });
 
 test('the plan approval summary shows the compiled attempts/tokens/wall of a drafted goal (not the rules maximum)', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup()); userRules(sb); sb.scenario({ ...noBudgets(), planner: { behavior: 'success', plan: { tasks: [{ ...ptask('t1', 'a.txt', 'alpha'), checks: [{ argv: ['grep', '-qx', 'alpha', 'a.txt'], timeout_s: 30 }] }] } } });
   const d = await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'x', env: sb.env() }); assert.equal(d.ok, true);
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify({ ...d.spec, id: 'g-sum' }));
-  const env = sb.env(); assert.equal((await cli(['run', gf, '--poll-ms', '50', '--interval-s', '0.2'], env)).code, 4);
+  const env = sb.env(); assert.equal((await cli(['run', gf, '--no-wait', '--poll-ms', '50', '--interval-s', '0.2'], env)).code, 4);
   const r = await cli(['plan', 'g-sum'], env); assert.match(r.out, /limits: \$5, 150000 tokens, 1200s, 2 attempts\/task/);
 });

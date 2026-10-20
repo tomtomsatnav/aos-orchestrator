@@ -10,7 +10,7 @@ import { validatePlan, extractJson, findCycle, buildPlannerPrompt, validateScope
 import { Governor, parseRateLimitEvent, detectLimitFailure, usageOf, checkBudgets, epochToMs } from '../lib/governor.mjs';
 import { buildWorkerPrompt, WORKER_RULES, buildArgs, buildEnv, StreamTail, buildSettings, killGroup, groupAlive } from '../lib/worker.mjs';
 import { runCheck, runChecks, commandAllowed } from '../lib/checks.mjs';
-import { appendEvent, readEvents, atomicWrite, readJSON, normalizeGoalSpec, orchRoot, enqueueCommand, drainCommands } from '../lib/state.mjs';
+import { appendEvent, readEvents, atomicWrite, readJSON, normalizeGoalSpec, orchRoot, orchLocation, enqueueCommand, drainCommands } from '../lib/state.mjs';
 import { validateEvent, validateGoal } from '../lib/schema.mjs';
 import { mkSandbox, ptask } from './helpers.mjs';
 import { spawn } from 'node:child_process';
@@ -56,8 +56,18 @@ test('state: atomic JSON writes, append-only events with strictly increasing seq
 
 test('state: orch dir default and goal spec validation (budget is mandatory and valid)', () => {
   assert.equal(orchRoot({ AOS_ORCH_DIR: '/x/y' }), '/x/y');
-  assert.equal(orchRoot({ CLAUDE_PLUGIN_DATA: '/d' }), '/d/orch');
-  assert.match(orchRoot({}), /\.claude\/plugins\/data\/aos-dashboard-aos-local\/orch$/);
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'aos-home-'));
+  try {
+    assert.equal(orchRoot({ HOME: home }), path.join(home, '.aos', 'orch'), 'new default');
+    assert.equal(orchRoot({ HOME: home, XDG_STATE_HOME: '/xdg' }), '/xdg/aos/orch');
+    const old = path.join(home, '.claude', 'plugins', 'data', 'aos-dashboard-aos-local', 'orch');
+    fs.mkdirSync(old, { recursive: true });
+    assert.deepEqual(orchLocation({ HOME: home }), { dir: old, legacy: true, fresh: path.join(home, '.aos', 'orch') }, 'old dir kept while the new one is absent');
+    assert.equal(orchRoot({ HOME: home, CLAUDE_PLUGIN_DATA: '/nope' }), path.join(home, '.aos', 'orch'));
+    assert.equal(orchRoot({ HOME: home, AOS_ORCH_DIR: '/x/y' }), '/x/y', 'AOS_ORCH_DIR overrides both');
+    fs.mkdirSync(path.join(home, '.aos', 'orch'), { recursive: true });
+    assert.equal(orchLocation({ HOME: home }).legacy, false, 'new dir wins once it exists');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
   const ok = { title: 'T', success_criteria: [{ text: 'x', check: { argv: ['true'], timeout_s: 5 } }], orch: { repo: '/r' } };
   const g = normalizeGoalSpec(ok, { clock: { now: () => Date.UTC(2026, 9, 20) } });
   assert.deepEqual(validateGoal(g), []); assert.equal(g.id, 'g-20261020-t'); assert.equal(g.status, 'draft'); assert.equal(g.orch.integration_branch, 'aos/g-20261020-t/integration');

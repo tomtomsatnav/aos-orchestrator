@@ -10,6 +10,7 @@ import {
   acquireLock, touchLock, releaseLock, lockStatus, describeOwner, drainCommands, enqueueCommand, pidAlive, goalDirOf, orchRoot, applyBudgetPatch, validateBudgetPatch,
 } from './state.mjs';
 import * as G from './git.mjs';
+import { escCtrl } from './ctrl.mjs';
 import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
 import { matchAny, scopesOverlap } from './glob.mjs';
 import { mergePolicy, DEFAULT_POLICY, isProtectedRel } from './policy.mjs';
@@ -26,6 +27,8 @@ import { buildReport } from './report.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_SCRIPT = path.join(HERE, 'policy-hook.mjs');
+/** The last ~20 lines of a worker's stderr, every control character escaped (it is worker-controlled text a human will read). */
+const stderrTail = (text, lines = 20, max = 2000) => String(text).split('\n').map((l) => l.replace(/\s+$/, '')).filter((l, i, a) => l || i < a.length - 1).slice(-lines).map((l) => escCtrl(l.length > 300 ? `${l.slice(0, 300)}...` : l)).join('\n').slice(-max);
 const budgetRule = (why) => (/new-token/.test(why) ? 'budgets.max_new_tokens' : /wall-clock/.test(why) ? 'budgets.max_wall_clock_s' : /tick/.test(why) ? 'budgets.max_ticks' : /USD/.test(why) ? 'budgets.max_usd' : 'budgets');
 const backoffS = (interval, errors) => Math.min(interval * 2 ** Math.min(errors || 0, 20), 900);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -481,7 +484,7 @@ export class Engine {
       if (alive && !rec.termAtReal) {
         if (now - rec.startedMs > B.task_wall_clock_s * 1000) this._term(rec, 'wall_clock');
         else if (now - rec.lastProgressMs > B.stall_after_s * 1000) this._term(rec, 'stall');
-        else if (goal.orch.halt_at_ms && goal.orch.halt_reason?.startsWith('budget') && now - goal.orch.halt_at_ms >= this._graceMs(goal)) this._term(rec, 'budget');
+        else if (goal.orch.halt_at_ms && goal.orch.halt_reason?.startsWith('budget') && !rec.tail.result && now - goal.orch.halt_at_ms >= this._graceMs(goal)) this._term(rec, 'budget'); // a worker that already delivered its result is only exiting: killing it would throw away finished work
       } else if (alive && rec.termAtReal && Date.now() - rec.termAtReal > this.killGraceMs) { W.signalGroup(rec.pgid, 'SIGKILL'); rec.termAtReal = Date.now() + 1e9; }
       if (alive) continue;
       rec.tail.update();
@@ -544,7 +547,8 @@ export class Engine {
     const rl = rec.lastRL;
     const denials = res ? (res.permission_denials || []).map((d) => ({ tool_name: d.tool_name, tool_input_label: String(d.tool_input?.command ?? d.tool_input?.file_path ?? '').split(/\s+/)[0] })) : rec.tail.denials.map((d) => ({ tool_name: d.tool_name }));
     const collected = { task: task.id, seq: rec.seq, exit_code: rec.exited?.exit_code ?? null, signal: rec.exited?.signal ?? null, spawn_error: rec.exited?.error || null,
-      killReason: rec.killReason, result: res ? { subtype: res.subtype, is_error: res.is_error, result: String(res.result ?? '').slice(0, 4000), errors: res.errors, api_error_status: res.api_error_status, usage: res.usage, total_cost_usd: res.total_cost_usd, num_turns: res.num_turns, terminal_reason: res.terminal_reason } : null,
+      killReason: rec.killReason === 'budget' && res ? null : rec.killReason, // a budget kill that raced a delivered result changes nothing
+      result: res ? { subtype: res.subtype, is_error: res.is_error, result: String(res.result ?? '').slice(0, 4000), errors: res.errors, api_error_status: res.api_error_status, usage: res.usage, total_cost_usd: res.total_cost_usd, num_turns: res.num_turns, terminal_reason: res.terminal_reason } : null,
       denials, usage: u, notional_usd: rec.tail.notionalUsd(), stderr_tail: stderr.slice(-2000), resets_at_ms: rl?.resets_at_ms ?? null,
       rate_limit: rec.tail.lastRateLimit ? { status: rec.tail.lastRateLimit.status, type: rec.tail.lastRateLimit.type, resets_at_ms: rec.tail.lastRateLimit.resets_at_ms } : null, api_error: rec.tail.apiError };
     atomicWrite(this.wpath(task.id, rec.seq, 'result.json'), collected);
@@ -554,6 +558,7 @@ export class Engine {
       goal.budget.spent_usd = o.usage.notional_usd;
       task.orch.tokens.new += u.new_tokens; task.orch.tokens.cache_read += u.cache_read_tokens;
     }
+    if (stderr.trim() && (!res || res.is_error || collected.exit_code)) entry.stderr_tail = stderrTail(stderr); // what a human needs to see when a worker crashed or errored
     entry.ended_at = iso(this.now()); entry.collected = true;
     const a = S.agents.find((x) => x.id === task.assignee); if (a) { a.status = 'idle'; a.current_task = null; a.last_event_at = entry.ended_at; }
     this.ev('orch.worker.exited', 'orchestrator', task.id, { exit_code: collected.exit_code, signal: collected.signal, subtype: res?.subtype ?? null, new_tokens: u.new_tokens, kill_reason: rec.killReason, denials: denials.length });
@@ -1105,11 +1110,13 @@ export class Engine {
   }
 }
 
+/** {last_stderr} from the newest attempt that recorded a stderr tail (only when the task is not done). */
+const lastStderr = (t) => { const e = t.status === 'done' ? null : [...(t.orch.attempt_log || [])].reverse().find((a) => a.stderr_tail); return e ? { last_stderr: e.stderr_tail, last_stderr_outcome: e.outcome } : {}; };
 export function summarize(S, hb) {
   const counts = {}; for (const t of S.tasks) counts[t.status] = (counts[t.status] || 0) + 1;
   return { id: S.goal.id, title: S.goal.title, status: S.goal.status, blocked_reason: S.goal.blocked_reason || null, plan_state: S.goal.orch.plan_state,
     heartbeat: { seq: hb.seq, status: hb.status, ts: hb.ts }, tasks: counts, usage: S.goal.orch.usage, paused_reason: S.goal.orch.paused_reason, resume_at: S.goal.orch.resume_at || null,
-    task_list: S.tasks.map((t) => ({ id: t.id, status: t.status, tier: t.orch.model_tier, attempts: t.attempts })),
+    task_list: S.tasks.map((t) => ({ id: t.id, status: t.status, tier: t.orch.model_tier, attempts: t.attempts, ...lastStderr(t) })),
     plan_review: reviewView(S.tasks), plan_approval: S.goal.orch.plan_approval || null, trust_repo_config: !!S.goal.orch.trust_repo_config, unsandboxed_checks: !!S.goal.orch.unsandboxed_checks, sandbox_workers: !!S.goal.orch.sandbox_workers };
 }
 
