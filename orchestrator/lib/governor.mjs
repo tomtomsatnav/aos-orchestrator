@@ -163,7 +163,7 @@ export function usageOf(u) {
 }
 
 /** Budget evaluation. goal: goal.json object; nowMs: ms; seq: heartbeat seq; inflight: extra new tokens not yet accounted. */
-export function checkBudgets(goal, { nowMs, seq, inflightTokens = 0 }) {
+export function checkBudgets(goal, { nowMs, seq, inflightTokens = 0, softFrac = 0.8 }) {
   const o = goal.orch, b = goal.budget, B = o.budgets;
   const used = (o.usage.new_tokens || 0) + inflightTokens;
   const wall = o.started_ms ? (nowMs - o.started_ms) / 1000 : 0;
@@ -171,11 +171,11 @@ export function checkBudgets(goal, { nowMs, seq, inflightTokens = 0 }) {
   const frac = (x, cap) => (cap > 0 ? x / cap : 0);
   if (Number.isFinite(B.max_new_tokens)) {
     if (frac(used, B.max_new_tokens) >= 1) out.hard.push(`new-token cap reached (${used} >= ${B.max_new_tokens})`);
-    else if (frac(used, B.max_new_tokens) >= 0.8) out.soft.push('new tokens at 80% of the cap');
+    else if (frac(used, B.max_new_tokens) >= softFrac) out.soft.push(`new tokens at ${Math.round(softFrac * 100)}% of the cap`);
   }
   if (Number.isFinite(b.max_wall_clock_s)) {
     if (frac(wall, b.max_wall_clock_s) >= 1) out.hard.push(`wall-clock cap reached (${Math.round(wall)}s >= ${b.max_wall_clock_s}s)`);
-    else if (frac(wall, b.max_wall_clock_s) >= 0.8) out.soft.push('wall clock at 80% of the cap');
+    else if (frac(wall, b.max_wall_clock_s) >= softFrac) out.soft.push(`wall clock at ${Math.round(softFrac * 100)}% of the cap`);
   }
   if (Number.isFinite(b.max_ticks) && seq > b.max_ticks) out.hard.push(`tick budget exceeded (${seq} > ${b.max_ticks})`);
   if (Number.isFinite(b.max_usd) && b.max_usd > 0 && (o.usage.notional_usd || 0) >= b.max_usd) out.hard.push(`notional USD cap reached ($${(o.usage.notional_usd).toFixed(4)} >= $${b.max_usd})`);

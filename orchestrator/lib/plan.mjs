@@ -172,7 +172,7 @@ export function validatePlan(plan, opts) {
 }
 
 /** Build AOS-1 task objects (+ orch extension, design section 3) from a validated plan. */
-export function toTasks(planTasks, goal, nowMs) {
+export function toTasks(planTasks, goal, nowMs, ladder = TIERS) {
   const ts = iso(nowMs);
   const B = goal.orch.budgets;
   return planTasks.map((t) => ({
@@ -180,7 +180,7 @@ export function toTasks(planTasks, goal, nowMs) {
     attempts: 0, max_attempts: B.max_attempts, output_contract: t.output_contract, acceptance: [...t.acceptance], artifacts: [],
     created_at: ts, updated_at: ts,
     orch: {
-      description: t.description, model_tier: t.model_tier, tier_ladder: [...TIERS], path_scope: [...t.path_scope], read_scope: ['**'],
+      description: t.description, model_tier: t.model_tier, tier_ladder: [...ladder], path_scope: [...t.path_scope], read_scope: ['**'],
       allowed_tools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'], allowed_commands: [...(t.allowed_commands || [])],
       checks: t.checks.map((c) => ({ argv: [...c.argv], timeout_s: c.timeout_s })), branch: `aos/${goal.id}/${t.id}`, worktree: null,
       phase: null, attempt_log: [], grants: [], result_summary: null, tokens: { new: 0, cache_read: 0 }, denial_retries: 0, note: null,

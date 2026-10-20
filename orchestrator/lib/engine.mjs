@@ -13,11 +13,11 @@ import * as G from './git.mjs';
 import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
 import { matchAny, scopesOverlap } from './glob.mjs';
 import { mergePolicy, DEFAULT_POLICY, isProtectedRel } from './policy.mjs';
-import { q, buildSnapshot, snapshotHash, rulesFingerprint, applyCompiledToGoal, validateRules, toPolicy } from './rules.mjs';
+import { DEFAULT_RULES, q, buildSnapshot, snapshotHash, rulesFingerprint, applyCompiledToGoal, validateRules, toPolicy } from './rules.mjs';
 import { compileGoal, recompileSnapshot, previewGoal, parseRepoRules, REPO_RULES_PATH, REPO_RULES_FILE } from './rules-store.mjs';
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
-import { Governor, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
+import { Governor, DEFAULTS as GOV_DEFAULTS, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
 import { buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHash, reviewView, canonical, sha256 } from './plan.mjs';
 import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
 import { sandboxAvailable, wrapWorkerCommand, SANDBOX_EXEC } from './sandbox.mjs';
@@ -26,7 +26,7 @@ import { buildReport } from './report.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_SCRIPT = path.join(HERE, 'policy-hook.mjs');
-const UNCERTAIN_LIMIT_MAX = 2; // consecutive text-only limit matches for one task before the attempt counts
+const budgetRule = (why) => (/new-token/.test(why) ? 'budgets.max_new_tokens' : /wall-clock/.test(why) ? 'budgets.max_wall_clock_s' : /tick/.test(why) ? 'budgets.max_ticks' : /USD/.test(why) ? 'budgets.max_usd' : 'budgets');
 const backoffS = (interval, errors) => Math.min(interval * 2 ** Math.min(errors || 0, 20), 900);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -43,8 +43,8 @@ export class Engine {
     this.env = o.env || process.env;
     this.intervalMs = o.intervalMs ?? 10000;
     this.killGraceMs = o.killGraceMs ?? 10000;
-    this.budgetGraceMs = o.budgetGraceMs ?? 60000;
-    this.plannerTimeoutMs = o.plannerTimeoutMs ?? 300000;
+    this.budgetGraceMs = o.budgetGraceMs ?? null; // null: the compiled budgets.hard_grace_s (R8); tests pass a value
+    this.plannerTimeoutMs = o.plannerTimeoutMs ?? null; // null: the compiled plan.planner_timeout_s
     this.pid = o.pid ?? process.pid;
     this.spawnFn = o.spawnFn;
     this.slotGate = o.slotGate || null; // supervisor: global worker semaphore {acquire(goalId)->token|null, release(token)}
@@ -80,7 +80,7 @@ export class Engine {
     this._lockTimer = setInterval(() => { if (!this.dead && this.started) touchLock(this.dir, { pid: this.pid, now: Date.now() }); }, this.lockRefreshMs ?? Math.floor(this.lockTtlMs() / 3));
     this._lockTimer.unref?.();
     for (const d of [this.P.approvals, this.P.workers, this.P.commands, this.P.tmp]) ensureDir(d);
-    this.gov = new Governor(this.orchDir, readJSON(this.P.goal)?.orch?.governor || {});
+    this.gov = new Governor(this.orchDir, {}); // thresholds come from the rules (user layer only, G5): _syncGovernor() at the first tick
     atomicWrite(path.join(this.P.workers, 'settings.json'), W.buildSettings(this.hookScript));
     if (!fs.existsSync(this.P.policyDefault)) { try { atomicWrite(this.P.policyDefault, DEFAULT_POLICY); } catch { /* read-only orch dir */ } }
     if (readJSON(this.P.goal)?.orch?.unsandboxed_checks) this.ev('orch.sandbox.disabled', 'orchestrator', null, { warning: 'unsandboxed_checks is set: acceptance checks run worker-written code WITHOUT the OS sandbox' });
@@ -156,6 +156,7 @@ export class Engine {
     if (TERMINAL.has(goal.status)) { if (hb.status !== 'stopped') atomicWrite(P.hb, { ...hb, status: 'stopped' }); return { stopped: true, goal: goal.status }; }
     touchLock(this.dir, { pid: this.pid, now: Date.now() });
     this._ensureRules(S);
+    this._syncGovernor(goal);
 
     // 1. Beat
     const now = this.now();
@@ -260,7 +261,7 @@ export class Engine {
   _unblock(S) {
     const goal = S.goal; const o = goal.orch;
     if (!String(o.halt_reason || '').startsWith('budget')) { this.ev('orch.resume.refused', 'orchestrator', null, { reason: 'not blocked by a budget cap', blocked_reason: goal.blocked_reason || null }); return false; }
-    const b = checkBudgets(goal, { nowMs: this.now(), seq: loadHeartbeat(this.dir).seq, inflightTokens: 0 });
+    const b = checkBudgets(goal, { nowMs: this.now(), seq: loadHeartbeat(this.dir).seq, inflightTokens: 0, softFrac: this._R(goal).budgets.soft_frac });
     if (b.hard.length) { this.ev('orch.resume.refused', 'orchestrator', null, { reason: 'budget still exceeded', hard: b.hard }); return false; }
     goal.status = 'active'; delete goal.blocked_reason; o.halt_reason = null; o.halt_at_ms = null; o.reported = false; o.soft = b.soft;
     goal.updated_at = iso(this.now());
@@ -310,6 +311,16 @@ export class Engine {
     }
     return ok;
   }
+
+  /** The compiled rules of the goal's intact snapshot, else the engine defaults (a legacy goal, or a snapshot that no longer matches goal.json: _planIntact halts such a goal anyway). */
+  _R(goal) { return this._rulesView(goal)?.compiled ?? DEFAULT_RULES; }
+  /** G5: the governor is shared by every goal, so its thresholds come from the USER layer only (via the compiled rules). Legacy (pre-rule-set) goals keep reading goal.orch.governor. */
+  _syncGovernor(goal) {
+    const legacy = !goal.orch.rules || goal.orch.rules.legacy;
+    const cfg = legacy ? (goal.orch.governor || {}) : (this._rulesView(goal)?.compiled.governor ?? {});
+    this.gov.cfg = { ...GOV_DEFAULTS, ...cfg };
+  }
+  _graceMs(goal) { return this.budgetGraceMs ?? this._R(goal).budgets.hard_grace_s * 1000; }
 
   /**
    * The rule set is snapshotted once per goal (rules.snapshot.json, 0600) when the engine first loads it, so the planner and every worker run under
@@ -417,7 +428,7 @@ export class Engine {
       const why = g.reason;
       if (was !== why) {
         o.paused_reason = why;
-        this.ev('orch.governor.paused', 'orchestrator', null, { reason: why, resume_at: g.resume_at_ms ? iso(g.resume_at_ms) : null, manual: g.manual, dispatch_only: !g.paused });
+        this.ev('orch.governor.paused', 'orchestrator', null, { rule: /seven-day utilisation/.test(why || '') ? 'governor.hold_7d' : /five-hour utilisation/.test(why || '') ? 'governor.reserve_5h' : /overload/i.test(why || '') ? 'governor.overload_backoff_s' : 'governor.backoff_min', reason: why, resume_at: g.resume_at_ms ? iso(g.resume_at_ms) : null, manual: g.manual, dispatch_only: !g.paused });
       }
     } else if (was) {
       o.paused_reason = null; this.ev('orch.governor.resumed', 'orchestrator', null, { previous: was });
@@ -444,7 +455,7 @@ export class Engine {
       if (alive && !rec.termAtReal) {
         if (now - rec.startedMs > B.task_wall_clock_s * 1000) this._term(rec, 'wall_clock');
         else if (now - rec.lastProgressMs > B.stall_after_s * 1000) this._term(rec, 'stall');
-        else if (goal.orch.halt_at_ms && goal.orch.halt_reason?.startsWith('budget') && now - goal.orch.halt_at_ms >= this.budgetGraceMs) this._term(rec, 'budget');
+        else if (goal.orch.halt_at_ms && goal.orch.halt_reason?.startsWith('budget') && now - goal.orch.halt_at_ms >= this._graceMs(goal)) this._term(rec, 'budget');
       } else if (alive && rec.termAtReal && Date.now() - rec.termAtReal > this.killGraceMs) { W.signalGroup(rec.pgid, 'SIGKILL'); rec.termAtReal = Date.now() + 1e9; }
       if (alive) continue;
       rec.tail.update();
@@ -550,9 +561,10 @@ export class Engine {
     // an UNCERTAIN (text-only) match twice in a row for the same task is probably not a limit: count the attempt instead of pausing forever
     const uncertain = (lim.limited || lim.overloaded) && !lim.certain;
     task.orch.uncertain_limit = uncertain ? (task.orch.uncertain_limit || 0) + 1 : 0;
-    if (uncertain && task.orch.uncertain_limit >= UNCERTAIN_LIMIT_MAX) {
+    const uMax = this._R(goal).retry.uncertain_limit_max;
+    if (uncertain && task.orch.uncertain_limit >= uMax) {
       task.orch.uncertain_limit = 0;
-      return this._failAttempt(S, task, entry, 'error', { escalate: true, note: `${lim.why} matched ${UNCERTAIN_LIMIT_MAX} times in a row without a structured rate-limit signal: counted as a failed attempt`.slice(0, 300) });
+      return this._failAttempt(S, task, entry, 'error', { escalate: true, rule: 'retry.uncertain_limit_max', note: `${lim.why} matched ${uMax} times in a row without a structured rate-limit signal: counted as a failed attempt`.slice(0, 300) });
     }
     if (lim.overloaded) { // 529: short backoff, attempt not counted (never an hours-long plan pause)
       if (!this.gov.load().pause) this.gov.noteOverloaded(this.now(), `API overloaded: ${lim.why}`);
@@ -580,27 +592,33 @@ export class Engine {
     await this._verifyAttempt(S, task, entry, c);
   }
 
-  _failAttempt(S, task, entry, cause, { escalate = true, note = null, check_output = null } = {}) {
-    const ladder = task.orch.tier_ladder || TIERS;
-    const idx = Math.max(0, ladder.indexOf(entry.tier));
+  _failAttempt(S, task, entry, cause, { escalate = true, note = null, check_output = null, rule = null } = {}) {
+    const R = this._R(S.goal).retry;
+    const ladder = task.orch.tier_ladder || R.ladder;
+    escalate = escalate && !R.no_escalate.includes(cause); // retry.no_escalate (union-only: a layer can add causes, never remove the built-in ones)
     entry.outcome = cause; entry.counted = true;
     task.orch.phase = null; task.updated_at = iso(this.now());
     task.orch.last_failure = { kind: cause, note, check_output, denials: cause === 'denied' ? (task.orch.last_denials || []) : [] };
     this.ev('task.failed', task.assignee, task.id, { cause, attempt: task.attempts, tier: entry.tier, final: false });
-    const sameTier = cause === 'denied' && task.orch.denial_retries < 1; // retry the same tier once with the denial list
-    let nextIdx = idx;
-    if (sameTier) task.orch.denial_retries++;
-    else if (escalate) nextIdx = Math.min(idx + 1, ladder.length - 1);
-    const final = task.attempts >= task.max_attempts || (escalate && !sameTier && idx >= ladder.length - 1); // a failure on the top tier is final
+    // retry.same_tier_retries: cause -> how many times that cause is retried on the same tier before escalating (default {denied: 1})
+    const used = (task.orch.same_tier_used ||= {});
+    const sameTier = (R.same_tier_retries[cause] ?? 0) > (cause === 'denied' ? task.orch.denial_retries : used[cause] || 0);
+    // retry.ladder: the next rung above this tier (the task's tier may be absent from a custom ladder: then the next higher rung; none above = the top)
+    const rank = (t) => TIERS.indexOf(t);
+    const next = ladder.includes(entry.tier) ? ladder[ladder.indexOf(entry.tier) + 1] : ladder.find((t) => rank(t) > rank(entry.tier));
+    if (sameTier) { if (cause === 'denied') task.orch.denial_retries++; else used[cause] = (used[cause] || 0) + 1; }
+    const atTop = escalate && !sameTier && !next; // a failure on the top tier is final
+    const final = task.attempts >= task.max_attempts || atTop;
     if (final) {
       task.status = 'failed';
-      this.ev('task.failed', 'orchestrator', task.id, { cause, attempts: task.attempts, tier: entry.tier, final: true });
+      this.ev('task.failed', 'orchestrator', task.id, { cause, attempts: task.attempts, tier: entry.tier, final: true, rule: atTop && task.attempts < task.max_attempts ? 'retry.ladder' : 'retry.max_attempts' });
       S.goal.orch.halt_reason ??= `task ${task.id} failed after ${task.attempts} attempt(s): ${cause}${cause === 'merge_conflict' && note ? ` (${note})` : ''}`;
       S.goal.orch.halt_at_ms ??= this.now();
       this._dropWorktree(S, task).catch(() => {});
     } else {
-      task.orch.model_tier = ladder[nextIdx]; task.status = 'ready';
-      this.ev('task.retried', 'orchestrator', task.id, { attempts: task.attempts, max_attempts: task.max_attempts, tier: task.orch.model_tier, reason: cause });
+      if (escalate && !sameTier && next) task.orch.model_tier = next;
+      task.status = 'ready';
+      this.ev('task.retried', 'orchestrator', task.id, { attempts: task.attempts, max_attempts: task.max_attempts, tier: task.orch.model_tier, reason: cause, rule: rule || (sameTier ? 'retry.same_tier_retries' : escalate ? 'retry.ladder' : 'retry.no_escalate') });
     }
     saveState(this.dir, S);
   }
@@ -647,7 +665,7 @@ export class Engine {
     }
     const m = await G.mergeNoFf(this._integrationWt(goal), task.orch.branch, `aos: merge ${task.id}`);
     if (!m.ok) {
-      this.ev('orch.integrate.conflict', 'orchestrator', task.id, { files: m.files, error: m.error?.slice(0, 300) });
+      this.ev('orch.integrate.conflict', 'orchestrator', task.id, { rule: 'merge.on_conflict', files: m.files, error: m.error?.slice(0, 300) });
       await this._dropWorktree(S, task, true);
       return this._failAttempt(S, task, entry, 'merge_conflict', { escalate: false, note: `merge conflict in ${m.files.join(', ') || 'files'}: the integration branch changed; redo the task on top of the current files` });
     }
@@ -771,7 +789,7 @@ export class Engine {
     const rv = this._rulesView(goal); // compiled rules and worker policy of the (intact) snapshot: the plan must lie inside them (R7, G4)
     const v = validatePlan(plan, { max_tasks: rv ? rv.compiled.plan.max_tasks : o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal), ...(rv ? { rules: rv.compiled, policy: rv.policy } : {}) });
     if (!v.ok) return this._planRejected(S, v.errors);
-    S.tasks = toTasks(v.tasks, goal, this.now());
+    S.tasks = toTasks(v.tasks, goal, this.now(), this._R(goal).retry.ladder);
     S.agents = S.tasks.map((t) => ({ id: t.assignee, role: 'worker', capabilities: ['edit', 'bash'], can_delegate: false, status: 'idle', current_task: null, last_event_at: null, orch: { tier: t.orch.model_tier } }));
     atomicWrite(this.P.plan, { source, plan });
     for (const t of S.tasks) this.ev('task.created', 'orchestrator', t.id, { depends_on: t.depends_on, tier: t.orch.model_tier });
@@ -781,7 +799,7 @@ export class Engine {
     const repoLoose = (readJSON(this.P.rules, null)?.loosenings || []).filter((l) => l.layer === 'repo');
     if (!review && repoLoose.length) review = `${repoLoose.length} repo rule loosening(s) are applied (${repoLoose.slice(0, 3).map((l) => l.rule_id.split('@')[0]).join(', ')}): a human must review them`;
     if (o.approval_policy.plan === 'auto' && !review && this._activate(S, 'auto')) { /* only plans without commands may auto-approve */ } else {
-      if (o.approval_policy.plan === 'auto' && review) this.ev('orch.plan.approval_required', 'orchestrator', null, { reason: review, note: 'plan_approval "auto" does not apply to plans with commands or applied repo loosenings' });
+      if (o.approval_policy.plan === 'auto' && review) this.ev('orch.plan.approval_required', 'orchestrator', null, { rule: 'plan.approval', reason: review, note: 'plan_approval "auto" does not apply to plans with commands or applied repo loosenings' });
       o.plan_state = 'awaiting_approval'; o.plan_awaiting_since_ms = this.now(); this.ev('goal.updated', 'orchestrator', null, { status: 'draft', plan_state: 'awaiting_approval' });
     }
     saveState(this.dir, S);
@@ -796,7 +814,7 @@ export class Engine {
   }
 
   async _runPlanner(S) {
-    const goal = S.goal; const o = goal.orch;
+    const goal = S.goal; const o = goal.orch; const PR = this._R(goal).plan; const pTier = PR.planner_tier;
     const wt = this._integrationWt(goal);
     const guard = this._configGuard(goal, wt);
     if (guard) return { error: guard };
@@ -806,16 +824,16 @@ export class Engine {
     atomicWrite(policyFile, { ...this._policyHead(goal), ctx: { worktree: realpathDeepest(wt), path_scope: [], allowed_tools: ['Read', 'Glob', 'Grep'], allowed_commands: [], grants: [], home: this.env.HOME, base_branch: o.base_branch } });
     const stdout = this.wpath('planner', 1, 'stream.ndjson'); const stderr = this.wpath('planner', 1, 'stderr');
     for (const f of [stdout, stderr]) { try { fs.unlinkSync(f); } catch { /* none */ } }
-    const args = W.buildArgs({ prompt, tier: 'opus', sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, tools: W.READ_ONLY_TOOLS, allowedTools: W.READ_ONLY_TOOLS, appendSystemPrompt: 'You are the planner for an AOS-1 goal. You do not edit files. Output ONLY one JSON object.', settingsFile: path.join(this.P.workers, 'settings.json') });
+    const args = W.buildArgs({ prompt, tier: pTier, sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, tools: W.READ_ONLY_TOOLS, allowedTools: W.READ_ONLY_TOOLS, appendSystemPrompt: 'You are the planner for an AOS-1 goal. You do not edit files. Output ONLY one JSON object.', settingsFile: path.join(this.P.workers, 'settings.json') });
     const env = W.buildEnv({ base: this.env, goalId: goal.id, taskId: 'planner', attempt: 1, worktree: wt, policyFile, approvalsDir: this.P.approvals, tmpDir: this._tmp('planner'), decisionLog: path.join(this.P.workers, 'decisions.ndjson'), bin: this.bin });
     let cmd;
     try { cmd = this._workerCommand(goal, args, env, { worktree: wt, tmpDir: env.TMPDIR, policyFile }); } catch (e) { return { error: e.message }; }
     const h = W.startWorker({ bin: cmd.bin, args: cmd.args, env, cwd: wt, stdoutFile: stdout, stderrFile: stderr, spawnFn: this.spawnFn });
-    if (h.pid) atomicWrite(this.wpath('planner', 1, 'pid.json'), { pid: h.pid, pgid: h.pgid, started_at: iso(this.now()), session_id: sessionId, tier: 'opus', sandboxed: cmd.sandboxed });
+    if (h.pid) atomicWrite(this.wpath('planner', 1, 'pid.json'), { pid: h.pid, pgid: h.pgid, started_at: iso(this.now()), session_id: sessionId, tier: pTier, sandboxed: cmd.sandboxed });
     o.plan_session_id = sessionId; o.usage.workers_started++;
-    this.ev('orch.worker.started', 'orchestrator', null, { role: 'planner', pid: h.pid, tier: 'opus', session_id: sessionId, sandboxed: cmd.sandboxed });
+    this.ev('orch.worker.started', 'orchestrator', null, { role: 'planner', pid: h.pid, tier: pTier, rule: 'plan.planner_tier', session_id: sessionId, sandboxed: cmd.sandboxed });
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; W.signalGroup(h.pgid, 'SIGTERM'); setTimeout(() => W.signalGroup(h.pgid, 'SIGKILL'), this.killGraceMs).unref(); }, this.plannerTimeoutMs);
+    const timer = setTimeout(() => { timedOut = true; W.signalGroup(h.pgid, 'SIGTERM'); setTimeout(() => W.signalGroup(h.pgid, 'SIGKILL'), this.killGraceMs).unref(); }, this.plannerTimeoutMs ?? PR.planner_timeout_s * 1000);
     const exit = await h.done; clearTimeout(timer);
     const tailer = new W.StreamTail(stdout); tailer.update();
     for (const info of tailer.takeRateLimits()) this.gov.observe(info, this.now());
@@ -841,11 +859,11 @@ export class Engine {
   _budgets(S, seq) {
     const goal = S.goal; const o = goal.orch;
     let inflight = 0; for (const r of this.workers.values()) { r.tail.update(); inflight += r.tail.usage().new_tokens; }
-    const b = checkBudgets(goal, { nowMs: this.now(), seq, inflightTokens: inflight });
+    const b = checkBudgets(goal, { nowMs: this.now(), seq, inflightTokens: inflight, softFrac: this._R(goal).budgets.soft_frac });
     o.soft = b.soft;
     if (b.hard.length && !o.halt_reason) {
       o.halt_reason = `budget: ${b.hard.join('; ')}`; o.halt_at_ms = this.now();
-      this.ev('budget.exceeded', 'orchestrator', null, { ticks: seq, new_tokens: o.usage.new_tokens + inflight, notional_usd: o.usage.notional_usd, reasons: b.hard });
+      this.ev('budget.exceeded', 'orchestrator', null, { ticks: seq, new_tokens: o.usage.new_tokens + inflight, notional_usd: o.usage.notional_usd, reasons: b.hard, rule: budgetRule(b.hard[0]) });
     }
   }
 
@@ -876,7 +894,7 @@ export class Engine {
     for (const task of S.tasks) {
       if (slots <= 0) break;
       if (task.status !== 'ready') continue;
-      if ((o.soft || []).length && task.orch.model_tier === 'opus') continue; // soft budget: no new opus-tier work
+      if ((o.soft || []).length && task.orch.model_tier === 'opus' && this._R(goal).parallel.soft_budget_blocks_tier === 'opus') continue; // soft budget: no new opus-tier work
       if (running().some((r) => scopesOverlap(r.orch.path_scope, task.orch.path_scope))) continue; // SPEC section 6
       const tok = this.slotGate ? this.slotGate.acquire(goal.id) : true;
       if (!tok) break; // global worker cap / fairness: try again next tick
