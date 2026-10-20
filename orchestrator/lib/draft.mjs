@@ -17,26 +17,15 @@ import { CTRL_RE, escCtrl, q } from './ctrl.mjs';
 import { validateRepo } from './supervisor.mjs';
 import { StreamTail } from './worker.mjs';
 import { atomicWrite, ensureDir } from './state.mjs';
+import { PROFILES } from './profiles.mjs';
 
 export const DRAFT_MARKER = 'AOS_DRAFT';
 export const DRAFT_SYSTEM = 'You draft one goal for an AOS orchestrator. You have no tools and cannot read files. Output ONLY one JSON object.';
 export const MAX_PROMPT = 4000; export const MAX_ROUNDS = 2;
 const LIM = { title: 200, description: 4000, text: 500, argv: 32, arg: 500, criteria: 12, questions: 3, question: 300, risks: 5, risk: 300 };
 
-// ---------------------------------------------------------------- profiles (docs/rules-design.md 4.2, 4.3): a goal-layer rules object chosen by the human
-const gl = (id, glob) => ({ id, glob }); const cm = (id, cmd, description) => ({ id, cmd, ...(description ? { description } : {}) });
-export const PROFILES = Object.freeze({
-  strict: null,
-  'node-library': { rules_version: 1,
-    checks: { allowlist: [cm('node-test', 'node --test', 'built-in test runner'), cm('npm-test', 'npm test'), cm('node-check', 'node --check')], max_timeout_s: 600 },
-    worker: { paths: { deny: [gl('lockfile', '**/package-lock.json'), gl('ci', '**/.github/**')] } },
-    plan: { scope_deny: [gl('no-node-modules', 'node_modules/**')], max_tasks: 8 }, retry: { max_attempts: 3 } },
-  'docs-only': { rules_version: 1,
-    worker: { tools: { allow: ['Read', 'Glob', 'Grep', 'Edit', 'Write'] }, paths: { on_outside_scope: 'deny' } },
-    plan: { approval: 'auto', tiers: ['haiku', 'sonnet'], max_start_tier: 'haiku', scope_deny: [gl('code', '**/*.{js,mjs,ts,py,sh}')], max_tasks: 6 },
-    checks: { allowlist: [cm('grep', 'grep'), cm('test', 'test')], max_timeout_s: 60 }, retry: { ladder: ['haiku', 'sonnet'], max_attempts: 2 },
-    budgets: { max_new_tokens: 300000, max_usd: 1 } },
-});
+// profiles live in profiles.mjs (shared with the rules summary)
+export { PROFILES };
 
 /** The profile's goal layer for a goal created over HTTP: plan.approval is removed (the API never auto-approves plans, whatever the profile says). {rules, note|null}. */
 export function profileRulesForApi(profile) {
@@ -66,6 +55,8 @@ export async function draftRules({ orchDir, root, branch = 'main', profile = 'st
 const hasCtrl = (s, allowNl) => (allowNl ? CTRL_RE.test(String(s).replace(/[\n\t]/g, ' ')) : CTRL_RE.test(String(s)));
 const ID_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 const KEYS = ['title', 'description', 'success_criteria', 'budgets', 'questions', 'risks'];
+// Drafted goals are small: unless the model or a flag says otherwise they get these (never above the rules' limits), not the rules' generous maximums.
+export const DRAFT_DEFAULTS = Object.freeze({ max_new_tokens: 150000, max_wall_s: 1200, max_attempts: 2 });
 const BUDGET_CAPS = (c) => ({ max_new_tokens: c.budgets.max_new_tokens, max_wall_s: c.budgets.max_wall_clock_s, max_parallel: c.parallel.max_parallel, max_attempts: c.retry.max_attempts, max_usd: c.budgets.max_usd });
 
 /** The first allowlist entry of the COMPILED rules that covers this argv: `<layer>:checks.allow.<id>`, or null. Criterion argv are never added to the list. */
@@ -145,13 +136,13 @@ export function validateDraft(raw, { compiled }) {
 }
 
 /** The goal.json for a validated draft: the human edits it, then `aos-orch run` (createGoal re-validates everything). */
-export function draftToSpec(draft, { root, branch = 'main', tier, profile, profileRules, maxUsdCap = 5 }) {
+export function draftToSpec(draft, { root, branch = 'main', tier, profile, profileRules, maxUsdCap = 5, startTier = null }) {
   const B = draft.budgets; const ob = {};
   for (const k of ['max_new_tokens', 'max_parallel', 'max_attempts']) if (B[k] !== undefined) ob[k] = B[k];
   return { title: draft.title, description: draft.description,
     success_criteria: draft.success_criteria.map((c) => ({ id: c.id, text: c.text, ...(c.check ? { check: c.check } : {}), ...(c.verify ? { verify: 'human' } : {}) })),
     budget: { max_ticks: 500, max_usd: B.max_usd ?? Math.min(5, maxUsdCap), max_wall_clock_s: B.max_wall_s ?? 7200 },
-    orch: { repo: root, base_branch: branch, drafted: { tier }, profile_name: profile, ...(Object.keys(ob).length ? { budgets: ob } : {}), ...(profileRules ? { rules: profileRules } : {}) } };
+    orch: { repo: root, base_branch: branch, drafted: { tier }, profile_name: profile, ...(Object.keys(ob).length ? { budgets: ob } : {}), ...(profileRules || startTier ? { rules: { ...(profileRules || { rules_version: 1 }), ...(startTier ? { plan: { ...(profileRules?.plan || {}), max_start_tier: startTier } } : {}) } } : {}) } };
 }
 
 // ---------------------------------------------------------------- the model call
@@ -161,6 +152,7 @@ function packageScripts(root) {
 export function buildDraftPrompt({ request, facts, scripts = [], compiled, errors = null }) {
   const allow = compiled.checks.allowlist.map((e) => e.cmd);
   const caps = BUDGET_CAPS(compiled);
+  for (const [k, v] of Object.entries(DRAFT_DEFAULTS)) caps[k] = Math.min(caps[k], v); // aim for a small goal: the validator still accepts anything up to the rules' limits
   let nonce; do nonce = `REQUEST-${crypto.randomBytes(8).toString('hex')}`; while (request.includes(nonce)); // a delimiter the request cannot contain or build by stripping
   const lines = [
     DRAFT_MARKER,
@@ -168,7 +160,7 @@ export function buildDraftPrompt({ request, facts, scripts = [], compiled, error
     `<<<${nonce}\n${request}\n${nonce}>>>`,
     `Repo facts: files (depth 2): ${facts.files.join(' ') || '(unknown)'}; Makefile targets: ${facts.make_targets.join(' ') || '(none)'}; package.json scripts: ${scripts.join(' ') || '(none)'}`,
     `Allowed check commands (a check argv must start with one of these; nothing else will be accepted): ${JSON.stringify(allow)}; max check timeout_s: ${compiled.checks.max_timeout_s}`,
-    `Budget limits you may only go under: ${JSON.stringify(caps)}`,
+    `Budget limits you may only go under (the goal is small: do not ask for more than you need): ${JSON.stringify(caps)}`,
     'Each success criterion has {"id","text"} and EITHER a "check":{"argv":[...],"timeout_s":n} using an allowed command OR "verify":"human" when no allowed command can verify it (for example prose quality). Use 2-12 criteria.',
     'If you cannot tell what "done" means, output ONLY {"questions":[...]} with at most 3 short questions. Do not guess.',
     'You may not propose rules, trust, sandbox or approval settings: any other field is rejected.',
@@ -213,7 +205,7 @@ export const retryTier = (c) => { const order = ['haiku', 'sonnet']; const i = o
  * retry on sonnet with the validation errors. Creates nothing but a usage line in $orch/drafts.ndjson. Returns
  * {ok, draft, spec, errors[], questions[], rules_hash, tier, usage, rules_text, profile}; `spec` is the goal.json for `draft`.
  */
-export async function draftGoal({ orchDir, repo, prompt, profile = 'strict', branch = 'main', env = process.env, spawnFn, claudeBin, timeoutMs = 120000, killGraceMs = 2000, now = () => Date.now() }) {
+export async function draftGoal({ orchDir, repo, prompt, profile = 'strict', branch = 'main', overrides = {}, env = process.env, spawnFn, claudeBin, timeoutMs = 120000, killGraceMs = 2000, now = () => Date.now() }) {
   const fail = (errors) => ({ ok: false, draft: null, spec: null, errors: errors.map(escCtrl), questions: [], rules_hash: null, tier: null, usage: { new_tokens: 0, notional_usd: 0 }, rules_text: null, profile });
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > MAX_PROMPT || hasCtrl(prompt, true)) return fail([`the request must be 1-${MAX_PROMPT} characters without control characters`]);
   let root; try { root = await validateRepo(repo, { orchDir }); } catch (e) { return fail([`repo refused: ${e.message}`]); }
@@ -221,7 +213,21 @@ export async function draftGoal({ orchDir, repo, prompt, profile = 'strict', bra
   if (!dr.ok) return fail(dr.errors.map((x) => `rules refused: ${x}`));
   const { findings } = scanRepoConfig(G.realpath(repo), root);
   if (findings.length && dr.comp.compiled.repo_config.trust !== true) return fail([`repo refused: it carries Claude Code configuration that could steer workers (hooks, permissions, MCP servers or commands); review it and write the goal by hand with --trust-repo-config`]);
-  const compiled = dr.comp.compiled; const facts = gatherRepoFacts(root); const scripts = packageScripts(root);
+  const compiled = dr.comp.compiled;
+  // flags may only TIGHTEN: a value above the rules' limit (or a tier above plan.max_start_tier / outside plan.tiers) is refused before any model call
+  const caps = BUDGET_CAPS(compiled); const flagBudgets = {}; const flagErrors = [];
+  for (const [k, flag] of [['max_new_tokens', '--max-tokens'], ['max_wall_s', '--max-wall-s']]) {
+    const v = overrides[k]; if (v === undefined) continue;
+    if (!(Number.isInteger(v) && v > 0)) flagErrors.push(`${flag} must be a positive integer`); else if (v > caps[k]) flagErrors.push(`${flag} ${v} is above the rules' limit ${caps[k]} (a draft can only be lower)`); else flagBudgets[k] = v;
+  }
+  const T = ['haiku', 'sonnet', 'opus']; let startTier = null;
+  if (overrides.tier !== undefined) {
+    if (!T.includes(overrides.tier)) flagErrors.push(`--tier must be one of ${T.join(', ')}`);
+    else if (!compiled.plan.tiers.includes(overrides.tier) || T.indexOf(overrides.tier) > T.indexOf(compiled.plan.max_start_tier)) flagErrors.push(`--tier ${overrides.tier} is above what the rules allow (plan.max_start_tier ${compiled.plan.max_start_tier}; a draft can only be lower)`);
+    else startTier = overrides.tier;
+  }
+  if (flagErrors.length) return fail(flagErrors);
+  const facts = gatherRepoFacts(root); const scripts = packageScripts(root);
   const bin = claudeBin || W.claudeBin(env); const usage = { new_tokens: 0, notional_usd: 0 };
   const rounds = []; let errors = null; let tier = compiled.plan.draft_tier; let last = null;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -236,12 +242,19 @@ export async function draftGoal({ orchDir, repo, prompt, profile = 'strict', bra
     errors = v.errors; tier = retryTier(compiled);
   }
   const rules_hash = dr.snapshot.rules_hash.slice(0, 12);
-  const rules_text = renderRulesSummary(summarizeRules(dr.snapshot, null, profile));
   try { fs.appendFileSync(path.join(ensureDir(orchDir), 'drafts.ndjson'), `${JSON.stringify({ ts: new Date(now()).toISOString(), rounds, usage, rules_hash, ok: !!last?.ok, questions: last?.questions?.length || 0 })}\n`, { mode: 0o600 }); } catch { /* usage log is best effort */ }
-  const base = { rules_hash, tier: rounds.at(-1), usage, rules_text, profile };
+  const textFor = (limits) => renderRulesSummary(summarizeRules(dr.snapshot, null, profile, limits));
+  const base = { rules_hash, tier: rounds.at(-1), usage, rules_text: textFor(null), profile };
   if (!last?.ok) return { ok: false, draft: null, spec: null, errors: last?.errors || ['no output'], questions: [], ...base };
   if (last.questions.length) return { ok: true, draft: null, spec: null, errors: [], questions: last.questions, ...base };
-  return { ok: true, draft: last.draft, spec: draftToSpec(last.draft, { root, branch, tier: base.tier, profile, profileRules: dr.profileRules, maxUsdCap: compiled.budgets.max_usd }), errors: [], questions: [], ...base };
+  // final budgets: draft default (capped by the rules), then what the model proposed, then the human's flags; remember where each came from and the rules' limit
+  const budgets = {}; const budget_notes = {};
+  for (const [k, v] of Object.entries(DRAFT_DEFAULTS)) { budgets[k] = Math.min(v, caps[k]); budget_notes[k] = { source: 'default', limit: caps[k] }; }
+  for (const [k, v] of Object.entries(last.draft.budgets)) { budgets[k] = v; budget_notes[k] = { source: 'model', limit: caps[k] }; }
+  for (const [k, v] of Object.entries(flagBudgets)) { budgets[k] = v; budget_notes[k] = { source: 'flag', limit: caps[k] }; }
+  const draft = { ...last.draft, budgets };
+  const limits = { max_new_tokens: budgets.max_new_tokens, max_wall_clock_s: budgets.max_wall_s, max_attempts: budgets.max_attempts, ...(budgets.max_parallel ? { max_parallel: budgets.max_parallel } : {}), ...(budgets.max_usd ? { max_usd: budgets.max_usd } : {}) };
+  return { ok: true, draft, budget_notes, start_tier: startTier, spec: draftToSpec(draft, { root, branch, tier: base.tier, profile, profileRules: dr.profileRules, maxUsdCap: compiled.budgets.max_usd, startTier }), errors: [], questions: [], ...base, rules_text: textFor(limits) };
 }
 
 /** Text of a draft for the CLI, in the style of renderReview: each criterion with its check or HUMAN REVIEW, the budgets, the rules hash and the questions. */
@@ -252,12 +265,14 @@ export function renderDraft(r) {
     L.push(`DRAFT (proposal only; nothing is created until you run it)  tier=${q(r.tier)}  profile=${q(r.profile)}  rules ${r.rules_hash}`);
     L.push(`title: ${q(d.title)}`); if (d.description) L.push(`description: ${escCtrl(d.description).replace(/\n/g, '\n  ')}`);
     for (const c of d.success_criteria) {
-      L.push(c.verify === 'human' ? `  ${q(c.id)}: ${q(c.text)}\n      HUMAN REVIEW: you must confirm it with \`aos-orch confirm\` before the goal can finish`
-        : `  ${q(c.id)}: ${q(c.text)}\n      check (sandboxed, ${c.check.timeout_s}s): ${c.check.argv.map(q).join(' ')}   [allowed by ${q(c.matched_rule)}]`);
+      L.push(`  ${q(c.id)}: ${q(c.text)}`); // one line per entry, each escaped on its own: the newline between them is ours, not the model's
+      L.push(c.verify === 'human' ? '      HUMAN REVIEW: you must confirm it with `aos-orch confirm` before the goal can finish'
+        : `      check (sandboxed, ${c.check.timeout_s}s): ${c.check.argv.map(q).join(' ')}   [allowed by ${q(c.matched_rule)}]`);
     }
     const caps = { max_new_tokens: 'tokens', max_wall_s: 'wall seconds', max_parallel: 'parallel', max_attempts: 'attempts', max_usd: 'USD' };
-    for (const [k, v] of Object.entries(d.budgets)) L.push(`  budget ${caps[k]}: ${v} (lowered by draft)`);
-    if (!Object.keys(d.budgets).length) L.push('  budgets: (rule defaults)');
+    const how = { default: 'draft default for a small goal', model: 'proposed by the model', flag: 'set by your flag' };
+    for (const [k, v] of Object.entries(d.budgets)) { const n = r.budget_notes?.[k]; L.push(`  budget ${caps[k]}: ${v}${n ? ` (${how[n.source]}; rules limit ${n.limit})` : ''}`); }
+    if (r.start_tier) L.push(`  tasks may start at most at tier ${q(r.start_tier)} (set by your flag; tighter than the rules)`);
     for (const x of d.risks) L.push(`  risk: ${q(x)}`);
   }
   for (const x of r.questions) L.push(`  question: ${q(x)}`);

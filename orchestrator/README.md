@@ -42,13 +42,14 @@ aos-orch run goal.json
 ## Commands
 
 ```sh
-node orchestrator/bin/aos-orch.mjs run <goal.json | goal-id> [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--poll-ms N] [--interval-s N]
+node orchestrator/bin/aos-orch.mjs run <goal.json | goal-id> [--wait-approval] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--poll-ms N] [--interval-s N]
 node orchestrator/bin/aos-orch.mjs status [goal-id]
+node orchestrator/bin/aos-orch.mjs plan <goal-id>      # read-only: the plan review + rules summary; approves nothing
 node orchestrator/bin/aos-orch.mjs pause|resume|cancel|kill|approve-plan|reject-plan <goal-id>
 node orchestrator/bin/aos-orch.mjs approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
 ```
 
-`run` exits 0 achieved, 2 blocked, 3 cancelled, 4 waiting for plan approval, 5 goal locked by another engine. Control commands are queued as files in
+`run` exits 0 achieved, 2 blocked, 3 cancelled, 4 waiting for plan approval, 5 goal locked by another engine. When `run` stops for a human (plan approval, or a `verify: "human"` criterion) it prints the exact next commands (`aos-orch plan <id>`, `approve-plan <id>`, `confirm <id> <criterion>`, then `run <id>` again). `run <goal> --wait-approval` stays attached instead: it prints the plan, waits, and runs the engine again only once your own `approve-plan` / `confirm` command has been queued (the engine applies that command itself; nothing proceeds without it), so the whole flow works from two terminals without `serve`. Control commands are queued as files in
 `<goal>/commands/` and applied by the running engine at its next tick (no HTTP server in this phase). `cancel` and `kill`
 both SIGTERM every worker process group (SIGKILL after the grace period), mark tasks `cancelled` and remove the worktrees.
 The real `claude` binary is used only when `AOS_CLAUDE_BIN` is unset.
@@ -84,10 +85,10 @@ approval screen and the rules hash is bound into the plan approval. Rules are sn
 re-verified at every dispatch.
 
 ```
-aos-orch draft "<prompt>" --repo <path> [--out goal.json] [--profile strict|node-library|docs-only] [--answers "..."]
+aos-orch draft "<prompt>" --repo <path> [--out goal.json] [--profile strict|node-library|docs-only] [--answers "..."] [--max-tokens N] [--max-wall-s N] [--tier haiku|sonnet|opus]
 aos-orch confirm <goal-id> <criterion-id>
 aos-orch rules show [goal-id]          # defaults + user layer, or the goal's snapshot (what the approval screen prints)
-aos-orch rules check <file> [--layer user|repo|goal]   # validate a rules file and show what it would change
+aos-orch rules check <file> [--layer user|repo|goal]   # validate a rules file (or, with --layer goal, a whole goal file: its orch.rules) and show what it would change
 aos-orch rules explain <goal-id> <task-id> '{"tool_name":"Bash","tool_input":{"command":"ls"}}'   # dry-run the policy: decision + rule id
 ```
 
@@ -95,14 +96,14 @@ aos-orch rules explain <goal-id> <task-id> '{"tool_name":"Bash","tool_input":{"c
 
 `aos-orch draft "add a retry to the fetcher" --repo ~/code/app` makes one model call with no tools (`--tools ""`, one turn, `budgets.draft_usd_cap`
 $0.10, tier `plan.draft_tier`, an empty working directory) and prints a draft for review: each criterion with its sandboxed check command
-and the allowlist rule that permits it, or `HUMAN REVIEW`, the lowered budgets, the rules hash and any questions. It writes `goal.json`
+and the allowlist rule that permits it, or `HUMAN REVIEW`, the budgets (each marked as a draft default, proposed by the model, or set by your flag, with the rules' limit), the rules hash and any questions. Drafted goals are small, so unless the model or a flag says otherwise they get 150000 tokens, 1200 s and 2 attempts (never above the rules). `--max-tokens`, `--max-wall-s` and `--tier` only tighten: a value above the rules is refused before any model call; `--tier` caps the tier tasks may start at (a goal-layer `plan.max_start_tier`). It writes `goal.json`
 (0600, never overwrites) and creates nothing else; `aos-orch run goal.json` is a separate step. The model output is untrusted and is
 validated against the compiled rules: a check argv must already be on the rules' check allowlist (criteria never widen it), budgets may
 only be lower than the rules, no rule/trust/sandbox/approval field is accepted, control and bidi characters are rejected, and a draft needs
 at least 2 criteria (or a human-review one). A vague prompt returns up to 3 `questions` (exit 3); answer with `--answers` (two rounds at most).
 One invalid output is retried once on sonnet. A `verify: "human"` criterion keeps the goal `blocked` ("awaiting human confirmation: c2")
 until `aos-orch confirm <goal> c2` (or `POST /api/goals/:id/criteria/:cid/confirm`) once every task is done. A goal made from a draft records
-`drafted: true` and `draft_tier` on `goal.created`.
+`drafted: true` and `draft_tier` on `goal.created`. On the plan approval screens a profile's own additions to the check allowlist are shown in a separate, labelled block (they are expected, and still listed and hashed); every other loosening stays under `LOOSENINGS YOU ARE APPROVING`. Tasks whose `path_scope` mentions nothing in the goal text are marked `BEYOND THE PROMPT` (a heuristic, informational; `GET /api/goals/:id/plan` tasks carry `beyond_prompt` and `beyond_paths`).
 
 ## Security model (what is enforced now, what is not)
 

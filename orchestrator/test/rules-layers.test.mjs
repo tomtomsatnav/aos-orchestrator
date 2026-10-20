@@ -192,7 +192,8 @@ test('R5: the server plan view keeps its shape and ADDS rules + rules_text (no a
   await until(() => s.state('g-v').S.goal.orch.plan_state === 'awaiting_approval', { what: 'plan' });
   const v = planView(s, 'g-v');
   assert.deepEqual(Object.keys(v).sort(), ['plan_hash', 'plan_state', 'rules', 'rules_text', 'tasks']);
-  assert.deepEqual(Object.keys(v.tasks[0]).sort(), ['acceptance', 'allowed_commands', 'allowed_tools', 'checks', 'depends_on', 'description', 'id', 'output_contract', 'path_scope', 'tier', 'title']);
+  assert.deepEqual(Object.keys(v.tasks[0]).sort(), ['acceptance', 'allowed_commands', 'allowed_tools', 'beyond_paths', 'beyond_prompt', 'checks', 'depends_on', 'description', 'id', 'output_contract', 'path_scope', 'tier', 'title']);
+  assert.equal(typeof v.tasks[0].beyond_prompt, 'boolean'); assert.ok(Array.isArray(v.tasks[0].beyond_paths));
   assert.equal(v.rules.rules_hash, s.reviewHash('g-v').rules_hash.slice(0, 12)); assert.equal(v.rules.profile, 'strict');
   assert.ok(v.rules.loosenings.some((l) => l.layer === 'goal' && l.path === 'budgets.max_usd'));
   assert.ok(v.rules.loosenings.some((l) => l.layer === 'user' && l.path === 'worker.paths.read_extra'));

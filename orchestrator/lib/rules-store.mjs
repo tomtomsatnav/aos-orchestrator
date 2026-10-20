@@ -152,11 +152,20 @@ export function checkRulesFile(file, layer = 'user') {
   if (!['user', 'repo', 'goal'].includes(layer)) return { ok: false, errors: [`--layer must be user, repo or goal`], text: '' };
   let text; try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return { ok: false, errors: [`cannot read ${escCtrl(file)}: ${e.code || e.message}`], text: '' }; }
   const p = parseRulesText(text, 'file'); if (p.error) return { ok: false, errors: [p.error], text: '' };
+  // a whole goal file (what `aos-orch draft` writes) is accepted for --layer goal: its rules layer is `orch.rules`
+  const looksLikeGoal = !!p.value && typeof p.value === 'object' && !Array.isArray(p.value) && p.value.rules_version === undefined && Array.isArray(p.value.success_criteria);
+  let note = '';
+  if (looksLikeGoal) {
+    if (layer !== 'goal') return { ok: false, errors: ['this file is a goal file, not a rules file: check it with --layer goal (its rules layer is orch.rules)'], text: '' };
+    const r = p.value.orch?.rules;
+    if (r === undefined) return { ok: false, errors: ['this goal file has no orch.rules, so it adds no goal-layer rules (nothing to check; the profile "strict" has none)'], text: '' };
+    p.value = r; note = 'checking orch.rules of the goal file as the goal layer\n';
+  }
   const v = validateRules(p.value, { layer }); if (!v.ok) return { ok: false, errors: v.errors, text: '' };
   const comp = compileRules([{ layer, rules: p.value, source: 'file' }]);
   if (!comp.ok) return { ok: false, errors: comp.errors, text: '' };
   const sm = summarizeRules(buildRulesSnapshot(comp, [{ layer, rules: p.value, source: 'file' }]));
-  return { ok: true, errors: [], text: `OK as a ${layer} layer (${sm.rules_hash} when applied alone over the defaults)\n${renderRulesSummary(sm)}` };
+  return { ok: true, errors: [], text: `${note}OK as a ${layer} layer (${sm.rules_hash} when applied alone over the defaults)\n${renderRulesSummary(sm)}` };
 }
 
 /**

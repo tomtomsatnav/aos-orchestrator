@@ -48,6 +48,7 @@ export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: []
       + 'Leave allowed_commands empty unless a read-only command is really needed. Put ALL verification (tests, builds, linters) in each task\'s `checks`: the engine runs those itself, in an OS sandbox (no network, writes only inside the task worktree). '
       + 'A human reviews every plan that has commands before anything is dispatched.',
     'Produce tasks that are small (one concern, ideally < 200 changed lines), have disjoint path_scope where possible, start at the cheapest plausible tier, and each have at least one check from the allowed commands.',
+    'Every task must create or change files within its path_scope. Do NOT add verification-only tasks (run the tests, check the output, review): the engine already runs each task\'s checks after the task and the goal\'s success-criteria checks at the end.',
     `OUTPUT SCHEMA: ${OUTPUT_SCHEMA}`,
   ].join('\n');
   return { system: PLANNER_SYSTEM, prompt };
@@ -221,9 +222,20 @@ export function canonical(v) {
 export const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 /** Hash of the plan as stored in plan.json. */
 export const planHash = (plan) => sha256(canonical(plan));
+/** The text a human wrote for the goal (title, description, criteria and their check commands): what "mentioned in the prompt" is judged against. */
+export const goalPromptText = (goal) => [goal.title, goal.description, ...(goal.success_criteria || []).flatMap((c) => [c.text, ...(Array.isArray(c.check?.argv) ? c.check.argv : [])])].filter((x) => typeof x === 'string').join('\n').toLowerCase();
+/** Heuristic, informational: path_scope globs none of whose literal pieces (3+ characters, wildcards removed) appear in the goal text. {beyond_prompt, beyond_paths}. */
+export function beyondPrompt(scope, text) {
+  const beyond = (scope || []).filter((g) => {
+    const pieces = String(g).split(/[/*?{}[\]!,]+/).filter((x) => x.length >= 3);
+    return !pieces.some((x) => text.includes(x.toLowerCase()));
+  });
+  return { beyond_prompt: beyond.length > 0, beyond_paths: beyond };
+}
 /** What a human reviews, per task, in plain text: tier, path scope, allowed commands and the exact check commands. */
-export function reviewView(tasks) {
-  return tasks.map((t) => { const o = t.orch || t; return { id: t.id, title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
+export function reviewView(tasks, goal = null) {
+  const text = goal ? goalPromptText(goal) : null;
+  return tasks.map((t) => { const o = t.orch || t; return { ...(text === null ? {} : beyondPrompt(o.path_scope, text)), id: t.id, title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
     allowed_commands: [...(o.allowed_commands || [])], checks: (o.checks || []).map((c) => ({ command: c.argv.join(' '), argv: c.argv, timeout_s: c.timeout_s })) }; });
 }
 /** Hash of everything the approval covers in the engine's tasks (tier excluded: the retry ladder escalates it legitimately). */
@@ -243,6 +255,7 @@ export function renderReview(view, rulesText) {
   for (const t of view) {
     L.push(`task ${e(t.id)}  tier=${e(t.model_tier)}  scope=${t.path_scope.map(e).join(', ')}${t.depends_on.length ? `  after=${t.depends_on.map(e).join(',')}` : ''}`);
     const block = (label, text) => { const ls = String(text ?? '').slice(0, 2000).split('\n'); ls.forEach((ln, i) => L.push(i ? `    ${ln}` : `  ${label}: ${ln}`)); }; // what the worker is told (covered by the tasks hash)
+    if (t.beyond_prompt) L.push(`  BEYOND THE PROMPT (heuristic, informational): scope ${t.beyond_paths.map(e).join(', ')} is not mentioned in the goal text; check it is intended`);
     if (t.title) block('title', t.title);
     if (t.description) block('description', t.description);
     if (t.output_contract) block('output contract', t.output_contract);

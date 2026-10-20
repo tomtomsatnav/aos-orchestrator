@@ -9,6 +9,7 @@ import { globCompileProblem } from './glob.mjs';
 import { allowlistEntryProblem } from './policy.mjs';
 import { canonical, sha256, UNSAFE_CHECK_CMDS } from './plan.mjs';
 import { DEFAULT_BUDGETS } from './state.mjs';
+import { PROFILES } from './profiles.mjs';
 
 export const RULES_VERSION = 1;
 
@@ -492,14 +493,16 @@ const val = (v) => (v === null || v === undefined ? '(none)' : typeof v === 'obj
  * Human-readable facts about a snapshot, for the approval screens: what the worker may do, the hard limits, and EVERY loosening (and dropped repo loosening)
  * with its layer and id. Pure; `snap` is a rules.snapshot.json (verified by the caller). Plain strings only (no raw rule bodies beyond commands/globs).
  */
-export function summarizeRules(snap, goal = null, profile = null) { // the profile NAME the human chose (goal.orch.profile_name / the draft's): compiled.profile only follows the user layer
+export function summarizeRules(snap, goal = null, profile = null, limitsOverride = null) { // the profile NAME the human chose (goal.orch.profile_name / the draft's): compiled.profile only follows the user layer
   const c = snap?.compiled; const pol = snap?.policy;
   if (!c || !pol) return null;
   const layerLine = (snap.layers || []).map((l) => {
     const dr = (snap.dropped || []).filter((d) => d.layer === l.layer && d.reason === 'loosening').length;
     return `${l.layer}${l.sha256 ? `(${l.sha256.slice(0, 6)}${dr ? `, ${dr} loosening${dr > 1 ? 's' : ''} dropped` : ''})` : ''}`;
   });
-  const lo = (snap.loosenings || []).map((l) => ({ layer: l.layer, rule_id: l.rule_id, path: l.path, change: l.from === null || l.from === undefined ? `+ ${val(l.to)}` : `${val(l.from)} -> ${val(l.to)}` }));
+  const pname = goal?.orch?.profile_name || profile; const pAllow = new Set((PROFILES[pname]?.checks?.allowlist || []).map((e) => e.cmd));
+  // a command the chosen profile itself puts on the check allowlist is expected, not alarming: tagged (still listed, still part of the hash), shown in its own block
+  const lo = (snap.loosenings || []).map((l) => ({ layer: l.layer, rule_id: l.rule_id, path: l.path, ...(l.layer === 'goal' && l.path === 'checks.allowlist' && (l.from === null || l.from === undefined) && pAllow.has(l.to) ? { kind: 'profile_allowlist' } : {}), change: l.from === null || l.from === undefined ? `+ ${val(l.to)}` : `${val(l.from)} -> ${val(l.to)}` }));
   const dr = (snap.dropped || []).map((l) => ({ layer: l.layer, rule_id: l.rule_id, path: l.path, change: l.from === null || l.from === undefined ? `+ ${val(l.to)}` : `${val(l.from)} -> ${val(l.to)}`, reason: l.reason || 'loosening' }));
   return {
     rules_hash: snapshotHash(snap).slice(0, 12), profile: goal?.orch?.profile_name || profile || c.profile, description: c.description, legacy: !!snap.legacy, layers: layerLine,
@@ -508,7 +511,7 @@ export function summarizeRules(snap, goal = null, profile = null) { // the profi
     denies: { bash: [...pol.bash.deny], paths: [...pol.paths.deny], patterns: pol.bash.deny_patterns.length, scope_deny: c.plan.scope_deny.map((e) => e.glob), floor: ['.git', '.claude/settings*.json', '.aos', '~/.claude', '~/.ssh', '~/.config'] },
     checks: { criteria: goal ? (goal.success_criteria || []).filter((x) => Array.isArray(x.check?.argv)).map((x) => x.check.argv.map(q).join(' ')) : [], allowlist: c.checks.allowlist.map((e) => e.cmd), sandbox: c.checks.sandbox, max_timeout_s: c.checks.max_timeout_s, localhost_ports: [...c.checks.localhost_ports] },
     plan: { approval: c.plan.approval, max_tasks: goal ? effectiveLimits(goal).max_tasks : c.plan.max_tasks, tiers: [...c.plan.tiers], max_start_tier: c.plan.max_start_tier },
-    limits: goal ? effectiveLimits(goal) : { max_usd: c.budgets.max_usd, max_new_tokens: c.budgets.max_new_tokens, max_wall_clock_s: c.budgets.max_wall_clock_s, max_ticks: c.budgets.max_ticks, max_attempts: c.retry.max_attempts, max_parallel: c.parallel.max_parallel }, // after a budget patch, what goal.json enforces
+    limits: { ...(goal ? effectiveLimits(goal) : { max_usd: c.budgets.max_usd, max_new_tokens: c.budgets.max_new_tokens, max_wall_clock_s: c.budgets.max_wall_clock_s, max_ticks: c.budgets.max_ticks, max_attempts: c.retry.max_attempts, max_parallel: c.parallel.max_parallel }), ...(limitsOverride || {}) }, // after a budget patch, what goal.json enforces
     loosenings: lo, dropped: dr, notes: [...(snap.notes || [])].slice(0, 10),
   };
 }
@@ -524,8 +527,11 @@ export function renderRulesSummary(sm) {
   L.push(`  checks: ${sm.checks.sandbox === 'required' ? 'sandboxed' : 'NOT sandboxed'}; allowlist: ${sm.checks.allowlist.map(q).join(', ') || '(none)'}${sm.checks.criteria?.length ? `; success-criteria checks (${sm.checks.criteria.length}): ${cmdList(sm.checks.criteria, 6)}` : ''}${sm.checks.localhost_ports.length ? `; localhost ports ${sm.checks.localhost_ports.join(',')}` : ''}; max ${sm.checks.max_timeout_s}s`);
   L.push(`  plan approval: ${sm.plan.approval}; max ${sm.plan.max_tasks} tasks; tiers ${sm.plan.tiers.map(q).join('/')}; start at most ${q(sm.plan.max_start_tier)}`);
   L.push(`  limits: $${sm.limits.max_usd}, ${sm.limits.max_new_tokens} tokens, ${sm.limits.max_wall_clock_s}s, ${sm.limits.max_attempts} attempts/task, ${sm.limits.max_parallel} parallel`);
-  L.push(sm.loosenings.length ? `LOOSENINGS YOU ARE APPROVING (${sm.loosenings.length}):` : 'LOOSENINGS YOU ARE APPROVING: none');
-  for (const l of sm.loosenings) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]`);
+  const prof = sm.loosenings.filter((l) => l.kind === 'profile_allowlist'); const real = sm.loosenings.filter((l) => l.kind !== 'profile_allowlist');
+  L.push(real.length ? `LOOSENINGS YOU ARE APPROVING (${real.length}):` : 'LOOSENINGS YOU ARE APPROVING: none');
+  for (const l of real) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]`);
+  if (prof.length) L.push(`PROFILE ${q(sm.profile)} ADDS TO THE CHECK ALLOWLIST (${prof.length}; expected for this profile, listed for completeness; checks run sandboxed):`);
+  for (const l of prof) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]`);
   if (sm.dropped.length) {
     L.push(`NOT APPLIED (${sm.dropped.length}; a repo's loosenings need --accept-repo-loosening <rule_id>):`);
     for (const l of sm.dropped) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]${l.reason !== 'loosening' ? `  (${q(l.reason)})` : ''}`);

@@ -26,7 +26,7 @@ test('e2e: create over HTTP -> plan -> review -> approve -> runs to completion; 
   const { id, plan } = await createAndPlan(s, sb.repo);
   assert.equal(plan.plan_state, 'awaiting_approval'); assert.match(plan.plan_hash, /^[0-9a-f]{64}$/);
   assert.deepEqual(plan.tasks.map((x) => x.id), ['t1', 't2', 't3']);
-  assert.deepEqual(Object.keys(plan.tasks[1]).sort(), ['acceptance', 'allowed_commands', 'allowed_tools', 'checks', 'depends_on', 'description', 'id', 'output_contract', 'path_scope', 'tier', 'title']);
+  assert.deepEqual(Object.keys(plan.tasks[1]).sort(), ['acceptance', 'allowed_commands', 'allowed_tools', 'beyond_paths', 'beyond_prompt', 'checks', 'depends_on', 'description', 'id', 'output_contract', 'path_scope', 'tier', 'title']);
   assert.match(plan.tasks[0].checks[0].cmd, /^node -e /); assert.equal(plan.tasks[0].checks[0].timeout_s, 30); assert.deepEqual(plan.tasks[1].depends_on, ['t1']);
   let d = await detail(s, id);
   assert.equal(d.status, 'draft'); assert.equal(d.repo_name, 'repo'); assert.equal(d.tasks_total, 3); assert.equal(d.approvals_pending, 0);
