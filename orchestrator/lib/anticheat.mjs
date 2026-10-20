@@ -6,13 +6,16 @@
 //   d) deleted tests      a test file deleted or renamed                                                  -> tests_deleted
 //   e) acceptance tests   files of an `acceptance` task are read-only for every other task                -> acceptance_modified
 //   f) literal copy       expected values of the tests pasted into source lines (heuristic)               -> literal_copy (warn by default)
+//   g) harness tamper     source mentions node:assert / node:test / process.exit ...; at run time the engine preload (lib/harness-preload.mjs) -> harness_tamper
+//   h) weakened tests     a modified test file (or test helper) that drops assertion calls                -> tests_weakened (unless named exactly in path_scope)
 // Findings: {kind, severity: 'fail'|'warn'|'allowed', path?, detail}. 'allowed' = a rule would have fired, a human-approved plan field lets it through.
 import path from 'node:path';
 import { isTestPath } from './protect.mjs';
 import { matchGlob } from './glob.mjs';
 import * as G from './git.mjs';
+import { harnessTamperHits } from './harness-guard.mjs';
 
-export const KINDS = Object.freeze(['vacuous_pass', 'tests_reduced', 'tests_skipped', 'check_config_changed', 'tests_deleted', 'acceptance_modified', 'acceptance_empty', 'literal_copy']);
+export const KINDS = Object.freeze(['vacuous_pass', 'tests_reduced', 'tests_skipped', 'check_config_changed', 'tests_deleted', 'acceptance_modified', 'acceptance_empty', 'literal_copy', 'harness_tamper', 'tests_weakened']);
 export const MAX_FINDINGS = 20;
 
 // ---------------------------------------------------------------- test output
@@ -47,11 +50,16 @@ export function parseTestSummary(text) {
  * Judge one passing check. `summary` = parseTestSummary(output), `baseline` = {tests} for the same check on the base commit.
  * -> {ok, applicable, kind?, reason?}. A node --test check without any summary cannot be counted and is refused; other commands (npm test, make) without one are not judged.
  */
-export function judgeRun(argv, summary, baseline = null) {
+export function judgeRun(argv, summary, baseline = null, { allowSkip = false } = {}) {
   if (!summary) return isNodeTestArgv(argv) ? { ok: false, applicable: true, kind: 'vacuous_pass', reason: 'node --test printed no test summary, so the tests could not be counted' } : { ok: true, applicable: false };
   if (summary.tests <= 0) return { ok: false, applicable: true, kind: 'vacuous_pass', reason: 'the check passed but ran 0 tests' };
   if (summary.pass <= 0) return { ok: false, applicable: true, kind: 'vacuous_pass', reason: `the check passed but no test actually passed (${summary.skipped} skipped, ${summary.todo} todo, ${summary.cancelled} cancelled of ${summary.tests})` };
   if (baseline && baseline.tests > 0 && summary.tests < baseline.tests) return { ok: false, applicable: true, kind: 'tests_reduced', reason: `the check ran ${summary.tests} test(s), fewer than the ${baseline.tests} on the base commit (${baseline.source || 'run'})` };
+  // runtime truth beats the regexes: skips written as `const o = {skip: 1}; test('x', o, f)`, a multi-line `skip:`, `t['skip']()` all show up as skipped/todo in the summary
+  if (!allowSkip && baseline && baseline.source === 'run' && Number.isFinite(baseline.skipped)) {
+    const was = (baseline.skipped || 0) + (baseline.todo || 0); const now = (summary.skipped || 0) + (summary.todo || 0);
+    if (now > was) return { ok: false, applicable: true, kind: 'tests_skipped', reason: `the check reports ${now} skipped/todo test(s), more than the ${was} on the base commit` };
+  }
   return { ok: true, applicable: true };
 }
 export const checkKey = (argv) => argv.join(' ');
@@ -119,9 +127,18 @@ export function skipHits(added) {
   return hits;
 }
 
+// ---------------------------------------------------------------- (h) weakened tests
+const ASSERT_CALL = /(?<![\w$])(?:assert(?:\.(?:strict|\w+))*|t\.assert\.\w+|expect|should|ok|equal|strictEqual|deepEqual|deepStrictEqual|notEqual|throws|rejects|doesNotThrow|match)\s*(?:\(|\.(?:to|not)\b)/g;
+const STRONG_CALL = /(?<![\w$])(?:(?:assert|t\.assert)\.(?:equal|strictEqual|deepEqual|deepStrictEqual|notEqual|notStrictEqual|throws|rejects|match|partialDeepStrictEqual|snapshot)|expect\s*\([^)]*\)\s*\.(?:toBe|toEqual|toStrictEqual|toMatch|toThrow|toHaveLength|toContain))\s*\(/g;
+const countRe = (lines, re) => { let n = 0; for (const l of lines) { if (/^\s*(?:\/\/|\*|\/\*|#)/.test(l)) continue; n += (l.match(re) || []).length; } return n; };
+/** Assertion calls removed vs added by a diff of one test file. -> {total, strong} drops (positive = weaker). Counts, not semantics: changing an expected value in place is NOT seen. */
+export function assertionDrop(f) {
+  return { total: countRe(f.removed, ASSERT_CALL) - countRe(f.added, ASSERT_CALL), strong: countRe(f.removed, STRONG_CALL) - countRe(f.added, STRONG_CALL) };
+}
+
 // ---------------------------------------------------------------- (c) config
-export const CONFIG_BASENAME = /^(?:\.mocharc(?:\..+)?|jest\.config\..+|vitest\.config\..+|vitest\.workspace\..+|\.c8rc(?:\..+)?|\.nycrc(?:\..+)?|\.npmrc|ava\.config\..+|karma\.conf\..+|playwright\.config\..+|pytest\.ini|tox\.ini|setup\.cfg|conftest\.py|node\.config\.json|\.node-test-runner(?:\..+)?)$/;
-export const PKG_KEYS = ['scripts', 'jest', 'mocha', 'c8', 'nyc', 'ava', 'vitest', 'imports'];
+export const CONFIG_BASENAME = /^(?:\.mocharc(?:\..+)?|jest\.config\..+|vitest\.config\..+|vitest\.workspace\..+|\.c8rc(?:\..+)?|\.nycrc(?:\..+)?|\.npmrc|ava\.config\..+|karma\.conf\..+|playwright\.config\..+|pytest\.ini|tox\.ini|setup\.cfg|conftest\.py|node\.config\.json|\.node-test-runner(?:\..+)?|\.taprc|tsconfig(?:\..+)?\.json|jsconfig(?:\..+)?\.json)$/;
+export const PKG_KEYS = ['scripts', 'jest', 'mocha', 'c8', 'nyc', 'ava', 'vitest', 'imports', 'exports', 'type'];
 export const isConfigPath = (rel) => { const b = base(rel); return b === 'package.json' || CONFIG_BASENAME.test(b); };
 const norm = (p) => String(p).replace(/^\.\//, '').replace(/\/+$/, '');
 /** Files the check commands read to decide what to run: script/dir arguments that are not test files themselves, plus the Makefile for `make`. */
@@ -130,6 +147,13 @@ export function checkInputPaths(argvs) {
   for (const argv of argvs || []) {
     if (!Array.isArray(argv)) continue;
     if (base(argv[0]) === 'make') { out.add('Makefile'); out.add('makefile'); out.add('GNUmakefile'); }
+    const LOADERS = new Set(['--import', '--require', '-r', '--loader', '--experimental-loader', '--env-file']);
+    for (let i = 1; i < argv.length; i++) { // `--import ./x.mjs` / `--import=./x.mjs`: code or config the runner loads before the tests, a config input even under test/
+      const a = argv[i]; let v = null;
+      if (typeof a !== 'string') continue;
+      if (LOADERS.has(a) && typeof argv[i + 1] === 'string') v = argv[i + 1]; else { const m = /^(--import|--require|--loader|--experimental-loader|--env-file)=(.+)$/.exec(a); if (m) v = m[2]; }
+      if (v && !v.startsWith('/') && !v.split('/').includes('..') && !/^(?:node:|data:|file:)/.test(v) && !/\s/.test(v)) out.add(norm(v));
+    }
     for (const a of argv.slice(1)) {
       if (typeof a !== 'string' || a.startsWith('-') || a.startsWith('/') || a.split('/').includes('..') || /\s/.test(a)) continue;
       if (/\.(?:m?js|cjs|ts|py|sh|json|rb)$/.test(a) || a.endsWith('/') || a.includes('/')) { const n = norm(a); if (n && !isTestPath(n)) out.add(n); }
@@ -201,6 +225,11 @@ export async function analyzeDiff(files, ctx, io) {
       const hits = skipHits(f.added);
       if (hits.length) add('tests_skipped', allow.length ? 'allowed' : 'fail', f.path, `${hits.slice(0, 3).map((h) => `${h.what}: ${h.line}`).join(' | ')}${allow.length ? ` (plan allow_skip: ${allow.join('; ').slice(0, 100)})` : ''}`);
     }
+    // (h) a modified test file or test helper (anything isTestPath covers: *.test.*, test/ directories) that loses assertion calls
+    if ((f.status === 'M' || f.status === 'R') && isTestPath(f.path) && /\.(?:m?js|cjs|jsx|tsx?)$/.test(f.path)) {
+      const d = assertionDrop(f);
+      if (d.total > 0 || d.strong > 0) add('tests_weakened', explicitInScope(ctx.path_scope, f.path) ? 'allowed' : 'fail', f.path, `assertion calls dropped (${d.total > 0 ? `${d.total} fewer in total` : ''}${d.total > 0 && d.strong > 0 ? ', ' : ''}${d.strong > 0 ? `${d.strong} fewer value comparisons` : ''})${explicitInScope(ctx.path_scope, f.path) ? ' (file named in path_scope, approved with the plan)' : ' (file not named in path_scope)'}`);
+    }
     // (c) test configuration
     {
       let why = null;
@@ -217,6 +246,8 @@ export async function analyzeDiff(files, ctx, io) {
       if (p && (acc.files.includes(p) || (acc.scopes || []).some((g) => { try { return matchGlob(g, p); } catch { return false; } }))) { add('acceptance_modified', 'fail', p, 'acceptance tests are read-only for implementation tasks'); break; }
     }
   }
+  // (g) the code under test mentions the test harness's internals (node:assert / node:test / process.exit ...): no legitimate reason in non-test source
+  for (const h of harnessTamperHits(files, isTestPath)) add('harness_tamper', ctx.harness_tamper === 'warn' ? 'warn' : 'fail', h.path, `new source line touches the test harness: ${h.line}`);
   // (f) literal copy
   const lc = ctx.literal_copy || 'warn';
   const needTests = files.some((f) => f.status !== 'D' && f.added.length && !isTestPath(f.path) && SRC_EXT.test(f.path));

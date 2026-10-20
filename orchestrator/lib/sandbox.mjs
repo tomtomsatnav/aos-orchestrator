@@ -55,7 +55,7 @@ export function buildProfile({ ports = 0, loopback = false } = {}) {
     '(allow process-exec*)', '(allow process-fork)', '(allow signal (target self))',
     '(allow sysctl-read)', '(allow file-read-metadata)', '(allow file-ioctl)', '(allow ipc-posix-shm*)', '(allow mach-lookup)',
     `(allow file-read* ${SYSTEM_READ.map((p) => `(subpath "${p}")`).join(' ')} (literal "/"))`,
-    '(allow file-read* (subpath (param "NODE_PREFIX")) (subpath (param "WORKTREE")) (subpath (param "TMPDIR_CHECK")) (subpath (param "TOOL_CACHE")))',
+    '(allow file-read* (subpath (param "NODE_PREFIX")) (subpath (param "WORKTREE")) (subpath (param "TMPDIR_CHECK")) (subpath (param "TOOL_CACHE")) (subpath (param "GUARD_DIR")))', // GUARD_DIR: the engine's read-only test-harness preload (harness-guard.mjs)
     '(allow file-read* (subpath (param "DEV_DIR0")) (subpath (param "DEV_DIR1")))',
     '(allow file-read* file-write* (subpath (param "WORKTREE")) (subpath (param "TMPDIR_CHECK")))',
     '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))',
@@ -232,7 +232,7 @@ export function wrapCommand(argv, cfg) {
   const toolCache = cfg.toolCache || path.join(os.homedir(), '.npm');
   const params = {
     WORKTREE: realDeepest(cfg.worktree), TMPDIR_CHECK: realDeepest(cfg.tmpDir), GOAL_DIR: cfg.goalDir ? realDeepest(cfg.goalDir) : none, ORCH_DIR: cfg.orchDir ? realDeepest(cfg.orchDir) : none,
-    HOME0: home0, HOME1: home1, NODE_PREFIX: nodePrefix, TOOL_CACHE: realDeepest(toolCache), ...devParams(cfg),
+    HOME0: home0, HOME1: home1, NODE_PREFIX: nodePrefix, TOOL_CACHE: realDeepest(toolCache), GUARD_DIR: cfg.extraRead ? realDeepest(cfg.extraRead) : none, ...devParams(cfg),
   };
   ports.forEach((p, i) => { params[`PORT${i}`] = String(p); });
   const args = ['-f', file];
@@ -274,6 +274,7 @@ function wrapBwrap(argv, cfg) {
   if (nodePrefix !== '/' && !covered(nodePrefix) && fs.existsSync(nodePrefix)) args.push('--ro-bind', nodePrefix, nodePrefix);
   const toolCache = cfg.toolCache || path.join(os.homedir(), '.npm');
   if (fs.existsSync(toolCache)) args.push('--ro-bind', realDeepest(toolCache), realDeepest(toolCache));
+  if (cfg.extraRead && fs.existsSync(cfg.extraRead)) args.push('--ro-bind', realDeepest(cfg.extraRead), realDeepest(cfg.extraRead)); // the engine's read-only test-harness preload
   args.push('--bind', wt, wt);
   // things that must stay invisible even if the worktree contains or equals them (macOS profile: explicit denies after the allows)
   const hidden = new Set();

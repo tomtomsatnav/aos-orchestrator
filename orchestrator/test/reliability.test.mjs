@@ -187,9 +187,12 @@ test('protect: a task that weakens an existing test cannot achieve the goal (the
   assert.equal(goalOf(ok.dir).status, 'achieved'); assert.equal(goalOf(ok.dir).orch.protected_result.ok, true); assert.equal(goalOf(ok.dir).orch.protected_result.files, 1);
 });
 
-test('protect: off unless the rule is on (default false); a goal with it off has no snapshot', async (t) => {
+test('protect: ON by default (tightened in the harness-guard release); a goal that turns it off via a rule has no snapshot', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup()); withTests(sb);
-  const { goal } = await sb.goal({ success_criteria: [crit('b.txt', 'beta')], plan: onePlan(ptask('t1', 'b.txt', 'beta')) });
+  const on = await sb.goal({ success_criteria: [crit('b.txt', 'beta')], plan: onePlan(ptask('t1', 'b.txt', 'beta')) });
+  assert.deepEqual(on.goal.orch.protected_tests.files, ['test/pricing.test.mjs']);
+  const sb2 = mkSandbox(); t.after(() => sb2.cleanup()); withTests(sb2);
+  const { goal } = await sb2.goal({ orch: { rules: { rules_version: 1, checks: { protect_existing_tests: false } } }, success_criteria: [crit('b.txt', 'beta')], plan: onePlan(ptask('t1', 'b.txt', 'beta')) });
   assert.equal(goal.orch.protected_tests, undefined);
 });
 
