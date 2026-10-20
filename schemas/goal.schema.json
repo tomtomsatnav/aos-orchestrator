@@ -21,7 +21,7 @@
       "type": "object",
       "properties": {
         "max_ticks": { "type": "integer", "minimum": 1 },
-        "max_usd": { "type": "number", "minimum": 0 },
+        "max_usd": { "type": "number", "exclusiveMinimum": 0 },
         "max_wall_clock_s": { "type": "number", "minimum": 1 }
       }
     },

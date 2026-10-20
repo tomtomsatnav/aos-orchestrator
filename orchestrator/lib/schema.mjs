@@ -22,6 +22,7 @@ export function validateSchema(value, schema, at = '$', errs = []) {
   if (schema.enum && !schema.enum.some((e) => JSON.stringify(e) === JSON.stringify(value))) errs.push(`${at}: ${JSON.stringify(value)} not in enum`);
   if (schema.pattern !== undefined && typeof value === 'string' && !new RegExp(schema.pattern).test(value)) errs.push(`${at}: "${value}" !~ /${schema.pattern}/`);
   if (schema.minimum !== undefined && typeof value === 'number' && value < schema.minimum) errs.push(`${at}: ${value} < ${schema.minimum}`);
+  if (schema.exclusiveMinimum !== undefined && typeof value === 'number' && value <= schema.exclusiveMinimum) errs.push(`${at}: ${value} <= ${schema.exclusiveMinimum}`);
   if (schema.maximum !== undefined && typeof value === 'number' && value > schema.maximum) errs.push(`${at}: ${value} > ${schema.maximum}`);
   if (schema.maxLength !== undefined && typeof value === 'string' && value.length > schema.maxLength) errs.push(`${at}: longer than ${schema.maxLength} characters`);
   if (schema.maxItems !== undefined && Array.isArray(value) && value.length > schema.maxItems) errs.push(`${at}: more than ${schema.maxItems} item(s)`);

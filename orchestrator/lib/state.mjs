@@ -227,13 +227,14 @@ export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
     if (c.check && (!Array.isArray(c.check.argv) || !c.check.argv.length || !(c.check.timeout_s > 0))) throw new Error(`criterion ${c.id}: check needs argv[] and timeout_s > 0`);
   }
   const budget = { max_ticks: 500, max_usd: 5, max_wall_clock_s: 7200, ...(spec.budget || {}) };
-  if (!(budget.max_ticks >= 1) || !(budget.max_wall_clock_s >= 1) || !(budget.max_usd >= 0)) throw new Error('goal.budget is invalid (mandatory per SPEC section 7)');
+  if (!(budget.max_ticks >= 1) || !(budget.max_wall_clock_s >= 1) || !(budget.max_usd > 0)) throw new Error('goal.budget is invalid (mandatory per SPEC section 7)');
   const ports = o.check_localhost_ports ?? [];
   if (!Array.isArray(ports) || ports.length > 16 || ports.some((x) => !Number.isInteger(x) || x < 1 || x > 65535)) throw new Error('goal.orch.check_localhost_ports must be an array of up to 16 ports (1-65535)');
   for (const k of ['trust_repo_config', 'unsandboxed_checks', 'sandbox_workers']) if (o[k] !== undefined && typeof o[k] !== 'boolean') throw new Error(`goal.orch.${k} must be a boolean`);
   if (o.accept_repo_loosening !== undefined && (!Array.isArray(o.accept_repo_loosening) || o.accept_repo_loosening.length > 64 || o.accept_repo_loosening.some((x) => typeof x !== 'string' || !x || x.length > 200))) throw new Error('goal.orch.accept_repo_loosening must be an array of up to 64 rule ids');
   if (o.drafted !== undefined && !(o.drafted && typeof o.drafted === 'object' && !Array.isArray(o.drafted) && ['haiku', 'sonnet', 'opus'].includes(o.drafted.tier))) throw new Error('goal.orch.drafted must be {tier: "haiku"|"sonnet"|"opus"}');
   if (o.rules !== undefined && (!o.rules || typeof o.rules !== 'object' || Array.isArray(o.rules))) throw new Error('goal.orch.rules must be an object (a rules layer)');
+  if (o.profile_name !== undefined && !['strict', 'node-library', 'docs-only'].includes(o.profile_name)) throw new Error('goal.orch.profile_name must be strict, node-library or docs-only');
   const approval = { plan: 'required', outside_allowlist: 'ask', dangerous: 'deny', ...(o.approval_policy || {}) };
   if (o.plan_approval !== undefined) approval.plan = o.plan_approval; // documented alias: orch.plan_approval
   if (!['required', 'auto'].includes(approval.plan)) throw new Error('goal plan approval must be "required" or "auto"');
@@ -251,6 +252,7 @@ export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
       policy: o.policy || 'policy.default.json',
       // the spec's `orch.rules` (a rules layer) is stored as rules_layer: orch.rules is the snapshot summary the engine writes (docs/rules-design.md, Implementation notes)
       ...(o.rules !== undefined ? { rules_layer: o.rules } : {}),
+      ...(o.profile_name !== undefined ? { profile_name: o.profile_name } : {}),
       ...(o.drafted !== undefined ? { drafted: { tier: o.drafted.tier } } : {}),
       ...(o.accept_repo_loosening !== undefined ? { accept_repo_loosening: o.accept_repo_loosening } : {}),
       check_allowlist: o.check_allowlist || null,
@@ -282,7 +284,7 @@ export function checkTasks(tasks) {
 }
 
 // ---------------------------------------------------------------- budget patches (control server / supervisor)
-export const BUDGET_LIMITS = { max_new_tokens: [1, 1e10], max_wall_s: [1, 31536000], max_parallel: [1, 16], max_attempts: [1, 10], max_usd: [0, 10000], max_ticks: [1, 1e7] };
+export const BUDGET_LIMITS = { max_new_tokens: [1, 1e10], max_wall_s: [1, 31536000], max_parallel: [1, 16], max_attempts: [1, 10], max_usd: [0.0001, 10000], max_ticks: [1, 1e7] };
 
 /** Strict validation of a budget patch: known keys only, integers (max_usd may be fractional) inside closed ranges. */
 export function validateBudgetPatch(patch) {

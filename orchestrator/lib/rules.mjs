@@ -56,6 +56,7 @@ const obj = (properties, extra = {}) => ({ type: 'object', additionalProperties:
 const str = (maxLength = 200) => ({ type: 'string', maxLength });
 const int = (minimum, maximum) => ({ type: 'integer', minimum, maximum });
 const num = (minimum, maximum) => ({ type: 'number', minimum, maximum });
+const pos = (maximum) => ({ type: 'number', exclusiveMinimum: 0, maximum }); // a cap: 0 would read as "unlimited" to a careless consumer, so it is not allowed
 const ID = { type: 'string', pattern: '^[a-z0-9][a-z0-9._-]{0,47}$' };
 const list = (items, maxItems = 128) => ({ type: 'array', maxItems, items });
 const enums = (...e) => ({ enum: e });
@@ -75,8 +76,8 @@ export const RULES_SCHEMA = obj({
     tiers: { ...list(enums(...TIER), 3), minItems: 1 }, max_start_tier: enums(...TIER), scope_deny: globRules, auto_approvable_checks: cmdRules }),
   checks: obj({ allowlist: cmdRules, max_timeout_s: int(1, 3600), sandbox: enums('required', 'off'), localhost_ports: list(int(1, 65535), 16) }),
   retry: obj({ max_attempts: int(1, 10), ladder: { ...list(enums(...TIER), 3), minItems: 1 }, same_tier_retries: { type: 'object' }, no_escalate: list(str(48), 32), uncertain_limit_max: int(1, 5) }),
-  budgets: obj({ max_new_tokens: int(1, 1e10), max_wall_clock_s: int(1, 31536000), max_ticks: int(1, 1e7), max_usd: num(0, 10000), attempt_usd_cap: num(0, 10000), task_wall_clock_s: int(1, 86400),
-    stall_after_s: int(1, 86400), max_turns: int(1, 1000), soft_frac: num(0, 1), hard_grace_s: int(0, 3600), draft_usd_cap: num(0, 100) }),
+  budgets: obj({ max_new_tokens: int(1, 1e10), max_wall_clock_s: int(1, 31536000), max_ticks: int(1, 1e7), max_usd: pos(10000), attempt_usd_cap: pos(10000), task_wall_clock_s: int(1, 86400),
+    stall_after_s: int(1, 86400), max_turns: int(1, 1000), soft_frac: num(0, 1), hard_grace_s: int(0, 3600), draft_usd_cap: pos(100) }),
   governor: obj({ reserve_5h: num(0, 1), hold_7d: num(0, 1), jitter_s: int(0, 3600), backoff_min: list(num(0, 100000), 16), overload_backoff_s: list(num(0, 100000), 16) }),
   parallel: obj({ max_parallel: int(1, 16), overlapping_scopes: enums('serialize'), soft_budget_blocks_tier: enums('opus', 'none') }),
   merge: obj({ strategy: enums('no-ff'), on_conflict: enums('retry_counted', 'fail') }),
@@ -491,7 +492,7 @@ const val = (v) => (v === null || v === undefined ? '(none)' : typeof v === 'obj
  * Human-readable facts about a snapshot, for the approval screens: what the worker may do, the hard limits, and EVERY loosening (and dropped repo loosening)
  * with its layer and id. Pure; `snap` is a rules.snapshot.json (verified by the caller). Plain strings only (no raw rule bodies beyond commands/globs).
  */
-export function summarizeRules(snap, goal = null) {
+export function summarizeRules(snap, goal = null, profile = null) { // the profile NAME the human chose (goal.orch.profile_name / the draft's): compiled.profile only follows the user layer
   const c = snap?.compiled; const pol = snap?.policy;
   if (!c || !pol) return null;
   const layerLine = (snap.layers || []).map((l) => {
@@ -501,7 +502,7 @@ export function summarizeRules(snap, goal = null) {
   const lo = (snap.loosenings || []).map((l) => ({ layer: l.layer, rule_id: l.rule_id, path: l.path, change: l.from === null || l.from === undefined ? `+ ${val(l.to)}` : `${val(l.from)} -> ${val(l.to)}` }));
   const dr = (snap.dropped || []).map((l) => ({ layer: l.layer, rule_id: l.rule_id, path: l.path, change: l.from === null || l.from === undefined ? `+ ${val(l.to)}` : `${val(l.from)} -> ${val(l.to)}`, reason: l.reason || 'loosening' }));
   return {
-    rules_hash: snapshotHash(snap).slice(0, 12), profile: c.profile, description: c.description, legacy: !!snap.legacy, layers: layerLine,
+    rules_hash: snapshotHash(snap).slice(0, 12), profile: goal?.orch?.profile_name || profile || c.profile, description: c.description, legacy: !!snap.legacy, layers: layerLine,
     worker: { tools: [...pol.tools.allow], bash_allow: [...pol.bash.allow], read_extra: [...(pol.paths.read_extra || [])], on_outside_scope: pol.paths.on_outside_scope, sandbox: c.worker.sandbox,
       ask_on: [...pol.bash.ask_on], approval_wait_s: pol.approval.wait_in_hook_s, approval_ttl_s: pol.approval.ttl_s },
     denies: { bash: [...pol.bash.deny], paths: [...pol.paths.deny], patterns: pol.bash.deny_patterns.length, scope_deny: c.plan.scope_deny.map((e) => e.glob), floor: ['.git', '.claude/settings*.json', '.aos', '~/.claude', '~/.ssh', '~/.config'] },

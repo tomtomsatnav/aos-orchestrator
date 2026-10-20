@@ -8,7 +8,7 @@ import { loginPage } from './login-page.mjs';
 import { goalSummary, goalDetail, planView, approvalView, eventView, scrub, scrubDeep } from './views.mjs';
 import { SupervisorError, validateRepo } from '../lib/supervisor.mjs';
 import { ID_RE, readEvents, goalDirOf, readJSON, paths } from '../lib/state.mjs';
-import { draftGoal, draftRules, checkProblem, PROFILES } from '../lib/draft.mjs';
+import { draftGoal, draftRules, checkProblem, PROFILES, profileRulesForApi, MAX_PROMPT } from '../lib/draft.mjs';
 
 export const SERVER_VERSION = '0.3.0';
 export const DEFAULT_PORT = 4319;
@@ -143,20 +143,21 @@ export function createControlServer(opts) {
         p.success_criteria.forEach((c, i) => { const why = c.check ? checkProblem(c.check, plus) : null; if (why) throw new HttpError(422, 'criterion_refused', scrub(`success_criteria[${i}].check: ${why}`).slice(0, 500)); });
       }
       const id = `g-${new Date(clock.now()).toISOString().slice(0, 10).replace(/-/g, '')}-${slug(p.title)}-${Math.random().toString(16).slice(2, 6)}`;
+      const pr = profileRulesForApi(p.profile);
       const spec = { id, title: p.title, description: p.description, success_criteria: p.success_criteria,
         budget: { max_ticks: 100000, max_usd: 5, max_wall_clock_s: p.budgets.max_wall_s ?? 7200 },
-        orch: { repo: root, base_branch: p.base_branch, trust_repo_config: p.trust_repo_config, ...(p.profile && PROFILES[p.profile] ? { rules: PROFILES[p.profile] } : {}), ...(p.drafted ? { drafted: p.drafted } : {}), unsandboxed_checks: p.unsandboxed_checks, plan_approval: 'required',
+        orch: { repo: root, base_branch: p.base_branch, trust_repo_config: p.trust_repo_config, approval_policy: { plan: 'required' }, ...(p.profile ? { profile_name: p.profile } : {}), ...(pr.rules ? { rules: pr.rules } : {}), ...(p.drafted ? { drafted: p.drafted } : {}), unsandboxed_checks: p.unsandboxed_checks, plan_approval: 'required',
           ...(p.check_allowlist ? { check_allowlist: p.check_allowlist } : {}),
           budgets: Object.fromEntries(['max_new_tokens', 'max_parallel', 'max_attempts'].filter((k) => p.budgets[k] !== undefined).map((k) => [k, p.budgets[k]])) } };
       let made;
       try { made = await sup.createGoal(spec); } catch (e) { throw new HttpError(422, 'goal_refused', scrub(String(e.message)).slice(0, 1500)); }
-      aud(c, made.goal.id, 'goal.create', { title: p.title.slice(0, 100), trust_repo_config: p.trust_repo_config, unsandboxed_checks: p.unsandboxed_checks });
-      return [201, { goal: goalDetail(sup, made.goal.id), notices: made.notices.map(scrub) }];
+      aud(c, made.goal.id, 'goal.create', { title: p.title.slice(0, 100), trust_repo_config: p.trust_repo_config, unsandboxed_checks: p.unsandboxed_checks, ...(pr.note ? { note: pr.note.slice(0, 200) } : {}) });
+      return [201, { goal: goalDetail(sup, made.goal.id), notices: [...(pr.note ? [pr.note] : []), ...made.notices.map(scrub)] }];
     }],
     // R12: a draft is a PROPOSAL. This route never creates a goal (only an explicit POST /api/goals does); it is authenticated like goal creation and rate-limited per session.
     ['POST', '/api/goals/draft', async (c) => {
       if (!isObj(c.body)) throw bad('body must be a JSON object'); exact(c.body, ['prompt', 'repo', 'profile'], 'draft');
-      const prompt = str(c.body.prompt, 'prompt', 1, 6000); const repo = str(c.body.repo, 'repo', 1, 1024);
+      const prompt = str(c.body.prompt, 'prompt', 1, MAX_PROMPT); const repo = str(c.body.repo, 'repo', 1, 1024);
       let profile = 'strict'; if (c.body.profile !== undefined) { if (typeof c.body.profile !== 'string' || !Object.hasOwn(PROFILES, c.body.profile)) throw bad('profile must be one of strict, node-library, docs-only'); profile = c.body.profile; }
       const who = auth.auditId(c.principal); const now = clock.now();
       const recent = (draftHits.get(who) || []).filter((t) => now - t < 60000);

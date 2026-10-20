@@ -26,6 +26,8 @@ export function resolveBin(bin, PATH = '') {
 /** Exact argv (after the binary) per the design. Every flag is spike-verified (rows 1a-1d, 8e). */
 export function buildArgs({ prompt, tier, sessionId, maxTurns = 30, maxBudgetUsd = 2, tools = WORKER_TOOLS, allowedTools = READ_ONLY_TOOLS,
   appendSystemPrompt = WORKER_RULES, settingsFile }) {
+  if (!(Number(maxBudgetUsd) > 0)) throw new Error('--max-budget-usd must be > 0 (0 would not cap the spend)');
+  if (!(Number(maxTurns) > 0)) throw new Error('--max-turns must be > 0');
   return ['-p', prompt, '--model', tier, '--output-format', 'stream-json', '--verbose', '--session-id', sessionId,
     '--max-turns', String(maxTurns), '--max-budget-usd', String(maxBudgetUsd), '--setting-sources', 'project',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', tools, '--allowedTools', allowedTools,

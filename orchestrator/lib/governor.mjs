@@ -168,7 +168,7 @@ export function checkBudgets(goal, { nowMs, seq, inflightTokens = 0, softFrac = 
   const used = (o.usage.new_tokens || 0) + inflightTokens;
   const wall = o.started_ms ? (nowMs - o.started_ms) / 1000 : 0;
   const out = { soft: [], hard: [] };
-  const frac = (x, cap) => (cap > 0 ? x / cap : 0);
+  const frac = (x, cap) => (cap > 0 ? x / cap : Infinity); // a cap of 0 (or less) means "nothing allowed", never "unlimited"
   if (Number.isFinite(B.max_new_tokens)) {
     if (frac(used, B.max_new_tokens) >= 1) out.hard.push(`new-token cap reached (${used} >= ${B.max_new_tokens})`);
     else if (frac(used, B.max_new_tokens) >= softFrac) out.soft.push(`new tokens at ${Math.round(softFrac * 100)}% of the cap`);
@@ -177,7 +177,7 @@ export function checkBudgets(goal, { nowMs, seq, inflightTokens = 0, softFrac = 
     if (frac(wall, b.max_wall_clock_s) >= 1) out.hard.push(`wall-clock cap reached (${Math.round(wall)}s >= ${b.max_wall_clock_s}s)`);
     else if (frac(wall, b.max_wall_clock_s) >= softFrac) out.soft.push(`wall clock at ${Math.round(softFrac * 100)}% of the cap`);
   }
-  if (Number.isFinite(b.max_ticks) && seq > b.max_ticks) out.hard.push(`tick budget exceeded (${seq} > ${b.max_ticks})`);
-  if (Number.isFinite(b.max_usd) && b.max_usd > 0 && (o.usage.notional_usd || 0) >= b.max_usd) out.hard.push(`notional USD cap reached ($${(o.usage.notional_usd).toFixed(4)} >= $${b.max_usd})`);
+  if (Number.isFinite(b.max_ticks) && (seq > b.max_ticks || b.max_ticks <= 0)) out.hard.push(`tick budget exceeded (${seq} > ${b.max_ticks})`);
+  if (Number.isFinite(b.max_usd) && ((o.usage.notional_usd || 0) >= b.max_usd || b.max_usd <= 0)) out.hard.push(`notional USD cap reached ($${(o.usage.notional_usd).toFixed(4)} >= $${b.max_usd})`);
   return out;
 }

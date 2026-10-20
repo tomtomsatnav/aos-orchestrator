@@ -361,9 +361,9 @@ export class Engine {
     const snap = buildSnapshot({ policy: this._effectivePolicy(goal, file, over), legacy,
       layers: [{ layer: 'policy-file', source: typeof o.policy === 'string' ? o.policy : null, sha256: file ? sha256(canonical(file)) : null }, { layer: 'goal-policy', source: null, sha256: over ? sha256(canonical(over)) : null }] });
     atomicWrite(this.P.rules, snap);
-    o.rules = { hash: snap.rules_hash.slice(0, 12), sha256: snap.rules_hash, version: snap.rules_version, profile: snap.compiled.profile, legacy,
+    o.rules = { hash: snap.rules_hash.slice(0, 12), sha256: snap.rules_hash, version: snap.rules_version, profile: snap.compiled.profile, profile_name: o.profile_name || snap.compiled.profile, legacy,
       layers: snap.layers.map((l) => ({ layer: l.layer, sha12: l.sha256 ? l.sha256.slice(0, 12) : null })), loosenings: [] };
-    this.ev('orch.rules.snapshotted', 'orchestrator', null, { rules_hash: o.rules.hash, profile: o.rules.profile, legacy, loosenings: 0 });
+    this.ev('orch.rules.snapshotted', 'orchestrator', null, { rules_hash: o.rules.hash, profile: o.rules.profile_name, legacy, loosenings: 0 });
     saveState(this.dir, S);
   }
 
@@ -378,7 +378,7 @@ export class Engine {
       saveState(this.dir, S); return;
     }
     this._storeSnapshot(S, r.snap);
-    this.ev('orch.rules.snapshotted', 'orchestrator', null, { rules_hash: o.rules.hash, profile: o.rules.profile, legacy: false, loosenings: r.snap.loosenings.length, dropped: r.snap.dropped.length, notes: r.snap.notes.slice(0, 5) });
+    this.ev('orch.rules.snapshotted', 'orchestrator', null, { rules_hash: o.rules.hash, profile: o.rules.profile_name, legacy: false, loosenings: r.snap.loosenings.length, dropped: r.snap.dropped.length, notes: r.snap.notes.slice(0, 5) });
     const dep = r.snap.notes.filter((n) => n.startsWith('deprecated: '));
     if (dep.length) this.ev('orch.rules.deprecated', 'orchestrator', null, { notes: dep.slice(0, 10) });
     saveState(this.dir, S);
@@ -389,7 +389,7 @@ export class Engine {
     const o = S.goal.orch;
     applyCompiledToGoal(S.goal, snap.compiled, prev);
     atomicWrite(this.P.rules, snap);
-    o.rules = { hash: snap.rules_hash.slice(0, 12), sha256: snap.rules_hash, version: snap.rules_version, profile: snap.compiled.profile, legacy: false,
+    o.rules = { hash: snap.rules_hash.slice(0, 12), sha256: snap.rules_hash, version: snap.rules_version, profile: snap.compiled.profile, profile_name: o.profile_name || snap.compiled.profile, legacy: false,
       layers: snap.layers.map((l) => ({ layer: l.layer, sha12: l.sha256 ? l.sha256.slice(0, 12) : null })),
       loosenings: snap.loosenings.map((l) => ({ rule_id: l.rule_id, layer: l.layer })), dropped: snap.dropped.map((l) => ({ rule_id: l.rule_id, layer: l.layer, reason: l.reason })) };
   }
