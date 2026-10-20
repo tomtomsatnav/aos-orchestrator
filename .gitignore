@@ -9,3 +9,6 @@ node_modules/
 # local scratch
 .playwright-mcp/
 tmp/
+
+# eval output
+evals/results/
