@@ -3,6 +3,8 @@
 import path from 'node:path';
 import { loadState, loadHeartbeat, readEvents, paths, goalDirOf } from '../lib/state.mjs';
 import { listApprovals } from '../lib/approvals.mjs';
+import { renderRulesSummary } from '../lib/rules.mjs';
+import { readRulesSummary } from '../lib/rules-store.mjs';
 
 // absolute-path-looking token (leading slash, at least one more segment) -> its basename
 const PATH_RE = /(?<![\w.:/~-])\/(?:[^\s/"'`<>|;,()\\]+\/)+[^\s/"'`<>|;,()\\]*/g;
@@ -68,9 +70,11 @@ export function goalDetail(sup, id) {
 }
 
 export function planView(sup, id) {
-  const { S } = sup.state(id);
+  const { S, dir } = sup.state(id);
   const h = sup.reviewHash(id);
-  return { plan_state: S.goal.orch.plan_state, plan_hash: h ? h.combined : null,
+  // additive: what the human approves besides the tasks (profile, key allows/denies, limits, EVERY loosening with its layer); rules_text is the same as the CLI prints it
+  const rs = readRulesSummary(dir, S.goal);
+  return { plan_state: S.goal.orch.plan_state, plan_hash: h ? h.combined : null, rules: rs ? scrubDeep(rs) : null, rules_text: rs && !rs.tampered ? scrub(renderRulesSummary(rs)) : null,
     tasks: S.tasks.map((t) => ({ id: t.id, title: t.title, tier: t.orch.model_tier, depends_on: t.depends_on, path_scope: t.orch.path_scope,
       allowed_commands: t.orch.allowed_commands || [], checks: (t.orch.checks || []).map((c) => ({ cmd: cmdText(c.argv), argv: c.argv, timeout_s: c.timeout_s })),
       allowed_tools: t.orch.allowed_tools || [] })) };

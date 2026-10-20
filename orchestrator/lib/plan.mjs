@@ -209,13 +209,14 @@ export function tasksHash(tasks) {
   return sha256(canonical(tasks.map((t) => { const o = t.orch || t; return { id: t.id, depends_on: t.depends_on || [], path_scope: o.path_scope, allowed_commands: o.allowed_commands || [],
     allowed_tools: o.allowed_tools || null, checks: (o.checks || []).map((c) => ({ argv: c.argv, timeout_s: c.timeout_s })) }; })));
 }
-/** Plain-text rendering of reviewView for `status` / `approvals`. */
-export function renderReview(view) {
+/** Plain-text rendering of reviewView for `status` / `approvals` / `approve-plan`. `rulesText` (rules-store renderRulesFor) is printed after the tasks, next to the rules hash. */
+export function renderReview(view, rulesText) {
   const L = [];
   for (const t of view) {
     L.push(`task ${t.id}  tier=${t.model_tier}  scope=${t.path_scope.join(', ')}${t.depends_on.length ? `  after=${t.depends_on.join(',')}` : ''}`);
     L.push(`  worker commands: ${t.allowed_commands.length ? t.allowed_commands.join(' | ') : '(none; read-only inspection only)'}`);
     for (const c of t.checks) L.push(`  check (sandboxed, ${c.timeout_s}s): ${c.argv.map((a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : JSON.stringify(a))).join(' ')}`);
   }
+  if (rulesText) L.push(rulesText);
   return L.join('\n');
 }

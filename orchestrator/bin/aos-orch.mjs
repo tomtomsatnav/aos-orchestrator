@@ -13,6 +13,7 @@ import path from 'node:path';
 import { Engine, createGoal, summarize, assertRepoTrusted } from '../lib/engine.mjs';
 import { reviewView, renderReview, planHash, tasksHash } from '../lib/plan.mjs';
 import { rulesFingerprint } from '../lib/rules.mjs';
+import { renderRulesFor } from '../lib/rules-store.mjs';
 import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
@@ -36,6 +37,8 @@ function resolveGoalDir(id) {
   if (!fs.existsSync(paths(d).goal)) die(`no such goal: ${id} (looked in ${goalsRoot(orch)})`);
   return d;
 }
+/** The rules summary the approval screens print (null before the goal's first tick; a tampered snapshot is shown as such). */
+const rulesSummaryOf = (dir, goal) => renderRulesFor(dir, goal);
 const engineAlive = (dir) => { const l = readJSON(paths(dir).lock, null); return !!l && pidAlive(l.pid); };
 
 async function main() {
@@ -82,7 +85,7 @@ async function main() {
       } else {
         const d = resolveGoalDir(arg1); const S = loadState(d);
         out({ ...summarize(S, loadHeartbeat(d)), engine_running: engineAlive(d), engine: describeOwner(lockStatus(d)), governor: readJSON(path.join(orch, 'governor.json'), null) });
-        if (S.tasks.length) console.error(`\nPLAN FOR REVIEW (exact commands, model tier and path scope per task):\n${renderReview(reviewView(S.tasks))}`);
+        if (S.tasks.length) console.error(`\nPLAN FOR REVIEW (exact commands, model tier and path scope per task):\n${renderReview(reviewView(S.tasks), rulesSummaryOf(d, S.goal))}`);
       }
       break;
     }
@@ -92,7 +95,7 @@ async function main() {
       if (cmd === 'approve-plan') { // approve exactly what is shown here: the engine refuses if the plan differs from this hash
         const S = loadState(d);
         if (!S.tasks.length) die('there is no plan to approve yet');
-        console.error(`PLAN YOU ARE APPROVING (commands run as you, checks inside the OS sandbox):\n${renderReview(reviewView(S.tasks))}`);
+        console.error(`PLAN YOU ARE APPROVING (commands run as you, checks inside the OS sandbox):\n${renderReview(reviewView(S.tasks), rulesSummaryOf(d, S.goal))}`);
         const rules_hash = rulesFingerprint(S.goal, readJSON(paths(d).rules, null));
         extra = { reviewed: { plan_hash: planHash(readJSON(paths(d).plan)?.plan ?? null), tasks_hash: tasksHash(S.tasks), ...(rules_hash ? { rules_hash } : {}) } };
         console.error(`plan hash ${extra.reviewed.plan_hash.slice(0, 12)}${rules_hash ? `  rules hash ${rules_hash.slice(0, 12)}` : ''}`);
@@ -107,7 +110,7 @@ async function main() {
       break;
     }
     case 'approvals': {
-      { const S = loadState(resolveGoalDir(arg1)); if (S.tasks.length) console.error(`PLAN (exact commands, model tier and path scope per task):\n${renderReview(reviewView(S.tasks))}\n`); }
+      { const d = resolveGoalDir(arg1); const S = loadState(d); if (S.tasks.length) console.error(`PLAN (exact commands, model tier and path scope per task):\n${renderReview(reviewView(S.tasks), rulesSummaryOf(d, S.goal))}\n`); }
       out(listApprovals(paths(resolveGoalDir(arg1)).approvals).map((a) => ({ id: a.id, task: a.task_id, tool: a.tool, status: a.status, reason: a.reason, expires_at: a.expires_at, input: a.tool === 'Bash' ? a.input?.command : a.input?.file_path, cwd: a.cwd ?? null }))); break; }
     case 'approve': case 'deny': {
       const d = resolveGoalDir(arg1); if (!arg2) die(`usage: aos-orch ${cmd} <goal-id> <A-n>`);

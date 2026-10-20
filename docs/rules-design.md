@@ -582,3 +582,28 @@ Deviations and choices made while implementing R0-R4 (smallest sensible choice e
   `read_extra` entries are globs as declared: a plain path is a directory root, `*`/`**`/`?` match the resolved real path, `~/` expands, a relative entry is relative to the worktree (it
   was relative to the process cwd); absolute paths are valid for `read_extra` only. `approval_ttl_s` is not a patchable budget key (`BUDGET_LIMITS` has no such key), so there is no
   patch to honour: the TTL is fixed in the snapshot, as designed.
+
+### R5-R7 (user, goal and repo layers; plan validation)
+
+- **Spec key.** The goal spec's rules layer is `orch.rules` (as in the design); because R4 already uses `goal.orch.rules` for the snapshot summary, it is stored as `goal.orch.rules_layer`.
+  `orch.accept_repo_loosening` (array of ids, <= 64) is stored as is.
+- **Layers.** `default` -> `user` -> `repo` -> `goal`. `user` = `$AOS_ORCH_DIR/rules.json`; with none, the policy file the goal names (default `policy.default.json`, which the engine itself writes
+  as DEFAULT_POLICY: mapping it is a no-op) mapped by `policyToRules`. `rules.json` wins when both exist. `goal` is ONE layer built from the legacy goal fields (only values that differ from the
+  defaults, because a goal spec always carries a full `budgets` object and a default must not undo a user tightening), then the legacy `orch.policy` object, then `orch.rules_layer`, each
+  overriding the previous per key (lists are replaced). Mapped legacy fields: `budgets.*` and `budget.*` (tokens, wall clock, turns, usd caps, parallel, attempts, tasks, approval ttl, ticks),
+  `check_allowlist`, `check_localhost_ports`, `unsandboxed_checks`, `sandbox_workers`, `trust_repo_config`, `approval_policy.plan`. `orch.governor` is ignored with a note (R8, G5);
+  `approval_policy.outside_allowlist/dangerous` are still unmapped (R9).
+- **Legacy policy mapping.** Deny lists and deny patterns can only grow (the old shallow merge could empty them; the floor protected the critical paths either way), `bash.allow` entries that execute
+  code are dropped with a note (the evaluator denied them anyway), `paths.deny` replacement is no longer possible, unknown keys are ignored with a note. A goal override of
+  `approval.wait_in_hook_s`/`ttl_s` is a min-merge with the user value (the old merge took the goal's value, even a larger one; a larger one is now a listed loosening).
+- **Write-back.** Compiled values the engine reads from `goal.json` are written back at snapshot time (`applyCompiledToGoal`): the budgets and caps above, `check_localhost_ports`,
+  `unsandboxed_checks` (= `checks.sandbox: off`), `sandbox_workers` (= `worker.sandbox: required`) and `approval_policy.plan`. So a user rules file that lowers a cap or requires sandboxing
+  binds goals whose spec says nothing. `trust_repo_config` is not written back (createGoal decides on the repo before any compile). Checks use the compiled `checks.allowlist`
+  (empty if the snapshot is not intact); legacy (R4) goals keep their old behaviour entirely.
+- **Snapshot.** Non-legacy snapshots add `dropped`, `notes` and `inputs` (each layer's validated rules, verified against the recorded layer hashes before any recompile). `policy` is exactly
+  `toPolicy(compiled)`. The hash additionally covers `loosenings`/`dropped`/`notes` when non-empty (an R4 snapshot has none: its hash is unchanged). An invalid layer refuses the goal: at creation (preview
+  compile, nothing is written) or, if a file breaks later, at the first tick (`blocked`, `halt_reason: "rules refused: ..."`, one `orch.rules.refused` event, no planner, no worker).
+- **Approval screens.** `summarizeRules`/`renderRulesSummary` (rules.mjs) print profile, layers with a 6-character hash and the number of dropped loosenings, worker tools, bash allow, extra read roots, denies
+  (bash, paths, patterns, the floor), checks, plan approval and tiers, limits, then `LOOSENINGS YOU ARE APPROVING (n)` (layer, path, change, id) and `NOT APPLIED (n)` for dropped repo loosenings. `aos-orch status`,
+  `approve-plan` and `approvals` print it after the plan (`renderReview(view, rulesText)`); a tampered snapshot prints `RULES TAMPERED` instead. The server plan endpoint adds `rules` (the summary object,
+  absolute paths scrubbed) and `rules_text` to its existing JSON (`plan_state`, `plan_hash`, `tasks` unchanged).

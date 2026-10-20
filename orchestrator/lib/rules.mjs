@@ -6,6 +6,7 @@
 import { validateSchema } from './schema.mjs';
 import { allowlistEntryProblem } from './policy.mjs';
 import { canonical, sha256, UNSAFE_CHECK_CMDS } from './plan.mjs';
+import { DEFAULT_BUDGETS } from './state.mjs';
 
 export const RULES_VERSION = 1;
 
@@ -313,11 +314,167 @@ export function buildSnapshot({ policy, legacy = false, layers = [] }) {
 /** Hash of the part of a snapshot that decides behaviour. Recomputed from content on every check, never trusted from the file. Never throws. */
 export function snapshotHash(snap) {
   if (!snap || typeof snap !== 'object' || Array.isArray(snap)) return 'invalid';
-  try { return sha256(canonical({ rules_version: snap.rules_version, compiled: snap.compiled, policy: snap.policy })); } catch { return 'invalid'; }
+  try {
+    // loosenings / dropped / notes are part of what a human approves: hashed when present (an R4 snapshot has none, so its hash is unchanged)
+    const extra = {}; for (const k of ['loosenings', 'dropped', 'notes']) if (Array.isArray(snap[k]) && snap[k].length) extra[k] = snap[k];
+    return sha256(canonical({ rules_version: snap.rules_version, compiled: snap.compiled, policy: snap.policy, ...extra }));
+  } catch { return 'invalid'; }
 }
 /** The rules hash a plan fingerprint / approval binds: undefined for goals without rules or legacy goals (their plan hash is unchanged). */
 export function rulesFingerprint(goal, snap) {
   const r = goal?.orch?.rules;
   if (!r || r.legacy) return undefined;
   return snap ? snapshotHash(snap) : 'missing';
+}
+
+// ---------------------------------------------------------------- R5: user and goal layers, legacy mapping, summary
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const slugId = (text, i, used) => {
+  let id = String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'x';
+  if (!/^[a-z0-9]/.test(id)) id = `x${id}`;
+  while (used.has(id)) id = `${id.slice(0, 40)}-${i}`;
+  used.add(id); return id;
+};
+const entries = (arr, field) => { const used = new Set(); return arr.map((v, i) => ({ id: slugId(v, i, used), [field]: v })); };
+
+/**
+ * Map a LEGACY worker policy object (policy.default.json, goal `orch.policy`: the DEFAULT_POLICY shape) onto a rules layer. Returns {rules, notes}.
+ * Differences from the old shallow merge, all tightening-only or listed: deny lists, deny patterns can only grow (the old merge could empty them; the floor
+ * still protected the critical paths), allow-list entries that execute code are dropped (the evaluator denied them anyway), unknown keys are ignored.
+ */
+export function policyToRules(p) {
+  const rules = { rules_version: RULES_VERSION }; const notes = [];
+  if (!isObj(p)) return { rules, notes: p === undefined || p === null ? [] : ['policy is not an object: ignored'] };
+  const strs = (a) => (Array.isArray(a) ? a.filter((x) => typeof x === 'string') : []);
+  const w = {};
+  if (isObj(p.tools) && Array.isArray(p.tools.allow)) w.tools = { allow: strs(p.tools.allow) };
+  if (isObj(p.paths)) {
+    const pa = {};
+    if (Array.isArray(p.paths.deny)) pa.deny = entries(strs(p.paths.deny), 'glob');
+    if (Array.isArray(p.paths.read_extra)) pa.read_extra = entries(strs(p.paths.read_extra), 'glob');
+    if (typeof p.paths.on_outside_scope === 'string') pa.on_outside_scope = p.paths.on_outside_scope;
+    if (Object.keys(pa).length) w.paths = pa;
+    for (const k of Object.keys(p.paths)) if (!['deny', 'read_extra', 'on_outside_scope'].includes(k) && !(k === 'write' && p.paths.write === 'worktree+scope')) notes.push(`policy.paths.${k} is not a rule: ignored`);
+  }
+  if (isObj(p.bash)) {
+    const b = {};
+    if (Array.isArray(p.bash.allow)) {
+      const ok = strs(p.bash.allow).filter((e) => { const why = allowlistEntryProblem(e); if (why) notes.push(`policy.bash.allow "${e.slice(0, 60)}" dropped: ${why}`); return !why; });
+      b.allow = entries(ok, 'cmd');
+    }
+    if (Array.isArray(p.bash.deny)) b.deny = entries(strs(p.bash.deny), 'cmd');
+    if (Array.isArray(p.bash.deny_patterns)) b.deny_patterns = entries(strs(p.bash.deny_patterns), 'regex');
+    if (Array.isArray(p.bash.ask_on)) b.ask_on = strs(p.bash.ask_on);
+    if (Object.keys(b).length) w.bash = b;
+  }
+  if (isObj(p.approval)) {
+    const a = {};
+    if (p.approval.wait_in_hook_s !== undefined) a.wait_in_hook_s = p.approval.wait_in_hook_s;
+    if (p.approval.ttl_s !== undefined) a.ttl_s = p.approval.ttl_s;
+    if (Object.keys(a).length) w.approval = a;
+    if (p.approval.on_timeout !== undefined && p.approval.on_timeout !== 'deny') notes.push('policy.approval.on_timeout is not a rule (always deny): ignored');
+  }
+  if (Object.keys(w).length) rules.worker = w;
+  for (const k of Object.keys(p)) if (!['tools', 'paths', 'bash', 'approval', 'version', 'default'].includes(k)) notes.push(`policy.${k} is not a rule: ignored`);
+  if (p.default !== undefined && p.default !== 'deny') notes.push('policy.default is not a rule (always deny): ignored');
+  return { rules, notes };
+}
+
+/**
+ * The goal's legacy fields as a rules layer: only values that differ from the defaults (a goal spec always carries a full budgets object, and a default
+ * value must not undo a user-layer tightening). Returns {rules, notes}. goal.orch.rules_layer (the spec's `orch.rules`) is a separate layer.
+ */
+export function goalLegacyRules(goal) {
+  const o = goal.orch || {}; const B = o.budgets || {}; const rules = { rules_version: RULES_VERSION }; const notes = [];
+  const put = (path, val, dflt) => { if (val !== undefined && val !== null && val !== dflt) setPath(rules, path, val); };
+  const D = DEFAULT_RULES;
+  put('budgets.max_new_tokens', B.max_new_tokens, D.budgets.max_new_tokens); put('budgets.task_wall_clock_s', B.task_wall_clock_s, D.budgets.task_wall_clock_s);
+  put('budgets.stall_after_s', B.stall_after_s, D.budgets.stall_after_s); put('budgets.max_turns', B.max_turns, D.budgets.max_turns); put('budgets.attempt_usd_cap', B.attempt_usd_cap, D.budgets.attempt_usd_cap);
+  put('parallel.max_parallel', B.max_parallel, D.parallel.max_parallel); put('retry.max_attempts', B.max_attempts, D.retry.max_attempts); put('plan.max_tasks', B.max_tasks, D.plan.max_tasks);
+  put('worker.approval.ttl_s', B.approval_ttl_s, D.worker.approval.ttl_s);
+  const g = goal.budget || {};
+  put('budgets.max_ticks', g.max_ticks, D.budgets.max_ticks); put('budgets.max_usd', g.max_usd, D.budgets.max_usd); put('budgets.max_wall_clock_s', g.max_wall_clock_s, D.budgets.max_wall_clock_s);
+  if (Array.isArray(o.check_allowlist) && o.check_allowlist.length) {
+    const ok = o.check_allowlist.map((e) => (Array.isArray(e) ? e.join(' ') : e)).filter((e) => {
+      const first = typeof e === 'string' ? e.trim().split(/\s+/)[0] || '' : '';
+      const bad = !first || UNSAFE_CHECK_CMDS.has(first.split('/').pop()) || e.length > 200;
+      if (bad) notes.push(`check_allowlist entry "${String(e).slice(0, 60)}" dropped: not allowed as a check`);
+      return !bad;
+    });
+    if (ok.length) setPath(rules, 'checks.allowlist', entries(ok, 'cmd'));
+  }
+  if (Array.isArray(o.check_localhost_ports) && o.check_localhost_ports.length) setPath(rules, 'checks.localhost_ports', o.check_localhost_ports);
+  if (o.unsandboxed_checks === true) setPath(rules, 'checks.sandbox', 'off');
+  if (o.sandbox_workers === true) setPath(rules, 'worker.sandbox', 'required');
+  if (o.trust_repo_config === true) setPath(rules, 'repo_config.trust', true);
+  if (o.approval_policy?.plan && o.approval_policy.plan !== 'required') setPath(rules, 'plan.approval', o.approval_policy.plan);
+  if (isObj(o.governor) && Object.keys(o.governor).length) notes.push('goal governor settings are ignored: the governor is shared by every goal and only the user layer may set it');
+  return { rules, notes };
+}
+
+/** Write the compiled values the engine reads from goal.json back into it (compiled rules are the truth; legacy fields stay in step). Mutates goal. */
+export function applyCompiledToGoal(goal, c) {
+  const o = goal.orch; const B = o.budgets;
+  B.max_new_tokens = c.budgets.max_new_tokens; B.task_wall_clock_s = c.budgets.task_wall_clock_s; B.stall_after_s = c.budgets.stall_after_s; B.max_turns = c.budgets.max_turns;
+  B.attempt_usd_cap = c.budgets.attempt_usd_cap; B.max_parallel = c.parallel.max_parallel; B.max_attempts = c.retry.max_attempts; B.max_tasks = c.plan.max_tasks; B.approval_ttl_s = c.worker.approval.ttl_s;
+  goal.budget.max_ticks = c.budgets.max_ticks; goal.budget.max_usd = c.budgets.max_usd; goal.budget.max_wall_clock_s = c.budgets.max_wall_clock_s;
+  o.check_localhost_ports = [...c.checks.localhost_ports]; o.unsandboxed_checks = c.checks.sandbox === 'off'; o.sandbox_workers = c.worker.sandbox === 'required';
+  o.approval_policy = { ...o.approval_policy, plan: c.plan.approval };
+}
+
+/** Snapshot of a compile result (R5+). Not legacy: `policy` is exactly toPolicy(compiled). `inputs` (each layer's rules) lets an accepted loosening recompile without re-reading files. */
+export function buildRulesSnapshot(comp, layers) {
+  const snap = { rules_version: RULES_VERSION, legacy: false, compiled: comp.compiled, policy: toPolicy(comp.compiled), layers: comp.layers, loosenings: comp.loosenings, dropped: comp.dropped,
+    notes: layers.flatMap((l) => l.notes || []).slice(0, 50), inputs: layers.map((l) => ({ layer: l.layer, source: l.source ?? null, rules: l.rules })) };
+  snap.rules_hash = snapshotHash(snap);
+  return snap;
+}
+
+const cmdList = (a, n = 8) => { const c = a.map((e) => e.cmd ?? e.glob ?? e); return c.length <= n ? c.join(', ') || '(none)' : `${c.slice(0, n).join(', ')} +${c.length - n} more`; };
+const val = (v) => (v === null || v === undefined ? '(none)' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+
+/**
+ * Human-readable facts about a snapshot, for the approval screens: what the worker may do, the hard limits, and EVERY loosening (and dropped repo loosening)
+ * with its layer and id. Pure; `snap` is a rules.snapshot.json (verified by the caller). Plain strings only (no raw rule bodies beyond commands/globs).
+ */
+export function summarizeRules(snap) {
+  const c = snap?.compiled; const pol = snap?.policy;
+  if (!c || !pol) return null;
+  const layerLine = (snap.layers || []).map((l) => {
+    const dr = (snap.dropped || []).filter((d) => d.layer === l.layer && d.reason === 'loosening').length;
+    return `${l.layer}${l.sha256 ? `(${l.sha256.slice(0, 6)}${dr ? `, ${dr} loosening${dr > 1 ? 's' : ''} dropped` : ''})` : ''}`;
+  });
+  const lo = (snap.loosenings || []).map((l) => ({ layer: l.layer, rule_id: l.rule_id, path: l.path, change: l.from === null || l.from === undefined ? `+ ${val(l.to)}` : `${val(l.from)} -> ${val(l.to)}` }));
+  const dr = (snap.dropped || []).map((l) => ({ layer: l.layer, rule_id: l.rule_id, path: l.path, change: l.from === null || l.from === undefined ? `+ ${val(l.to)}` : `${val(l.from)} -> ${val(l.to)}`, reason: l.reason || 'loosening' }));
+  return {
+    rules_hash: snapshotHash(snap).slice(0, 12), profile: c.profile, description: c.description, legacy: !!snap.legacy, layers: layerLine,
+    worker: { tools: [...pol.tools.allow], bash_allow: [...pol.bash.allow], read_extra: [...(pol.paths.read_extra || [])], on_outside_scope: pol.paths.on_outside_scope, sandbox: c.worker.sandbox,
+      ask_on: [...pol.bash.ask_on], approval_wait_s: pol.approval.wait_in_hook_s, approval_ttl_s: pol.approval.ttl_s },
+    denies: { bash: [...pol.bash.deny], paths: [...pol.paths.deny], patterns: pol.bash.deny_patterns.length, scope_deny: c.plan.scope_deny.map((e) => e.glob), floor: ['.git', '.claude/settings*.json', '.aos', '~/.claude', '~/.ssh', '~/.config'] },
+    checks: { allowlist: c.checks.allowlist.map((e) => e.cmd), sandbox: c.checks.sandbox, max_timeout_s: c.checks.max_timeout_s, localhost_ports: [...c.checks.localhost_ports] },
+    plan: { approval: c.plan.approval, max_tasks: c.plan.max_tasks, tiers: [...c.plan.tiers], max_start_tier: c.plan.max_start_tier },
+    limits: { max_usd: c.budgets.max_usd, max_new_tokens: c.budgets.max_new_tokens, max_wall_clock_s: c.budgets.max_wall_clock_s, max_ticks: c.budgets.max_ticks, max_attempts: c.retry.max_attempts, max_parallel: c.parallel.max_parallel },
+    loosenings: lo, dropped: dr, notes: [...(snap.notes || [])].slice(0, 10),
+  };
+}
+
+/** Plain-text rendering of summarizeRules() for the CLI (design 3.6). */
+export function renderRulesSummary(sm) {
+  if (!sm) return 'rules: (no snapshot yet)';
+  const L = [`rules ${sm.rules_hash}  profile=${sm.profile}${sm.legacy ? '  (legacy goal: rules predate rule sets)' : ''}  layers: ${sm.layers.join(' ')}`];
+  L.push(`  worker tools: ${sm.worker.tools.join(' ')}   outside path_scope: ${sm.worker.on_outside_scope}   worker sandbox: ${sm.worker.sandbox}`);
+  L.push(`  worker bash allow (${sm.worker.bash_allow.length}): ${cmdList(sm.worker.bash_allow)}${sm.worker.read_extra.length ? `   extra read roots: ${cmdList(sm.worker.read_extra)}` : ''}`);
+  L.push(`  denied: bash ${sm.denies.bash.length} (${cmdList(sm.denies.bash, 6)}); paths ${cmdList(sm.denies.paths, 6)}; ${sm.denies.patterns} pattern(s); floor (never removable): ${sm.denies.floor.join(' ')}`);
+  if (sm.denies.scope_deny.length) L.push(`  planner may not scope: ${sm.denies.scope_deny.join(' ')}`);
+  L.push(`  checks: ${sm.checks.sandbox === 'required' ? 'sandboxed' : 'NOT sandboxed'}; allowlist: ${sm.checks.allowlist.join(', ') || '(none)'}${sm.checks.localhost_ports.length ? `; localhost ports ${sm.checks.localhost_ports.join(',')}` : ''}; max ${sm.checks.max_timeout_s}s`);
+  L.push(`  plan approval: ${sm.plan.approval}; max ${sm.plan.max_tasks} tasks; tiers ${sm.plan.tiers.join('/')}; start at most ${sm.plan.max_start_tier}`);
+  L.push(`  limits: $${sm.limits.max_usd}, ${sm.limits.max_new_tokens} tokens, ${sm.limits.max_wall_clock_s}s, ${sm.limits.max_attempts} attempts/task, ${sm.limits.max_parallel} parallel`);
+  L.push(sm.loosenings.length ? `LOOSENINGS YOU ARE APPROVING (${sm.loosenings.length}):` : 'LOOSENINGS YOU ARE APPROVING: none');
+  for (const l of sm.loosenings) L.push(`  ${l.layer}:${l.path}  ${l.change}   [${l.rule_id}]`);
+  if (sm.dropped.length) {
+    L.push(`NOT APPLIED (${sm.dropped.length}; a repo's loosenings need --accept-repo-loosening <rule_id>):`);
+    for (const l of sm.dropped) L.push(`  ${l.layer}:${l.path}  ${l.change}   [${l.rule_id}]${l.reason !== 'loosening' ? `  (${l.reason})` : ''}`);
+  }
+  for (const n of sm.notes) L.push(`  note: ${n}`);
+  return L.join('\n');
 }

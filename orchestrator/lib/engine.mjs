@@ -13,7 +13,8 @@ import * as G from './git.mjs';
 import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
 import { matchAny, scopesOverlap } from './glob.mjs';
 import { mergePolicy, DEFAULT_POLICY, isProtectedRel } from './policy.mjs';
-import { buildSnapshot, snapshotHash, rulesFingerprint } from './rules.mjs';
+import { buildSnapshot, snapshotHash, rulesFingerprint, applyCompiledToGoal, validateRules, toPolicy } from './rules.mjs';
+import { compileGoal, previewGoal } from './rules-store.mjs';
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
 import { Governor, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
@@ -316,7 +317,8 @@ export class Engine {
    */
   _ensureRules(S) {
     const goal = S.goal; const o = goal.orch;
-    if (o.rules) return;
+    if (o.rules || String(o.halt_reason || '').startsWith('rules refused')) return;
+    if (!(o.plan_fingerprint || o.plan_approval || S.tasks.length)) return this._compileRules(S);
     const file = typeof o.policy === 'string' ? readJSON(path.join(this.orchDir, o.policy), null) : null;
     const over = o.policy && typeof o.policy === 'object' ? o.policy : null;
     const legacy = !!(o.plan_fingerprint || o.plan_approval || S.tasks.length);
@@ -327,6 +329,31 @@ export class Engine {
       layers: snap.layers.map((l) => ({ layer: l.layer, sha12: l.sha256 ? l.sha256.slice(0, 12) : null })), loosenings: [] };
     this.ev('orch.rules.snapshotted', 'orchestrator', null, { rules_hash: o.rules.hash, profile: o.rules.profile, legacy, loosenings: 0 });
     saveState(this.dir, S);
+  }
+
+  /** R5/R6: compile default + user + repo + goal layers into the snapshot; an invalid layer refuses the goal (no plan, no worker). Compiled values are written back into goal.json. */
+  _compileRules(S) {
+    const goal = S.goal; const o = goal.orch;
+    const r = compileGoal({ orchDir: this.orchDir, goal, dir: this.dir });
+    if (!r.ok) {
+      o.halt_reason = `rules refused: ${r.errors.slice(0, 3).join('; ').slice(0, 400)}`; o.halt_at_ms = this.now();
+      goal.status = 'blocked'; goal.blocked_reason = o.halt_reason;
+      this.ev('orch.rules.refused', 'orchestrator', null, { errors: r.errors.slice(0, 5) }); this.ev('goal.blocked', 'orchestrator', null, { reason: goal.blocked_reason });
+      saveState(this.dir, S); return;
+    }
+    this._storeSnapshot(S, r.snap);
+    this.ev('orch.rules.snapshotted', 'orchestrator', null, { rules_hash: o.rules.hash, profile: o.rules.profile, legacy: false, loosenings: r.snap.loosenings.length, dropped: r.snap.dropped.length, notes: r.snap.notes.slice(0, 5) });
+    saveState(this.dir, S);
+  }
+
+  /** Write a (new) non-legacy snapshot and the goal.json summary of it; applies the compiled values the engine reads from goal.json. */
+  _storeSnapshot(S, snap) {
+    const o = S.goal.orch;
+    applyCompiledToGoal(S.goal, snap.compiled);
+    atomicWrite(this.P.rules, snap);
+    o.rules = { hash: snap.rules_hash.slice(0, 12), sha256: snap.rules_hash, version: snap.rules_version, profile: snap.compiled.profile, legacy: false,
+      layers: snap.layers.map((l) => ({ layer: l.layer, sha12: l.sha256 ? l.sha256.slice(0, 12) : null })),
+      loosenings: snap.loosenings.map((l) => ({ rule_id: l.rule_id, layer: l.layer })), dropped: snap.dropped.map((l) => ({ rule_id: l.rule_id, layer: l.layer, reason: l.reason })) };
   }
 
   /** Does the snapshot on disk still hash to what goal.json (and the plan approval, when it carries one) recorded? */
@@ -936,8 +963,15 @@ export class Engine {
     return { kind: 'instructions', msg };
   }
   _tmp(name) { return ensureDir(path.join(this.P.tmp, name)); }
+  /** {compiled, policy} of the goal's snapshot when it is intact, else null. */
+  _rulesView(goal) {
+    const snap = readJSON(this.P.rules, null);
+    return snap && goal.orch.rules && snapshotHash(snap) === goal.orch.rules.sha256 && snap.compiled && snap.policy ? { compiled: snap.compiled, policy: snap.policy } : null;
+  }
   _checkAllowlist(goal) {
-    const base = goal.orch.check_allowlist || [];
+    const o = goal.orch;
+    // rule-set goals: the compiled checks.allowlist (fail closed when the snapshot is not intact); legacy goals keep their goal.json list
+    const base = o.rules && !o.rules.legacy ? (this._rulesView(goal)?.compiled.checks.allowlist.map((e) => e.cmd) ?? []) : (o.check_allowlist || []);
     const crit = goal.success_criteria.filter((c) => c.check).map((c) => c.check.argv);
     return [...base, ...crit];
   }
@@ -1024,6 +1058,13 @@ export async function createGoal(orchDir, spec, { clock = realClock } = {}) {
   const instructions = {};
   for (const rel of INSTRUCTION_FILES) { const b = await G.showBlob(info.root, info.base_commit, rel); instructions[rel] = b ? sha256Buf(b) : null; }
   goal.orch.instructions = instructions;
+  // rule-set layers (R5): an invalid goal or user layer refuses the goal here, before anything is written
+  if (goal.orch.rules_layer !== undefined) {
+    const v = validateRules(goal.orch.rules_layer, { layer: 'goal' });
+    if (!v.ok) throw new Error(`goal.orch.rules is invalid:\n  ${v.errors.slice(0, 10).join('\n  ')}`);
+  }
+  const pre = previewGoal({ orchDir, goal });
+  if (!pre.ok) throw new Error(`rules refused:\n  ${pre.errors.slice(0, 10).join('\n  ')}`);
   const dir = createGoalDir(orchDir, goal, spec.plan || null);
   const notices = instructionNotice(info.root, instructions);
   appendEvent(dir, { type: 'goal.created', actor: 'human', goal_id: goal.id, data: { title: goal.title, criteria: goal.success_criteria.length } }, clock);
