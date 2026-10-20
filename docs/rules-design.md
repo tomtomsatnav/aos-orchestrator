@@ -617,3 +617,30 @@ Deviations and choices made while implementing R0-R4 (smallest sensible choice e
   any other literal is a directory, wildcards are sampled; deliberately over-rejecting for directory scopes), `checks.max_timeout_s`; `allowed_commands` are evaluated with the goal's own worker policy (G4,
   also for legacy goals, whose policy is the snapshot's). The engine passes them from the intact snapshot, and the planner prompt lists the compiled tiers. `plan.auto_approvable_checks` and the task
   `tier_ladder` are still constants (R8).
+
+### Review fixes after R5-R7 (Opus review)
+
+- **B1 control characters.** `validateRules` walks EVERY string (cmd with all its argv tokens, globs, regexes, descriptions, ids, tool names, keys) and rejects C0, DEL, C1 and the Unicode bidi overrides
+  (U+202A-202E, U+2066-2069). Validation error texts are escaped too. The renderer (`renderRulesSummary`, used by the CLI and the server `rules_text`) JSON-quotes any non-plain value and, as a last
+  line of defence, escapes any control character left in a line. Probe: an allowlist `cmd` of `ls\x1b[2J\r...` is refused; if one reached a snapshot it prints as `"ls\u001b[2J\r..."`.
+- **S1 acceptance ids** are `...@<32 hex>` (128 bits of sha256 of the new value). Loosenings accepted at creation (`--accept-repo-loosening`) are printed as `ACCEPTED repo loosening <id>: <path> + <full JSON>` notices.
+- **S2.** `snapshotHash` also covers `inputs` and `layers` of non-legacy snapshots (an R4 snapshot has neither: its hash is unchanged). `recompileSnapshot(snap, accept, goal)` checks the inputs against
+  `goal.orch.rules.layers` (sha12) and `goal.orch.repo_rules.sha256` and refuses on mismatch.
+- **S3 globs.** `globToRegex` supports `{a,b}` (nested; an unbalanced brace is a literal) and `[abc]`/`[!abc]` (never matches `/`). Deny globs that are neither absolute nor `**`-led (`node_modules/**`, `*.pem`)
+  are anchored at the worktree root (matched against the path relative to it; `isProtectedRel` does the same). Validation refuses globs with more than 4 `{` or 8 `*` runs (cheap regexes).
+  Side effect (a fix): a `path_scope` with braces or classes used to match literally and now matches as written.
+- **S4.** `scopeHitsDeny` folds case and NFKC like the runtime check, expands braces, expands each `[]` class to its members. `toPolicy` adds `paths.scope_deny` (only when non-empty, so `toPolicy(DEFAULT_RULES)`
+  still equals `DEFAULT_POLICY`); `evaluate` denies a write matching it with `default:scope_denied`, and `isProtectedRel` treats it as protected for the engine's snapshot scan.
+- **S5.** Plan-time `allowed_commands` are evaluated by the engine default AND the goal policy; a deny from either rejects the entry.
+- **S6.** (a) The spec's own limits are recorded (`goal.orch.explicit_limits`); an explicit value equal to the default is a CAP in the goal layer: it lowers a user/repo value that is higher, it never raises a
+  tighter one (the earlier tests rely on a default not undoing a user tightening). Goals created before the field existed keep the old rule. (b) `applyCompiledToGoal(goal, compiled, prev)`: on the accept recompile
+  a limit whose goal.json value differs from the previous compiled value (a human patch) keeps the smaller of the patched and the new compiled value. The summary's `limits`/`max_tasks` show the enforced
+  goal.json values, so they stay consistent after patches.
+- **S7.** If the snapshot carries an applied (accepted) repo loosening, plan creation parks the plan for a human even when `plan.approval` is `auto` (`orch.plan.approval_required`).
+- **S8.** All non-built-in deny patterns of one `evaluate()` call share a 1000 ms budget (`ctx.now` and `ctx.regex_budget_ms` exist for tests); past it the call is denied `floor:regex_budget`. Each vm timeout is
+  `min(100 ms, remaining)`. The hook waits `wait_in_hook_s` minus the time already spent (`remainingWaitMs`). `evaluate` therefore reads a monotonic clock (it was already time-bounded through `vm`).
+- **Nits.** `showBlob` resolves null only when `git ls-tree` lists nothing; git errors and blobs over 16 MB reject (createGoal refuses the repo; dispatch-time instruction hashing records `unreadable`, which
+  differs from any recorded hash and so fails closed). The compiled `repo_config.trust` now decides at creation: a user `rules.json` with `repo_config.trust: false` locks it (a later `true` is dropped and listed as
+  not applied) and the goal's `--trust-repo-config` is ignored; `goal.orch.trust_repo_config` is written back from the compiled value, and the repo-config scan runs after the rules preview. The approval summary's checks line lists the
+  success-criteria check argv. Legacy-policy mapping notes unknown nested keys and reports `__proto__`; `mergePolicy` never assigns it.
+- **Not done.** The server still has no accept-loosening endpoint (unchanged). Goldens: none changed.

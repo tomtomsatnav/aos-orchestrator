@@ -91,6 +91,7 @@ export function mergePolicy(...layers) {
   for (const l of layers) {
     if (!l || typeof l !== 'object') continue;
     for (const k of Object.keys(l)) {
+      if (k === '__proto__') continue; // never assign the prototype (JSON.parse makes it an own key)
       if (l[k] && typeof l[k] === 'object' && !Array.isArray(l[k]) && out[k] && typeof out[k] === 'object') out[k] = { ...out[k], ...l[k] };
       else out[k] = l[k];
     }

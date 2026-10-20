@@ -144,9 +144,18 @@ export async function listWorktrees(repo) {
   return r.stdout.split('\n').filter((l) => l.startsWith('worktree ')).map((l) => l.slice(9));
 }
 
-/** Raw bytes of <ref>:<rel> (null when absent). Used to hash the committed CLAUDE.md a worktree will contain. */
-export function showBlob(repo, ref, rel) {
-  return new Promise((resolve) => {
-    execFile('git', [...IDENT, 'show', `${ref}:${rel}`], { cwd: repo, env: gitEnv(), encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout));
+/**
+ * Raw bytes of <ref>:<rel>. Resolves null ONLY when the path is absent at that ref (git ls-tree lists nothing); any git error, or a blob larger than `maxBytes`,
+ * rejects, so an unreadable file is never mistaken for a missing one (callers refuse).
+ */
+export async function showBlob(repo, ref, rel, { maxBytes = 16 * 1024 * 1024 } = {}) {
+  const run = (args, buffer) => new Promise((resolve, reject) => {
+    execFile('git', [...IDENT, ...args], { cwd: repo, env: gitEnv(), encoding: buffer ? 'buffer' : 'utf8', maxBuffer: maxBytes + 1024 }, (err, stdout) => (err ? reject(new Error(`git ${args[0]} ${rel} failed: ${String(err.code ?? err.message).slice(0, 80)}`)) : resolve(stdout)));
   });
+  const listed = await run(['ls-tree', '-z', ref, '--', rel], false);
+  if (!listed.length) return null;
+  const size = Number((await run(['cat-file', '-s', `${ref}:${rel}`], false)).trim());
+  if (!Number.isFinite(size)) throw new Error(`git cat-file ${rel}: unreadable size`);
+  if (size > maxBytes) throw new Error(`${rel} is larger than ${maxBytes} bytes`);
+  return run(['cat-file', 'blob', `${ref}:${rel}`], true);
 }

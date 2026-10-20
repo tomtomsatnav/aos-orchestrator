@@ -284,11 +284,16 @@ export function compileRules(layers = [], { accept = [] } = {}) {
   if (errors.length) return { ok: false, errors };
   const compiled = tagged(DEFAULT_RULES, 'default');
   const loosenings = []; const dropped = []; const acc = new Set(accept);
+  let trustLocked = false; // a USER layer that says repo_config.trust: false forbids it for every later layer (design: "a user rules.json that forbids trust must win")
   for (const l of layers) {
     const L = { layer: l.layer, accept: acc, loosenings, dropped };
     for (const spec of SPEC) {
       const val = getPath(l.rules, spec[0]);
       if (val === undefined) continue;
+      if (spec[0] === 'repo_config.trust') {
+        if (trustLocked && val === true) { dropped.push({ layer: l.layer, path: spec[0], from: false, to: true, rule_id: `${l.layer}:${spec[0]}@${bindHash(true)}`, reason: 'ignored: the user layer forbids trusting repo configuration' }); continue; }
+        if (l.layer === 'user' && val === false) trustLocked = true;
+      }
       setPath(compiled, spec[0], applyOne(getPath(compiled, spec[0]), clone(val), spec, L));
     }
     for (const k of ['profile', 'description']) { // labels shown on the approval screen: only the human's user layer may change them
@@ -373,7 +378,7 @@ export function policyToRules(p) {
     if (Array.isArray(p.paths.read_extra)) pa.read_extra = entries(strs(p.paths.read_extra), 'glob');
     if (typeof p.paths.on_outside_scope === 'string') pa.on_outside_scope = p.paths.on_outside_scope;
     if (Object.keys(pa).length) w.paths = pa;
-    for (const k of Object.keys(p.paths)) if (!['deny', 'read_extra', 'on_outside_scope'].includes(k) && !(k === 'write' && p.paths.write === 'worktree+scope')) notes.push(`policy.paths.${k} is not a rule: ignored`);
+    for (const k of Object.keys(p.paths)) if (!['deny', 'read_extra', 'on_outside_scope'].includes(k) && !(k === 'write' && p.paths.write === 'worktree+scope')) notes.push(`policy.paths.${escCtrl(k).slice(0, 40)} is not a rule: ignored`);
   }
   if (isObj(p.bash)) {
     const b = {};
@@ -393,8 +398,11 @@ export function policyToRules(p) {
     if (Object.keys(a).length) w.approval = a;
     if (p.approval.on_timeout !== undefined && p.approval.on_timeout !== 'deny') notes.push('policy.approval.on_timeout is not a rule (always deny): ignored');
   }
+  for (const [sec, known] of [['tools', ['allow']], ['bash', ['allow', 'deny', 'deny_patterns', 'ask_on']], ['approval', ['wait_in_hook_s', 'ttl_s', 'on_timeout']]]) {
+    if (isObj(p[sec])) for (const k of Object.keys(p[sec])) if (!known.includes(k)) notes.push(`policy.${sec}.${escCtrl(k).slice(0, 40)} is not a rule: ignored${k === '__proto__' ? ' (a __proto__ key is never applied)' : ''}`);
+  }
   if (Object.keys(w).length) rules.worker = w;
-  for (const k of Object.keys(p)) if (!['tools', 'paths', 'bash', 'approval', 'version', 'default'].includes(k)) notes.push(`policy.${k} is not a rule: ignored`);
+  for (const k of Object.keys(p)) if (!['tools', 'paths', 'bash', 'approval', 'version', 'default'].includes(k)) notes.push(`policy.${escCtrl(k).slice(0, 40)} is not a rule: ignored${k === '__proto__' ? ' (a __proto__ key is never applied)' : ''}`);
   if (p.default !== undefined && p.default !== 'deny') notes.push('policy.default is not a rule (always deny): ignored');
   return { rules, notes };
 }
@@ -490,7 +498,7 @@ export function summarizeRules(snap, goal = null) {
     worker: { tools: [...pol.tools.allow], bash_allow: [...pol.bash.allow], read_extra: [...(pol.paths.read_extra || [])], on_outside_scope: pol.paths.on_outside_scope, sandbox: c.worker.sandbox,
       ask_on: [...pol.bash.ask_on], approval_wait_s: pol.approval.wait_in_hook_s, approval_ttl_s: pol.approval.ttl_s },
     denies: { bash: [...pol.bash.deny], paths: [...pol.paths.deny], patterns: pol.bash.deny_patterns.length, scope_deny: c.plan.scope_deny.map((e) => e.glob), floor: ['.git', '.claude/settings*.json', '.aos', '~/.claude', '~/.ssh', '~/.config'] },
-    checks: { allowlist: c.checks.allowlist.map((e) => e.cmd), sandbox: c.checks.sandbox, max_timeout_s: c.checks.max_timeout_s, localhost_ports: [...c.checks.localhost_ports] },
+    checks: { criteria: goal ? (goal.success_criteria || []).filter((x) => Array.isArray(x.check?.argv)).map((x) => x.check.argv.map(q).join(' ')) : [], allowlist: c.checks.allowlist.map((e) => e.cmd), sandbox: c.checks.sandbox, max_timeout_s: c.checks.max_timeout_s, localhost_ports: [...c.checks.localhost_ports] },
     plan: { approval: c.plan.approval, max_tasks: goal ? effectiveLimits(goal).max_tasks : c.plan.max_tasks, tiers: [...c.plan.tiers], max_start_tier: c.plan.max_start_tier },
     limits: goal ? effectiveLimits(goal) : { max_usd: c.budgets.max_usd, max_new_tokens: c.budgets.max_new_tokens, max_wall_clock_s: c.budgets.max_wall_clock_s, max_ticks: c.budgets.max_ticks, max_attempts: c.retry.max_attempts, max_parallel: c.parallel.max_parallel }, // after a budget patch, what goal.json enforces
     loosenings: lo, dropped: dr, notes: [...(snap.notes || [])].slice(0, 10),
@@ -506,7 +514,7 @@ export function renderRulesSummary(sm) {
   L.push(`  worker bash allow (${sm.worker.bash_allow.length}): ${cmdList(sm.worker.bash_allow)}${sm.worker.read_extra.length ? `   extra read roots: ${cmdList(sm.worker.read_extra)}` : ''}`);
   L.push(`  denied: bash ${sm.denies.bash.length} (${cmdList(sm.denies.bash, 6)}); paths ${cmdList(sm.denies.paths, 6)}; ${sm.denies.patterns} pattern(s); floor (never removable): ${sm.denies.floor.map(q).join(' ')}`);
   if (sm.denies.scope_deny.length) L.push(`  planner may not scope (and workers may not write): ${sm.denies.scope_deny.map(q).join(' ')}`);
-  L.push(`  checks: ${sm.checks.sandbox === 'required' ? 'sandboxed' : 'NOT sandboxed'}; allowlist: ${sm.checks.allowlist.map(q).join(', ') || '(none)'}${sm.checks.localhost_ports.length ? `; localhost ports ${sm.checks.localhost_ports.join(',')}` : ''}; max ${sm.checks.max_timeout_s}s`);
+  L.push(`  checks: ${sm.checks.sandbox === 'required' ? 'sandboxed' : 'NOT sandboxed'}; allowlist: ${sm.checks.allowlist.map(q).join(', ') || '(none)'}${sm.checks.criteria?.length ? `; success-criteria checks (${sm.checks.criteria.length}): ${cmdList(sm.checks.criteria, 6)}` : ''}${sm.checks.localhost_ports.length ? `; localhost ports ${sm.checks.localhost_ports.join(',')}` : ''}; max ${sm.checks.max_timeout_s}s`);
   L.push(`  plan approval: ${sm.plan.approval}; max ${sm.plan.max_tasks} tasks; tiers ${sm.plan.tiers.map(q).join('/')}; start at most ${q(sm.plan.max_start_tier)}`);
   L.push(`  limits: $${sm.limits.max_usd}, ${sm.limits.max_new_tokens} tokens, ${sm.limits.max_wall_clock_s}s, ${sm.limits.max_attempts} attempts/task, ${sm.limits.max_parallel} parallel`);
   L.push(sm.loosenings.length ? `LOOSENINGS YOU ARE APPROVING (${sm.loosenings.length}):` : 'LOOSENINGS YOU ARE APPROVING: none');

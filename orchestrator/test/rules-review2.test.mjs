@@ -210,3 +210,46 @@ test('S8: one evaluate() call has a total regex time budget (deny floor:regex_bu
   assert.equal(remainingWaitMs({ approval: { wait_in_hook_s: 20 } }, 60000), 0);
   assert.equal(remainingWaitMs({ approval: { wait_in_hook_s: 20 } }, -5), 20000);
 });
+
+test('nit: showBlob distinguishes an absent path (null) from git errors and oversize blobs (reject)', async (t) => {
+  const { showBlob } = await import('../lib/git.mjs');
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  assert.equal(await showBlob(sb.repo, 'main', 'nope.txt'), null, 'absent');
+  assert.equal((await showBlob(sb.repo, 'main', 'README.md')).toString(), '# fixture\n');
+  await assert.rejects(() => showBlob(sb.repo, 'no-such-ref', 'README.md'), /failed/, 'a bad ref is an error, not "absent"');
+  await assert.rejects(() => showBlob(path.join(sb.root, 'not-a-repo'), 'main', 'README.md'), /failed/);
+  await assert.rejects(() => showBlob(sb.repo, 'main', 'README.md', { maxBytes: 4 }), /larger than 4 bytes/);
+  // creation refuses a repo whose rules file cannot be read as opposed to treating it as absent
+  fs.mkdirSync(path.join(sb.repo, '.aos')); fs.writeFileSync(path.join(sb.repo, '.aos', 'rules.json'), ' '.repeat(17 * 1024 * 1024)); git(sb.repo, 'add', '-A'); git(sb.repo, 'commit', '-q', '-m', 'big');
+  await assert.rejects(() => sb.goal({ success_criteria: [crit('a.txt', 'alpha')] }), /refusing repo .*cannot read its \.aos\/rules\.json/);
+});
+
+test('nit: a user rules.json with repo_config.trust false wins over trust_repo_config; the compiled value decides', async (t) => {
+  const mk = async (userRules, trustFlag) => {
+    const sb = mkSandbox(); t.after(() => sb.cleanup());
+    fs.mkdirSync(path.join(sb.repo, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(sb.repo, '.claude', 'settings.json'), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'echo hi' }] }] } }));
+    git(sb.repo, 'add', '-A'); git(sb.repo, 'commit', '-q', '-m', 'cfg');
+    if (userRules) fs.writeFileSync(path.join(sb.orch, 'rules.json'), JSON.stringify(userRules));
+    return sb.goal({ success_criteria: [crit('a.txt', 'alpha')], orch: { trust_repo_config: trustFlag } });
+  };
+  await assert.rejects(() => mk(null, false), /refusing repo/, 'no trust: refused');
+  const ok = await mk(null, true); assert.equal(goalOf(ok.dir).orch.trust_repo_config, true, 'the flag alone still works');
+  await assert.rejects(() => mk(R({ repo_config: { trust: false } }), true), /compiled rules forbid it/, 'the user layer forbids: the flag is ignored and the repo refused');
+  const u = await mk(R({ repo_config: { trust: true } }), false); assert.equal(goalOf(u.dir).orch.trust_repo_config, true, 'a user layer may grant it');
+});
+
+test('nit: the summary lists the success-criteria check argv; a dropped __proto__ key is reported', async (t) => {
+  const { summarizeRules, renderRulesSummary: render, policyToRules } = await import('../lib/rules.mjs');
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  const { dir } = await parked(sb);
+  const { renderRulesFor } = await import('../lib/rules-store.mjs');
+  assert.match(renderRulesFor(dir, goalOf(dir)), /success-criteria checks \(1\): node -e /);
+  const sm = summarizeRules(readJSON(paths(dir).rules)); assert.deepEqual(sm.checks.criteria, [], 'without a goal there is nothing to list');
+  assert.match(render(sm), /checks:/);
+  const poisoned = JSON.parse('{"__proto__": {"x": 1}, "bash": {"__proto__": {"allow": ["rm"]}, "allow": ["ls"]}}');
+  const m = policyToRules(poisoned);
+  assert.ok(m.notes.some((n) => /policy\.__proto__ is not a rule.*never applied/.test(n)), m.notes.join('|'));
+  assert.ok(m.notes.some((n) => /policy\.bash\.__proto__ is not a rule/.test(n)));
+  assert.deepEqual(m.rules.worker.bash.allow.map((e) => e.cmd), ['ls']); assert.equal(({}).x, undefined);
+});

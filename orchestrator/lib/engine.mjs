@@ -964,7 +964,7 @@ export class Engine {
   }
   async _hashInstructions(ref) {
     const out = {}; const repo = readJSON(this.P.goal).orch.repo;
-    for (const rel of INSTRUCTION_FILES) { const b = await G.showBlob(repo, ref, rel); out[rel] = b ? sha256Buf(b) : null; }
+    for (const rel of INSTRUCTION_FILES) { try { const b = await G.showBlob(repo, ref, rel); out[rel] = b ? sha256Buf(b) : null; } catch { out[rel] = 'unreadable'; } } // fail closed: a git error differs from every recorded hash
     return out;
   }
   /** Hostile repo config on disk in `wt` (unless trusted) -> message, else null. */
@@ -1075,11 +1075,6 @@ export async function createGoal(orchDir, spec, { clock = realClock } = {}) {
   const start = goal.orch.repo;
   const info = await G.repoInfo(start, goal.orch.base_branch);
   goal.orch.repo = info.root; goal.orch.base_commit = info.base_commit;
-  // condition 2: refuse repos whose own Claude Code configuration could steer a worker, unless the human opted in
-  const { findings } = scanRepoConfig(G.realpath(start), info.root);
-  const trusted = goal.orch.trust_repo_config === true;
-  if (findings.length && !trusted) throw new Error(`refusing repo ${info.root}: it carries Claude Code configuration that could add hooks, permissions, env, MCP servers or commands to workers:\n  ${formatFindings(findings)}\nReview it; if you wrote it and trust it, set orch.trust_repo_config (CLI: --trust-repo-config).`);
-  goal.orch.repo_config_findings = findings.map((f) => ({ path: path.relative(info.root, f.path) || '.', kind: f.kind, detail: f.detail }));
   // CLAUDE.md files are trusted input: not refused, but hashed (committed content a worker will load) and announced
   const instructions = {};
   for (const rel of INSTRUCTION_FILES) { const b = await G.showBlob(info.root, info.base_commit, rel); instructions[rel] = b ? sha256Buf(b) : null; }
@@ -1089,11 +1084,19 @@ export async function createGoal(orchDir, spec, { clock = realClock } = {}) {
     const v = validateRules(goal.orch.rules_layer, { layer: 'goal' });
     if (!v.ok) throw new Error(`goal.orch.rules is invalid:\n  ${v.errors.slice(0, 10).join('\n  ')}`);
   }
-  const rr = parseRepoRules(await G.showBlob(info.root, info.base_commit, REPO_RULES_PATH));
+  let rb; try { rb = await G.showBlob(info.root, info.base_commit, REPO_RULES_PATH); } catch (e) { throw new Error(`refusing repo ${info.root}: cannot read its ${REPO_RULES_PATH} at ${info.base_commit.slice(0, 12)} (${String(e.message).slice(0, 150)}); a repo's rules can only tighten`); }
+  const rr = parseRepoRules(rb);
   if (rr.errors.length) throw new Error(`refusing repo ${info.root}: its ${REPO_RULES_PATH} (at ${info.base_commit.slice(0, 12)}) is invalid:\n  ${rr.errors.slice(0, 10).join('\n  ')}\nFix it on the base branch; a repo's rules can only tighten.`);
   if (rr.rules) goal.orch.repo_rules = { sha256: rr.sha256, path: REPO_RULES_PATH, base_commit: info.base_commit };
   const pre = previewGoal({ orchDir, goal, repo: rr.rules || null });
   if (!pre.ok) throw new Error(`rules refused:\n  ${pre.errors.slice(0, 10).join('\n  ')}`);
+  // condition 2: refuse repos whose own Claude Code configuration could steer a worker, unless the human opted in
+  const { findings } = scanRepoConfig(G.realpath(start), info.root);
+  // the COMPILED repo_config.trust decides (a user rules layer that forbids trust wins over the goal's --trust-repo-config; one that grants it needs no flag)
+  const trusted = pre.comp.compiled.repo_config.trust === true;
+  goal.orch.trust_repo_config = trusted;
+  if (findings.length && !trusted) throw new Error(`refusing repo ${info.root}: it carries Claude Code configuration that could add hooks, permissions, env, MCP servers or commands to workers:\n  ${formatFindings(findings)}\nReview it; if you wrote it and trust it, set orch.trust_repo_config (CLI: --trust-repo-config)${spec.orch?.trust_repo_config ? ' (trust was requested, but the compiled rules forbid it: a rules.json with repo_config.trust false wins)' : ''}.`);
+  goal.orch.repo_config_findings = findings.map((f) => ({ path: path.relative(info.root, f.path) || '.', kind: f.kind, detail: f.detail }));
   const dir = createGoalDir(orchDir, goal, spec.plan || null);
   if (rr.rules) atomicWrite(path.join(dir, REPO_RULES_FILE), rr.rules);
   const notices = instructionNotice(info.root, instructions);
