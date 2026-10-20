@@ -309,7 +309,7 @@ export function toPolicy(r) {
   return {
     version: 1, default: 'deny',
     tools: { allow: [...w.tools.allow] },
-    paths: { write: 'worktree+scope', read_extra: w.paths.read_extra.map((e) => e.glob), on_outside_scope: w.paths.on_outside_scope, deny: w.paths.deny.map((e) => e.glob) },
+    paths: { write: 'worktree+scope', read_extra: w.paths.read_extra.map((e) => e.glob), on_outside_scope: w.paths.on_outside_scope, deny: w.paths.deny.map((e) => e.glob), ...(r.plan.scope_deny.length ? { scope_deny: r.plan.scope_deny.map((e) => e.glob) } : {}) },
     bash: { allow: w.bash.allow.map((e) => e.cmd), deny: w.bash.deny.map((e) => e.cmd), deny_patterns: w.bash.deny_patterns.map((e) => e.regex), ask_on: [...w.bash.ask_on] },
     approval: { wait_in_hook_s: w.approval.wait_in_hook_s, ttl_s: w.approval.ttl_s, on_timeout: 'deny' },
   };
@@ -484,7 +484,7 @@ export function renderRulesSummary(sm) {
   L.push(`  worker tools: ${sm.worker.tools.map(q).join(' ')}   outside path_scope: ${sm.worker.on_outside_scope}   worker sandbox: ${sm.worker.sandbox}`);
   L.push(`  worker bash allow (${sm.worker.bash_allow.length}): ${cmdList(sm.worker.bash_allow)}${sm.worker.read_extra.length ? `   extra read roots: ${cmdList(sm.worker.read_extra)}` : ''}`);
   L.push(`  denied: bash ${sm.denies.bash.length} (${cmdList(sm.denies.bash, 6)}); paths ${cmdList(sm.denies.paths, 6)}; ${sm.denies.patterns} pattern(s); floor (never removable): ${sm.denies.floor.map(q).join(' ')}`);
-  if (sm.denies.scope_deny.length) L.push(`  planner may not scope: ${sm.denies.scope_deny.map(q).join(' ')}`);
+  if (sm.denies.scope_deny.length) L.push(`  planner may not scope (and workers may not write): ${sm.denies.scope_deny.map(q).join(' ')}`);
   L.push(`  checks: ${sm.checks.sandbox === 'required' ? 'sandboxed' : 'NOT sandboxed'}; allowlist: ${sm.checks.allowlist.map(q).join(', ') || '(none)'}${sm.checks.localhost_ports.length ? `; localhost ports ${sm.checks.localhost_ports.join(',')}` : ''}; max ${sm.checks.max_timeout_s}s`);
   L.push(`  plan approval: ${sm.plan.approval}; max ${sm.plan.max_tasks} tasks; tiers ${sm.plan.tiers.map(q).join('/')}; start at most ${q(sm.plan.max_start_tier)}`);
   L.push(`  limits: $${sm.limits.max_usd}, ${sm.limits.max_new_tokens} tokens, ${sm.limits.max_wall_clock_s}s, ${sm.limits.max_attempts} attempts/task, ${sm.limits.max_parallel} parallel`);

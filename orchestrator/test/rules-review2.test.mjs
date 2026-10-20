@@ -95,3 +95,25 @@ test('S3: brace globs and root-relative deny globs bind (the reviewer probes)', 
   assert.equal(validateRules(R({ worker: { paths: { deny: [{ id: 'x', glob: '{a,b}{a,b}{a,b}{a,b}{a,b}' }] } } })).ok, false, 'a regex-expensive glob is refused');
   assert.equal(validateRules(R({ worker: { paths: { deny: [{ id: 'x', glob: '**/*.{js,mjs}' }] } } })).ok, true);
 });
+
+test('S4: scope checks fold case/NFKC, expand braces, sample inside [] classes; scope_deny is enforced at run time', async () => {
+  const { scopeHitsDeny, expandBraces } = await import('../lib/glob.mjs');
+  const { evaluate } = await import('../lib/policy.mjs');
+  const { toPolicy } = await import('../lib/rules.mjs');
+  assert.deepEqual(expandBraces('a{b,c{d,e}}f').sort(), ['abf', 'acdf', 'acef']);
+  assert.equal(scopeHitsDeny('Certs/Server.PEM', '**/*.pem'), true, 'case');
+  assert.equal(scopeHitsDeny('ｓecrets/**', 'secrets/**'), true, 'NFKC (fullwidth s)');
+  assert.equal(scopeHitsDeny('lib/{a,b}/x.txt', 'lib/b/**'), true, 'brace in the scope');
+  assert.equal(scopeHitsDeny('lib/b/x.txt', '{lib,src}/b/**'), true, 'brace in the deny');
+  assert.equal(scopeHitsDeny('[ab]/x.txt', 'b/**'), true, 'class sample (b, not x)');
+  assert.equal(scopeHitsDeny('docs/*.md', 'secrets/**'), false);
+  assert.equal(scopeHitsDeny('lib/{a,b}/x.txt', 'lib/c/**'), false);
+  // run time: the hook policy carries scope_deny; a write that matches it is denied even inside path_scope
+  const comp = compileRules([{ layer: 'user', rules: R({ plan: { scope_deny: [{ id: 'lock', glob: 'package-lock.json' }, { id: 'keys', glob: '**/*.{pem,key}' }] } }) }]);
+  const pol = toPolicy(comp.compiled); assert.deepEqual(pol.paths.scope_deny, ['package-lock.json', '**/*.{pem,key}']);
+  const ctx = { worktree: '/w', path_scope: ['**'], allowed_tools: ['Write'], grants: [] };
+  const w = (f) => evaluate(pol, { tool_name: 'Write', tool_input: { file_path: f }, cwd: '/w' }, ctx);
+  assert.equal(w('/w/package-lock.json').decision, 'deny'); assert.equal(w('/w/package-lock.json').rule, 'scope_denied');
+  assert.equal(w('/w/a/b/server.KEY').decision, 'deny'); assert.equal(w('/w/a/b/ok.txt').decision, 'allow');
+  assert.deepEqual(toPolicy(compileRules([]).compiled).paths.scope_deny, undefined, 'no scope_deny key by default: the default policy is unchanged');
+});

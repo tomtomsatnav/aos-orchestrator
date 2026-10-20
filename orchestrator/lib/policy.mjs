@@ -96,7 +96,7 @@ export function mergePolicy(...layers) {
 const res = (decision, reason, rule, layer, id) => ({ decision, reason, rule, ...(layer ? { layer } : {}), ...(id ? { id } : {}) });
 // Rule ids (docs/rules-design.md section 5): `<layer>:<rule>`. The legacy `rule` strings are the ids. Rules not listed here are enforced by
 // code (the floor); the listed ones are driven by the policy (default layer, later user/repo/goal).
-const DEFAULT_LAYER_RULES = new Set(['tool_not_allowed', 'outside_scope', 'bash_allow', 'write_in_scope', 'read_in_worktree', 'dangerous_pattern', 'substitution', 'unknown_command', 'default']);
+const DEFAULT_LAYER_RULES = new Set(['scope_denied', 'tool_not_allowed', 'outside_scope', 'bash_allow', 'write_in_scope', 'read_in_worktree', 'dangerous_pattern', 'substitution', 'unknown_command', 'default']);
 const POLICY_DENY_REASON = 'command is on the policy deny list';
 const withId = (r) => { const { id, ...rest } = r; const layer = r.layer || (DEFAULT_LAYER_RULES.has(r.rule) ? 'default' : 'floor'); return { ...rest, layer, rule_id: `${layer}:${id || r.rule}` }; };
 const lex = (p) => p;
@@ -135,6 +135,7 @@ function checkPath(policy, ctx, R, arg, mode, base) {
   const { abs, real } = R.resolve(arg, base);
   const pd = pathDeniedBy(policy, ctx, abs, real);
   if (pd) return res('deny', `path is protected by policy: ${mode}`, 'path_denied', pd);
+  if (mode === 'write') { const sd = policy.paths?.scope_deny; const wt = path.resolve(ctx.worktree); if (sd?.length && hits(sd.map((x) => expandHome(x, ctx.home)), [abs, real], [...new Set([wt, R.wt])])) return res('deny', 'path is on the rules plan.scope_deny list', 'scope_denied', 'default'); }
   const inside = isInside(real, R.wt);
   if (mode === 'read') {
     if (inside) return null;
@@ -369,7 +370,7 @@ function evaluateRaw(policy, toolCall, ctx) {
 export function isProtectedRel(policy, rel) {
   const pol = mergePolicy(policy);
   const p = fold(`/${rel}`);
-  const globs = [...(pol.paths?.deny || []), ...FLOOR_DENY_GLOBS].map(fold);
+  const globs = [...(pol.paths?.deny || []), ...(pol.paths?.scope_deny || []), ...FLOOR_DENY_GLOBS].map(fold);
   return globs.some((g) => (g.startsWith('**/') ? globToRegex(g).test(p) : g.startsWith('~') ? false : isRootRelative(g) && matchGlob(g.replace(/^\.\//, ''), fold(rel))));
 }
 

@@ -66,14 +66,48 @@ export function globsOverlap(a, b) {
   return true;
 }
 
-const sampleOf = (g) => g.replace(/\*\*\//g, 'x/').replace(/\*\*/g, 'x').replace(/[*?]/g, 'x').replace(/\[[^\]]*\]/g, 'x');
+/** Expand `{a,b}` alternation into plain globs (nested; at most `cap` results; an unbalanced brace stays literal). */
+export function expandBraces(g, cap = 64) {
+  const open = g.indexOf('{');
+  if (open < 0) return [g];
+  let depth = 0; let close = -1; const cuts = [];
+  for (let i = open; i < g.length; i++) {
+    if (g[i] === '{') depth++;
+    else if (g[i] === '}' && --depth === 0) { close = i; break; } else if (g[i] === ',' && depth === 1) cuts.push(i);
+  }
+  if (close < 0) return [g];
+  const pre = g.slice(0, open); const post = g.slice(close + 1); const alts = []; let from = open + 1;
+  for (const c of [...cuts, close]) { alts.push(g.slice(from, c)); from = c + 1; }
+  const out = [];
+  for (const a of alts) for (const rest of expandBraces(pre + a + post, cap)) { out.push(rest); if (out.length >= cap) return out; }
+  return out;
+}
+/** Expand each `[...]` class into one variant per member (range ends only; a negated class contributes x and y), at most `cap` results. */
+function expandClasses(g, cap = 64) {
+  const m = /\[([!^]?)([^\]]+)\]/.exec(g);
+  if (!m) return [g];
+  const chars = new Set();
+  if (m[1]) { chars.add('x'); chars.add('y'); } else for (let i = 0; i < m[2].length; i++) { chars.add(m[2][i]); if (m[2][i + 1] === '-' && m[2][i + 2]) { chars.add(m[2][i + 2]); i += 2; } }
+  const out = [];
+  for (const c of chars) for (const rest of expandClasses(g.slice(0, m.index) + c + g.slice(m.index + m[0].length), cap)) { out.push(rest); if (out.length >= cap) return out; }
+  return out;
+}
+const fold = (s) => String(s).normalize('NFKC').toLowerCase();
+/** A concrete string a brace-free glob matches: `*` -> x, `?` -> x, a [] class -> a character from inside it (a negated class -> one that is not in it). */
+const sampleOf = (g) => g.replace(/\*\*\//g, 'x/').replace(/\*\*/g, 'x').replace(/[*?]/g, 'x').replace(/\[([!^]?)([^\]]*)\]/g, (m, neg, body) => (neg ? (body.includes('x') ? 'y' : 'x') : body[0] || 'x'));
 /**
  * Can a path_scope entry and a deny glob name a common file? Heuristic (no regex-language intersection): tries a few concrete paths built from both globs
- * (the scope's samples, the deny's samples, and each glob's directory prefix joined with the other's tail) and asks whether both match one. Conservative for
- * directory scopes (a scope that names `docs` covers everything under it), so a plan that could write a denied file is rejected rather than approved.
+ * (the scope's samples, the deny's samples, and each glob's directory prefix joined with the other's tail) and asks whether both match one. Both are
+ * case- and NFKC-folded (like the runtime deny check) and brace alternatives are expanded. Conservative for directory scopes (a scope that names `docs`
+ * covers everything under it), so a plan that could write a denied file is rejected rather than approved.
  */
 export function scopeHitsDeny(scope, deny) {
-  const s = scope.replace(/^\.\//, '').replace(/\/+$/, ''); const d = deny.replace(/^\.\//, '').replace(/\/+$/, '');
+  const clean = (x) => fold(x).replace(/^\.\//, '').replace(/\/+$/, '');
+  const variants = (x) => expandBraces(clean(x)).flatMap((v) => expandClasses(v));
+  for (const s of variants(scope)) for (const d of variants(deny)) if (scopeHitsDenyPlain(s, d)) return true;
+  return false;
+}
+function scopeHitsDenyPlain(s, d) {
   if (!hasWild(s) && /\.[^/]+$/.test(s)) return matchGlob(d, s); // a literal name with an extension is a file, not a directory
   const dir = (g) => staticPrefix(g).join('/'); const tail = (g) => sampleOf(g.replace(/^(\*\*\/)+/, ''));
   const join = (a, b) => (a ? `${a}/${b}` : b);
