@@ -60,7 +60,7 @@ test('state: orch dir default and goal spec validation (budget is mandatory and 
   assert.match(orchRoot({}), /\.claude\/plugins\/data\/aos-dashboard-aos-local\/orch$/);
   const ok = { title: 'T', success_criteria: [{ text: 'x', check: { argv: ['true'], timeout_s: 5 } }], orch: { repo: '/r' } };
   const g = normalizeGoalSpec(ok, { clock: { now: () => Date.UTC(2026, 9, 20) } });
-  assert.deepEqual(validateGoal(g), []); assert.equal(g.id, 'g-20261020-t'); assert.equal(g.status, 'draft'); assert.equal(g.orch.integration_branch, 'aos/g-20261020-t/integration');
+  assert.deepEqual(validateGoal(g), []); assert.match(g.id, /^g-20261020-t-[0-9a-f]{4}$/); assert.equal(g.status, 'draft'); assert.equal(g.orch.integration_branch, `aos/${g.id}/integration`);
   assert.equal(g.orch.approval_policy.plan, 'required', 'strict default: plan approval required');
   assert.throws(() => normalizeGoalSpec({ ...ok, orch: { repo: 'relative' } }), /absolute/);
   assert.throws(() => normalizeGoalSpec({ ...ok, success_criteria: [] }), /at least one/);

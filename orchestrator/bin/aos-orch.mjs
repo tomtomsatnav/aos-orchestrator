@@ -96,6 +96,13 @@ async function main() {
       } else dir = resolveGoalDir(arg1);
       assertRepoTrusted(readJSON(paths(dir).goal));
       const id = readJSON(paths(dir).goal).id;
+      { // a goal blocked at planning (plan rejected by the validator or by a human) never re-plans by itself: say so, and re-plan on request
+        const g0 = readJSON(paths(dir).goal);
+        if (g0.status === 'blocked' && g0.orch.plan_state === 'rejected') {
+          if (flags.replan) { enqueueCommand(dir, { cmd: 'replan', by: 'cli' }); console.error(`aos-orch: ${id} was blocked at planning (${escCtrl(String(g0.blocked_reason || '').slice(0, 300))}); asking the planner again (--replan)`); }
+          else console.error(`aos-orch: ${id} is blocked at planning: ${escCtrl(String(g0.blocked_reason || '').slice(0, 300))}\naos-orch: nothing will change by itself. To ask the planner again (it is told what was wrong):  aos-orch run ${id} --replan`);
+        }
+      }
       const waiting = (s) => s.plan_state === 'awaiting_approval' || /^awaiting human confirmation/.test(String(s.blocked_reason || ''));
       let { status, s } = await driveOnce(dir);
       // --wait-approval: stay attached while a human decides. The engine is only run again once a command (approve-plan, confirm, ...) has been queued by the human's own CLI call;

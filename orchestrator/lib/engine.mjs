@@ -18,7 +18,7 @@ import { compileGoal, recompileSnapshot, previewGoal, parseRepoRules, REPO_RULES
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
 import { Governor, DEFAULTS as GOV_DEFAULTS, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
-import { buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHashFor, tasksHashV, reviewView, canonical, sha256 } from './plan.mjs';
+import { startableTiers, buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHashFor, tasksHashV, reviewView, canonical, sha256 } from './plan.mjs';
 import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
 import { sandboxAvailable, wrapWorkerCommand, SANDBOX_EXEC } from './sandbox.mjs';
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
@@ -28,6 +28,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_SCRIPT = path.join(HERE, 'policy-hook.mjs');
 const budgetRule = (why) => (/new-token/.test(why) ? 'budgets.max_new_tokens' : /wall-clock/.test(why) ? 'budgets.max_wall_clock_s' : /tick/.test(why) ? 'budgets.max_ticks' : /USD/.test(why) ? 'budgets.max_usd' : 'budgets');
 const backoffS = (interval, errors) => Math.min(interval * 2 ** Math.min(errors || 0, 20), 900);
+/** Automatic re-plans after a planner plan fails validation (the validation errors are fed back); `aos-orch run <goal> --replan` is the human's explicit extra attempt. */
+export const AUTO_REPLANS = 1;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export class Engine {
@@ -244,6 +246,16 @@ export class Engine {
         case 'confirm': this._confirmCriterion(S, c); break;
         case 'approve-plan':
           if (goal.orch.plan_state === 'awaiting_approval') { this._activate(S, 'human', c.reviewed); saveState(this.dir, S); }
+          break;
+        case 'replan': // a goal blocked at planning (plan rejected by the validator or by the human): back to 'none' so the next step asks the planner again
+          if (goal.status === 'blocked' && goal.orch.plan_state === 'rejected' && !this.workers.size) {
+            for (const t of S.tasks) if (t.orch.worktree) { try { await this._dropWorktree(S, t); } catch { /* best effort */ } }
+            S.tasks = []; S.agents = []; goal.status = 'draft'; goal.blocked_reason = null; goal.orch.plan_state = 'none'; goal.orch.replans = 0; goal.orch.reported = false;
+            delete goal.orch.plan_fingerprint; delete goal.orch.plan_approval;
+            this.ev('orch.plan.replan_requested', 'human', null, { by: c.by || 'cli', previous: 'rejected' }); this.ev('goal.updated', 'orchestrator', null, { status: 'draft', plan_state: 'none' });
+            saveState(this.dir, S);
+            atomicWrite(this.P.hb, { ...loadHeartbeat(this.dir), status: 'running' });
+          }
           break;
         case 'reject-plan':
           if (goal.orch.plan_state === 'awaiting_approval') {
@@ -816,8 +828,18 @@ export class Engine {
     }
     if (!this._rulesCheck(S).ok) return this._planRejected(S, ['rules.snapshot.json was modified or is missing']);
     const rv = this._rulesView(goal); // compiled rules and worker policy of the (intact) snapshot: the plan must lie inside them (R7, G4)
-    const v = validatePlan(plan, { max_tasks: rv ? rv.compiled.plan.max_tasks : o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal), ...(rv ? { rules: rv.compiled, policy: rv.policy } : {}) });
-    if (!v.ok) return this._planRejected(S, v.errors);
+    const validate = (pl) => validatePlan(pl, { max_tasks: rv ? rv.compiled.plan.max_tasks : o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal), ...(rv ? { rules: rv.compiled, policy: rv.policy } : {}) });
+    let v = validate(plan);
+    // a planner plan that breaks the rules gets AUTO_REPLANS automatic re-plan(s) with the exact validation errors fed back (its tokens are counted in the goal's usage like any planner call)
+    while (!v.ok && source === 'planner' && (o.replans || 0) < AUTO_REPLANS && !o.halt_reason && o.usage.new_tokens < o.budgets.max_new_tokens) {
+      o.replans = (o.replans || 0) + 1;
+      this.ev('orch.plan.replan', 'orchestrator', null, { attempt: o.replans, of: AUTO_REPLANS, errors: v.errors.slice(0, 20), counted_in_budget: true });
+      saveState(this.dir, S);
+      const r2 = await this._runPlanner(S, { errors: v.errors });
+      if (r2.error) return this._planRejected(S, [`re-plan failed: ${r2.error}`, ...v.errors]);
+      plan = r2.plan; v = validate(plan);
+    }
+    if (!v.ok) return this._planRejected(S, o.replans ? [`still invalid after ${o.replans} automatic re-plan(s)`, ...v.errors] : v.errors);
     o.tasks_hash_v = 2; // new plans are hashed with their description/output_contract/acceptance too (older goals keep v1 so their approval still verifies)
     S.tasks = toTasks(v.tasks, goal, this.now(), this._R(goal).retry.ladder);
     S.agents = S.tasks.map((t) => ({ id: t.assignee, role: 'worker', capabilities: ['edit', 'bash'], can_delegate: false, status: 'idle', current_task: null, last_event_at: null, orch: { tier: t.orch.model_tier } }));
@@ -843,12 +865,13 @@ export class Engine {
     saveState(this.dir, S);
   }
 
-  async _runPlanner(S) {
+  async _runPlanner(S, replan = null) {
     const goal = S.goal; const o = goal.orch; const PR = this._R(goal).plan; const pTier = PR.planner_tier;
     const wt = this._integrationWt(goal);
     const guard = this._configGuard(goal, wt);
     if (guard) return { error: guard };
-    const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), constraints: { max_tasks: o.budgets.max_tasks, tiers: this._rulesView(goal)?.compiled.plan.tiers ?? TIERS, check_allowlist: this._checkAllowlist(goal) } });
+    const rc = this._rulesView(goal)?.compiled;
+    const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), replan, constraints: { max_tasks: rc ? rc.plan.max_tasks : o.budgets.max_tasks, tiers: startableTiers(rc?.plan.tiers ?? TIERS, rc?.plan.max_start_tier), max_start_tier: rc?.plan.max_start_tier, scope_deny: (rc?.plan.scope_deny || []).map((d) => d.glob), protected_tests: o.protected_tests?.files || [], check_allowlist: this._checkAllowlist(goal) } });
     const sessionId = crypto.randomUUID();
     const policyFile = path.join(this.P.workers, 'planner.policy.json');
     atomicWrite(policyFile, { ...this._policyHead(goal), ctx: { worktree: realpathDeepest(wt), path_scope: [], allowed_tools: ['Read', 'Glob', 'Grep'], allowed_commands: [], grants: [], home: this.env.HOME, base_branch: o.base_branch } });
