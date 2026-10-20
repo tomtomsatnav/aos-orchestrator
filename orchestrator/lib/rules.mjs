@@ -236,3 +236,27 @@ export function toPolicy(r) {
     approval: { wait_in_hook_s: w.approval.wait_in_hook_s, ttl_s: w.approval.ttl_s, on_timeout: 'deny' },
   };
 }
+
+// ---------------------------------------------------------------- snapshot (R4)
+/**
+ * What the engine stores per goal (rules.snapshot.json) and hashes. R4 wires only the legacy goal inputs (policy file + goal policy
+ * override), which are already folded into `policy` (the effective worker policy); `compiled` is the engine default rule set that R5
+ * will overlay with the user and goal layers. The hash covers both, so any change to either is detected.
+ */
+export function buildSnapshot({ policy, legacy = false, layers = [] }) {
+  const c = compileRules([]);
+  const snap = { rules_version: RULES_VERSION, legacy: !!legacy, compiled: c.compiled, policy, layers: [...c.layers, ...layers], loosenings: [...c.loosenings] };
+  snap.rules_hash = snapshotHash(snap);
+  return snap;
+}
+/** Hash of the part of a snapshot that decides behaviour. Recomputed from content on every check, never trusted from the file. Never throws. */
+export function snapshotHash(snap) {
+  if (!snap || typeof snap !== 'object' || Array.isArray(snap)) return 'invalid';
+  try { return sha256(canonical({ rules_version: snap.rules_version, compiled: snap.compiled, policy: snap.policy })); } catch { return 'invalid'; }
+}
+/** The rules hash a plan fingerprint / approval binds: undefined for goals without rules or legacy goals (their plan hash is unchanged). */
+export function rulesFingerprint(goal, snap) {
+  const r = goal?.orch?.rules;
+  if (!r || r.legacy) return undefined;
+  return snap ? snapshotHash(snap) : 'missing';
+}

@@ -13,10 +13,11 @@ import * as G from './git.mjs';
 import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
 import { matchAny, scopesOverlap } from './glob.mjs';
 import { mergePolicy, DEFAULT_POLICY, isProtectedRel } from './policy.mjs';
+import { buildSnapshot, snapshotHash, rulesFingerprint } from './rules.mjs';
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
 import { Governor, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
-import { buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHash, reviewView } from './plan.mjs';
+import { buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHash, reviewView, canonical, sha256 } from './plan.mjs';
 import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
 import { sandboxAvailable, wrapWorkerCommand, SANDBOX_EXEC } from './sandbox.mjs';
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
@@ -153,6 +154,7 @@ export class Engine {
     let hb = loadHeartbeat(this.dir);
     if (TERMINAL.has(goal.status)) { if (hb.status !== 'stopped') atomicWrite(P.hb, { ...hb, status: 'stopped' }); return { stopped: true, goal: goal.status }; }
     touchLock(this.dir, { pid: this.pid, now: Date.now() });
+    this._ensureRules(S);
 
     // 1. Beat
     const now = this.now();
@@ -266,14 +268,17 @@ export class Engine {
   }
 
   /** Current fingerprint of what a human approves: the stored plan and the engine's task commands/scopes. */
-  _fingerprint(S) { return { plan_hash: planHash(readJSON(this.P.plan)?.plan ?? null), tasks_hash: tasksHash(S.tasks) }; }
+  _fingerprint(S) {
+    const rules_hash = rulesFingerprint(S.goal, readJSON(this.P.rules, null));
+    return { plan_hash: planHash(readJSON(this.P.plan)?.plan ?? null), tasks_hash: tasksHash(S.tasks), ...(rules_hash ? { rules_hash } : {}) };
+  }
 
   /** Activate the goal. The approval record stores the plan hash; a human approval of an edited plan is refused. */
   _activate(S, who, reviewed = null) {
     const goal = S.goal;
     const cur = this._fingerprint(S); const pending = goal.orch.plan_fingerprint;
-    const stale = !pending || pending.plan_hash !== cur.plan_hash || pending.tasks_hash !== cur.tasks_hash
-      || (reviewed && (reviewed.plan_hash !== cur.plan_hash || reviewed.tasks_hash !== cur.tasks_hash));
+    const stale = !pending || pending.plan_hash !== cur.plan_hash || pending.tasks_hash !== cur.tasks_hash || pending.rules_hash !== cur.rules_hash
+      || (reviewed && (reviewed.plan_hash !== cur.plan_hash || reviewed.tasks_hash !== cur.tasks_hash || reviewed.rules_hash !== cur.rules_hash));
     if (stale) {
       this.ev('orch.plan.approval_refused', 'orchestrator', null, { by: who, reason: 'the plan changed since it was proposed or reviewed; re-review it', current: cur.plan_hash.slice(0, 12) });
       return false;
@@ -290,13 +295,45 @@ export class Engine {
   _planIntact(S) {
     const o = S.goal.orch; const a = o.plan_approval;
     const cur = this._fingerprint(S);
-    const ok = !!a && a.plan_hash === cur.plan_hash && a.tasks_hash === cur.tasks_hash;
-    if (!ok && !o.halt_reason) {
+    const planOk = !!a && a.plan_hash === cur.plan_hash && a.tasks_hash === cur.tasks_hash;
+    const rules = this._rulesCheck(S);
+    const ok = planOk && rules.ok;
+    if (!rules.ok && !o.halt_reason && planOk) {
+      o.halt_reason = 'rules modified after approval: dispatch refused (rules.snapshot.json changed or is missing)'; o.halt_at_ms = this.now();
+      this.ev('orch.rules.tampered', 'orchestrator', null, { approved: (a?.rules_hash || o.rules?.sha256 || '').slice(0, 12) || null, current: rules.actual.slice(0, 12) });
+    } else if (!ok && !o.halt_reason) {
       o.halt_reason = a ? 'plan modified after approval: dispatch refused (plan.json or the task commands/scopes changed)' : 'no plan approval record: dispatch refused';
       o.halt_at_ms = this.now();
       this.ev('orch.plan.tampered', 'orchestrator', null, { approved: a ? a.plan_hash.slice(0, 12) : null, current: cur.plan_hash.slice(0, 12), tasks_match: !!a && a.tasks_hash === cur.tasks_hash });
     }
     return ok;
+  }
+
+  /**
+   * The rule set is snapshotted once per goal (rules.snapshot.json, 0600) when the engine first loads it, so the planner and every worker run under
+   * the same rules for the whole run and a later edit of policy.default.json or of a goal policy file has no effect (G2). A goal that already has a
+   * plan but no snapshot (created before R4) gets one flagged legacy: its plan hash is unchanged, and the snapshot hash is recorded in goal.json.
+   */
+  _ensureRules(S) {
+    const goal = S.goal; const o = goal.orch;
+    if (o.rules) return;
+    const file = typeof o.policy === 'string' ? readJSON(path.join(this.orchDir, o.policy), null) : null;
+    const over = o.policy && typeof o.policy === 'object' ? o.policy : null;
+    const legacy = !!(o.plan_fingerprint || o.plan_approval || S.tasks.length);
+    const snap = buildSnapshot({ policy: this._effectivePolicy(goal, file, over), legacy,
+      layers: [{ layer: 'policy-file', source: typeof o.policy === 'string' ? o.policy : null, sha256: file ? sha256(canonical(file)) : null }, { layer: 'goal-policy', source: null, sha256: over ? sha256(canonical(over)) : null }] });
+    atomicWrite(this.P.rules, snap);
+    o.rules = { hash: snap.rules_hash.slice(0, 12), sha256: snap.rules_hash, version: snap.rules_version, profile: snap.compiled.profile, legacy,
+      layers: snap.layers.map((l) => ({ layer: l.layer, sha12: l.sha256 ? l.sha256.slice(0, 12) : null })), loosenings: [] };
+    this.ev('orch.rules.snapshotted', 'orchestrator', null, { rules_hash: o.rules.hash, profile: o.rules.profile, legacy, loosenings: 0 });
+    saveState(this.dir, S);
+  }
+
+  /** Does the snapshot on disk still hash to what goal.json (and the plan approval, when it carries one) recorded? */
+  _rulesCheck(S) {
+    const o = S.goal.orch; const actual = snapshotHash(readJSON(this.P.rules, null));
+    const a = o.plan_approval;
+    return { ok: !!o.rules && actual === o.rules.sha256 && (!a?.rules_hash || a.rules_hash === actual), actual };
   }
 
   async _cancel(S, kind, by) {
@@ -680,6 +717,7 @@ export class Engine {
       if (r.error) return this._planRejected(S, [r.error]);
       plan = r.plan; source = 'planner';
     }
+    if (!this._rulesCheck(S).ok) return this._planRejected(S, ['rules.snapshot.json was modified or is missing']);
     const v = validatePlan(plan, { max_tasks: o.budgets.max_tasks, check_allowlist: this._checkAllowlist(goal) });
     if (!v.ok) return this._planRejected(S, v.errors);
     S.tasks = toTasks(v.tasks, goal, this.now());
@@ -712,7 +750,7 @@ export class Engine {
     const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), constraints: { max_tasks: o.budgets.max_tasks, tiers: TIERS, check_allowlist: this._checkAllowlist(goal) } });
     const sessionId = crypto.randomUUID();
     const policyFile = path.join(this.P.workers, 'planner.policy.json');
-    atomicWrite(policyFile, { policy: this._policy(goal), ctx: { worktree: realpathDeepest(wt), path_scope: [], allowed_tools: ['Read', 'Glob', 'Grep'], allowed_commands: [], grants: [], home: this.env.HOME, base_branch: o.base_branch } });
+    atomicWrite(policyFile, { policy: this._policy(goal), rules_hash: goal.orch.rules?.sha256 ?? null, ctx: { worktree: realpathDeepest(wt), path_scope: [], allowed_tools: ['Read', 'Glob', 'Grep'], allowed_commands: [], grants: [], home: this.env.HOME, base_branch: o.base_branch } });
     const stdout = this.wpath('planner', 1, 'stream.ndjson'); const stderr = this.wpath('planner', 1, 'stderr');
     for (const f of [stdout, stderr]) { try { fs.unlinkSync(f); } catch { /* none */ } }
     const args = W.buildArgs({ prompt, tier: 'opus', sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, tools: W.READ_ONLY_TOOLS, allowedTools: W.READ_ONLY_TOOLS, appendSystemPrompt: 'You are the planner for an AOS-1 goal. You do not edit files. Output ONLY one JSON object.', settingsFile: path.join(this.P.workers, 'settings.json') });
@@ -819,7 +857,7 @@ export class Engine {
     task.orch.worktree = wt;
     const real = realpathDeepest(wt);
     const policyFile = this.wpath(task.id, seq, 'policy.json');
-    atomicWrite(policyFile, { policy: this._policy(goal), ctx: { worktree: real, path_scope: task.orch.path_scope, allowed_tools: task.orch.allowed_tools,
+    atomicWrite(policyFile, { policy: this._policy(goal), rules_hash: goal.orch.rules?.sha256 ?? null, ctx: { worktree: real, path_scope: task.orch.path_scope, allowed_tools: task.orch.allowed_tools,
       allowed_commands: task.orch.allowed_commands, grants: task.orch.grants, home: this.env.HOME, base_branch: o.base_branch } });
     const deps = task.depends_on.map((d) => S.tasks.find((x) => x.id === d)).filter(Boolean).map((d) => ({ id: d.id, title: d.title, summary: d.orch.result_summary }));
     const prompt = W.buildWorkerPrompt({ goal, task, deps, previous: task.orch.last_failure ? { check_output: task.orch.last_failure.check_output, denials: task.orch.last_failure.denials, note: task.orch.last_failure.note } : null });
@@ -903,12 +941,14 @@ export class Engine {
     const crit = goal.success_criteria.filter((c) => c.check).map((c) => c.check.argv);
     return [...base, ...crit];
   }
+  /** The worker policy of a goal: read ONLY from its rules snapshot (never re-reads policy files). Fails closed (no tool allowed) if the snapshot does not match goal.json. */
   _policy(goal) {
-    const o = goal.orch;
-    let file = null;
-    if (typeof o.policy === 'string') file = readJSON(path.join(this.orchDir, o.policy), null);
-    const over = o.policy && typeof o.policy === 'object' ? o.policy : null;
-    return mergePolicy(file, over, { approval: { ttl_s: o.budgets.approval_ttl_s, ...(over?.approval || {}) } });
+    const snap = readJSON(this.P.rules, null);
+    if (snap && goal.orch.rules && snapshotHash(snap) === goal.orch.rules.sha256 && snap.policy) return snap.policy;
+    return mergePolicy({ tools: { allow: [] } });
+  }
+  _effectivePolicy(goal, file, over) {
+    return mergePolicy(file, over, { approval: { ttl_s: goal.orch.budgets.approval_ttl_s, ...(over?.approval || {}) } });
   }
 
   async _dropWorktree(S, task, deleteBranch = false) {

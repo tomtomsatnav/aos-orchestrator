@@ -550,3 +550,13 @@ Deviations and choices made while implementing R0-R4 (smallest sensible choice e
   when a call matches both (e.g. `git push`, `.git/**`), `floor` wins. The hook log gains `rule_id`, `rule_layer`, `rules_hash` (12 chars, `null` until R4
   puts a hash in the worker policy file); `approved` and `ask_unresolved` get `grant:approved` / `floor:ask_unresolved` plus `asked_by` (the rule that asked).
   `createApproval` stores `rule_id` next to `rule`. The `orch.*` event additions (section 5) are left to R8/R11.
+- **R4 snapshot and hash.** (1) The snapshot is taken when the engine first loads a goal (tick step 0), not at plan creation, so the planner and every
+  worker run under the same rules; a goal with a plan or approval but no snapshot is `legacy: true`. (2) Until R5 maps the user/goal layers into the
+  compiled rules, `compiled` is the engine default rule set and the effective worker policy (policy file + goal override + approval ttl, merged exactly as
+  `_policy()` did) is stored beside it as `policy`; `rules_hash = sha256(canonical({rules_version, compiled, policy}))`, recomputed from the file content at
+  every check. (3) The fingerprint, the plan approval and the supervisor/CLI combined hash (`sha256(plan:tasks:rules)`) carry `rules_hash` only for non-legacy
+  goals; a legacy goal keeps `sha256(plan:tasks)` and its snapshot hash is recorded in `goal.orch.rules.sha256`, which `_planIntact` also compares. A
+  missing or unreadable snapshot hashes to `missing`/`invalid` and fails every check. (4) `_policy()` reads only the snapshot and, if it does not match
+  `goal.json`, returns a policy that allows no tool. (5) The planner is refused (`orch.plan.rejected`) if the snapshot is tampered before planning. (6) Budget
+  patches do not re-snapshot (budgets are not in the R4 snapshot; they stay in `goal.orch.budgets`). (7) Worker `policy.json` files carry `rules_hash`
+  so the R3 decision log shows it. (8) `orch.rules.refused` and `orch.rules.changed` are not emitted yet (no layer can be refused or changed before R5).

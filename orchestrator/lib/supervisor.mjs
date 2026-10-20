@@ -14,6 +14,7 @@ import * as G from './git.mjs';
 import * as W from './worker.mjs';
 import { listApprovals, decide } from './approvals.mjs';
 import { planHash, tasksHash, sha256 } from './plan.mjs';
+import { rulesFingerprint } from './rules.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -209,7 +210,8 @@ export class Supervisor {
     const { dir, S } = this.state(id);
     if (!S.tasks.length) return null;
     const ph = planHash(readJSON(paths(dir).plan)?.plan ?? null); const th = tasksHash(S.tasks);
-    return { combined: sha256(`${ph}:${th}`), plan_hash: ph, tasks_hash: th };
+    const rh = rulesFingerprint(S.goal, readJSON(paths(dir).rules, null)); // undefined for legacy goals: their combined hash is unchanged
+    return { combined: sha256(rh ? `${ph}:${th}:${rh}` : `${ph}:${th}`), plan_hash: ph, tasks_hash: th, ...(rh ? { rules_hash: rh } : {}) };
   }
 
   allApprovals() {
@@ -279,7 +281,7 @@ export class Supervisor {
     if (S.goal.orch.plan_state !== 'awaiting_approval') throw new SupervisorError(409, 'invalid_state', 'the plan is not awaiting approval');
     const cur = this.reviewHash(id);
     if (!cur || cur.combined !== planHashCombined) throw new SupervisorError(409, 'plan_changed', 'plan_hash does not match the current plan; re-review it');
-    const ok = await this._command(id, { cmd: 'approve-plan', by, reviewed: { plan_hash: cur.plan_hash, tasks_hash: cur.tasks_hash } });
+    const ok = await this._command(id, { cmd: 'approve-plan', by, reviewed: { plan_hash: cur.plan_hash, tasks_hash: cur.tasks_hash, ...(cur.rules_hash ? { rules_hash: cur.rules_hash } : {}) } });
     return ok;
   }
   async rejectPlan(id, by) {

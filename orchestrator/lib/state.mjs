@@ -25,7 +25,7 @@ export function paths(dir) {
   return {
     dir,
     goal: path.join(dir, 'goal.json'), tasks: path.join(dir, 'tasks.json'), agents: path.join(dir, 'agents.json'),
-    hb: path.join(dir, 'heartbeat.json'), events: path.join(dir, 'events.ndjson'), plan: path.join(dir, 'plan.json'),
+    hb: path.join(dir, 'heartbeat.json'), events: path.join(dir, 'events.ndjson'), plan: path.join(dir, 'plan.json'), rules: path.join(dir, 'rules.snapshot.json'),
     report: path.join(dir, 'report.md'), lock: path.join(dir, '.tick.lock'),
     approvals: path.join(dir, 'approvals'), workers: path.join(dir, 'workers'), commands: path.join(dir, 'commands'),
     tmp: path.join(dir, 'tmp'), policyDefault: path.join(path.dirname(path.dirname(dir)), 'policy.default.json'),

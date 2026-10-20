@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Engine, createGoal, summarize, assertRepoTrusted } from '../lib/engine.mjs';
 import { reviewView, renderReview, planHash, tasksHash } from '../lib/plan.mjs';
+import { rulesFingerprint } from '../lib/rules.mjs';
 import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
@@ -92,8 +93,9 @@ async function main() {
         const S = loadState(d);
         if (!S.tasks.length) die('there is no plan to approve yet');
         console.error(`PLAN YOU ARE APPROVING (commands run as you, checks inside the OS sandbox):\n${renderReview(reviewView(S.tasks))}`);
-        extra = { reviewed: { plan_hash: planHash(readJSON(paths(d).plan)?.plan ?? null), tasks_hash: tasksHash(S.tasks) } };
-        console.error(`plan hash ${extra.reviewed.plan_hash.slice(0, 12)}`);
+        const rules_hash = rulesFingerprint(S.goal, readJSON(paths(d).rules, null));
+        extra = { reviewed: { plan_hash: planHash(readJSON(paths(d).plan)?.plan ?? null), tasks_hash: tasksHash(S.tasks), ...(rules_hash ? { rules_hash } : {}) } };
+        console.error(`plan hash ${extra.reviewed.plan_hash.slice(0, 12)}${rules_hash ? `  rules hash ${rules_hash.slice(0, 12)}` : ''}`);
       }
       enqueueCommand(d, { cmd, by: 'cli', ...extra });
       const st = lockStatus(d);
