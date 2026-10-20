@@ -26,11 +26,11 @@ function world(name = 'w') {
   g('init', '-q', '-b', 'main'); fs.writeFileSync(path.join(w.repo, 'README.md'), 'x\n'); g('add', '-A'); g('-c', 'user.name=t', '-c', 'user.email=t@x.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'i');
   g('worktree', 'add', '-q', '-b', 'b1', w.wt); g('worktree', 'add', '-q', '-b', 'b2', w.other);
   for (const d of ['tmp/t1', 'approvals', 'workers', 'sandbox']) fs.mkdirSync(path.join(w.goal, d), { recursive: true });
-  for (const d of ['.ssh', '.aws', '.claude/projects', '.claude/sessions', 'Library/Keychains', w.sysTmp, w.hookDir]) fs.mkdirSync(path.isAbsolute(d) ? d : path.join(w.home, d), { recursive: true });
+  for (const d of ['.ssh', '.aws', '.claude/projects', '.claude/sessions', 'Library/Keychains', w.sysTmp, w.hookDir, '.claude/shell-snapshots', '.claude/session-env/other-session']) fs.mkdirSync(path.isAbsolute(d) ? d : path.join(w.home, d), { recursive: true });
   fs.writeFileSync(path.join(w.home, '.ssh', 'id_rsa'), 'CANARY-SSH'); fs.writeFileSync(path.join(w.home, '.claude', 'settings.json'), '{}');
   fs.writeFileSync(path.join(w.home, '.claude', 'sessions', '1.key'), 'CANARY-SESSION-KEY');
   for (const f of ['workers/t1.policy.json', 'workers/settings.json']) fs.writeFileSync(path.join(w.goal, f), '{}');
-  w.cfg = { worktree: w.wt, tmpDir: path.join(w.goal, 'tmp/t1'), approvalsDir: path.join(w.goal, 'approvals'), decisionLog: path.join(w.goal, 'workers/decisions.ndjson'),
+  w.cfg = { sessionId: SID, worktree: w.wt, tmpDir: path.join(w.goal, 'tmp/t1'), approvalsDir: path.join(w.goal, 'approvals'), decisionLog: path.join(w.goal, 'workers/decisions.ndjson'),
     policyFile: path.join(w.goal, 'workers/t1.policy.json'), settingsFile: path.join(w.goal, 'workers/settings.json'), hookDir: w.hookDir,
     gitCommon: path.join(w.repo, '.git'), home: w.home, sysTmp: w.sysTmp, profileDir: path.join(w.goal, 'sandbox') };
   /** run `sh -c script` inside the worker sandbox; exit code 0 = the script succeeded */
@@ -38,6 +38,7 @@ function world(name = 'w') {
   w.cleanup = () => fs.rmSync(root, { recursive: true, force: true });
   return w;
 }
+const SID = '11111111-2222-3333-4444-555555555555';
 const q = (p) => `'${p.replace(/'/g, "'\\''")}'`;
 
 test('worker sandbox: profile is static text, every path travels as a -D parameter', (t) => {
@@ -57,12 +58,25 @@ test('worker sandbox: profile is static text, every path travels as a -D paramet
 test('worker sandbox: writes succeed in the worktree, goal tmp, approvals, decision log, claude project dir, system temp', S, (t) => {
   const w = world(); t.after(w.cleanup);
   const proj = path.join(w.home, '.claude', 'projects', projectSlug(w.wt));
+  const scratch = `/tmp/claude-${process.getuid()}/${projectSlug(w.wt)}`; t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
   const targets = [path.join(w.wt, 'ok.txt'), path.join(w.goal, 'tmp/t1', 'ok'), path.join(w.goal, 'approvals', 'A-1.json'), w.cfg.decisionLog,
-    path.join(proj, 's.jsonl'), path.join(w.home, '.claude', 'shell-snapshots', 'snap'), path.join(w.home, '.claude.json'), path.join(w.sysTmp, 'ok')];
+    path.join(proj, 's.jsonl'), path.join(w.home, '.claude', 'session-env', SID, 'hook.sh'), path.join(scratch, 'sid', 'scratchpad', 'ok')];
   const r = w.sh(targets.map((f) => `mkdir -p ${q(path.dirname(f))} && echo ok > ${q(f)}`).join(' && '));
   assert.equal(r.status, 0, r.stderr);
   for (const f of targets) assert.equal(fs.readFileSync(f, 'utf8'), 'ok\n', f);
   assert.equal(w.sh(`cat ${q(path.join(w.repo, '.git', 'HEAD'))} && git status --short`).status, 0, 'the repo .git is readable: git works in the worktree');
+});
+
+test('worker sandbox: cannot touch shell snapshots, ~/.claude.json, other sessions\' session-env or other scratchpads (S1)', S, (t) => {
+  const w = world(); t.after(w.cleanup);
+  const snap = path.join(w.home, '.claude', 'shell-snapshots', 'snapshot-zsh-1-abc.sh'); fs.writeFileSync(snap, 'echo real\n');
+  const cj = path.join(w.home, '.claude.json'); fs.writeFileSync(cj, '{"mcpServers":{}}');
+  const other = path.join(w.home, '.claude', 'session-env', 'other-session', 'env'); fs.writeFileSync(other, 'x');
+  const sc = `/tmp/claude-${process.getuid()}/aos-wsbx-other-${process.pid}`; fs.mkdirSync(sc, { recursive: true }); t.after(() => fs.rmSync(sc, { recursive: true, force: true }));
+  const denied = [snap, path.join(w.home, '.claude', 'shell-snapshots', 'new.sh'), cj, `${cj}.tmp.1.2`, other, path.join(w.home, '.claude', 'session-env', 'other-session', 'new'), path.join(sc, 'pwn')];
+  for (const f of denied) { const r = w.sh(`echo pwn >> ${q(f)}`); assert.notEqual(r.status, 0, f); assert.match(r.stderr, /not permitted/, f); }
+  assert.equal(fs.readFileSync(snap, 'utf8'), 'echo real\n'); assert.equal(fs.readFileSync(cj, 'utf8'), '{"mcpServers":{}}'); assert.equal(fs.readFileSync(other, 'utf8'), 'x');
+  assert.equal(w.sh(`rm ${q(snap)}`).status !== 0 && fs.existsSync(snap), true, 'cannot delete a snapshot either');
 });
 
 test('worker sandbox: writes are denied to the main repo, other worktrees, HOME, ~/.ssh, ~/.claude/settings.json, .git, keychains', S, (t) => {

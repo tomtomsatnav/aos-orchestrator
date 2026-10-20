@@ -50,7 +50,7 @@ export function buildProfile({ ports = 0 } = {}) {
 // unreadable: the main repo working tree, other worktrees, ~/.claude/settings.json, skills, plugins, shell rc files ...
 export const WORKER_SECRET_DIRS = ['.ssh', '.aws', '.gnupg', '.config/gh', '.netrc', '.git-credentials', '.docker', '.kube', '.npmrc'];
 /** ~/.claude subpaths claude -p writes during a run (found empirically, claude 2.1.304; see README). Relative to CLAUDE_DIR. */
-export const CLAUDE_WRITE_DIRS = ['session-env', 'shell-snapshots', 'todos', 'file-history'];
+export const CLAUDE_WRITE_DIRS = ['todos', 'file-history'];
 
 export function buildWorkerProfile() {
   const L = [
@@ -68,9 +68,9 @@ export function buildWorkerProfile() {
     '  (subpath (param "CLAUDE_DIR")) (literal (param "CLAUDE_JSON")) (literal (string-append (param "CLAUDE_JSON") ".backup"))',
     '  (subpath (string-append (param "HOME") "/Library/Keychains")) (literal (param "HOME")) (literal (param "GITCONFIG")))',
     '(allow file-read* file-write* (subpath (param "WORKTREE")) (subpath (param "TMPDIR_W")) (subpath (param "APPROVALS")) (literal (param "DECISION_LOG"))',
-    '  (subpath (param "SYS_TMP")) (subpath (param "PRIVATE_TMP")) (subpath (param "PROJECT_DIR"))',
+    '  (subpath (param "SYS_TMP")) (literal (param "SCRATCH_ROOT")) (subpath (param "SCRATCH_DIR")) (subpath (param "SESSION_ENV")) (subpath (param "PROJECT_DIR"))',
     `  ${CLAUDE_WRITE_DIRS.map((d) => `(subpath (string-append (param "CLAUDE_DIR") "/${d}"))`).join(' ')}`,
-    '  (subpath (string-append (param "HOME") "/.local/state/claude")) (regex (param "CLAUDE_JSON_RX")))',
+    '  (subpath (string-append (param "HOME") "/.local/state/claude")))',
     ';; the Bash tool tracks its cwd in /tmp/claude-<hex>-cwd (hard-coded /tmp, not TMPDIR)',
     '(allow file-read* file-write* (regex #"^/private/tmp/claude-[0-9a-f]+-cwd$"))',
     '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (regex #"^/dev/fd/") (regex #"^/dev/ttys"))',
@@ -80,6 +80,10 @@ export function buildWorkerProfile() {
   for (const d of WORKER_SECRET_DIRS) L.push(`(deny file-read* file-write* (subpath (string-append (param "HOME") "/${d}")))`);
   // other Claude sessions' IPC: their keys (~/.claude/sessions) and sockets (/tmp/cc-socks). A worker does not need either.
   L.push('(deny file-read* file-write* (subpath (string-append (param "CLAUDE_DIR") "/sessions")) (subpath "/private/tmp/cc-socks"))');
+  // NOT writable (a worker could plant code or config that the user's interactive sessions later load): ~/.claude/shell-snapshots
+  // (sourced by every interactive shell tool), other sessions' ~/.claude/session-env/<id>, ~/.claude.json (user-scope MCP servers),
+  // other sessions' scratchpads under /tmp/claude-<uid>/. Only this worker's own session-env/<id> and scratchpad are writable above.
+  L.push('(deny file-write* (subpath (string-append (param "CLAUDE_DIR") "/shell-snapshots")) (literal (param "CLAUDE_JSON")) (regex (param "CLAUDE_JSON_RX")))');
   L.push('(deny network-outbound (remote unix-socket (subpath "/private/tmp/cc-socks")))');
   return `${L.join('\n')}\n`;
 }
@@ -119,7 +123,8 @@ export function wrapWorkerCommand(argv, cfg) {
     // ~/.claude.json and its atomic-write temp/lock siblings (~/.claude.json.tmp.<pid>.<ms>, ~/.claude.json.lock)
     CLAUDE_JSON_RX: `^${reEscape(claudeJson)}(\\.(tmp|lock|backup)[^/]*)?$`,
     PROJECT_DIR: path.join(home, '.claude', 'projects', projectSlug(wt)),
-    SYS_TMP: realDeepest(cfg.sysTmp || os.tmpdir()), PRIVATE_TMP: realDeepest(`/tmp/claude-${process.getuid?.() ?? 0}`),
+    SYS_TMP: cfg.sysTmp ? realDeepest(cfg.sysTmp) : none, SCRATCH_ROOT: realDeepest(`/tmp/claude-${process.getuid?.() ?? 0}`), SCRATCH_DIR: realDeepest(`/tmp/claude-${process.getuid?.() ?? 0}/${projectSlug(wt)}`),
+    SESSION_ENV: path.join(home, '.claude', 'session-env', /^[0-9a-zA-Z-]{8,64}$/.test(cfg.sessionId || '') ? cfg.sessionId : 'none-aos-no-session'),
   };
   const args = ['-f', file];
   for (const [k, v] of Object.entries(params)) args.push('-D', `${k}=${v}`);
