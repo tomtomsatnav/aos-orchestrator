@@ -687,7 +687,7 @@ R8 (verification findings N1, N2, S3a, S3b, S4):
 
 ### Reliability additions (design notes)
 
-- **`checks.protect_existing_tests`** (boolean, default false, true in `node-library`; rank false < true, so only tightening is free) and **`checks.allow_loopback`** (boolean, default false; true is a loosening, rank true < false). Both are written back to `goal.orch` at snapshot time and shown in the rules summary.
+- **`checks.protect_existing_tests`** (boolean, default **true** since the harness-guard release (was false); rank false < true, so only tightening is free; turning it off is a listed loosening) and **`checks.allow_loopback`** (boolean, default false; true is a loosening, rank true < false). Both are written back to `goal.orch` at snapshot time and shown in the rules summary.
 - Protection is structural, not advisory: the guarantee is the verify-time re-run of the base-commit test files over the integration tree (`lib/protect.mjs`, `Engine._runProtectedTests`); the plan-approval WARNING is only a hint. "Append-only" is therefore enforced by outcome: new test files are free; an edited existing test only matters if the pristine original then fails. Known limits: only JS tests have a runner (others are reported as not executed); a task that changes code so the original fails is blocked like a weakened test.
 - `allow_loopback` adds `network-bind/inbound/outbound` for `localhost:*` to the static check profile; external hosts stay denied. The warning heuristic (`serverWarnings`) greps named test files for server use; it is informational.
 - A rejected planner plan triggers `AUTO_REPLANS = 1` automatic re-plan with the validation errors (`orch.plan.replan`); `replan` is also a human command (`run --replan`) for a goal in `plan_state: rejected`.
