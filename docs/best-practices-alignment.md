@@ -96,6 +96,7 @@ section 3.
    and returns the fenced output (see Gap 1). Rate-limit it per attempt and log it as `orch.check.self_run`. Gate it
    behind a rules key (`worker.self_check`, default off until measured). Nothing new runs that the human did not approve,
    and the loop closes inside one attempt instead of costing an escalation.
+   **Status:** DONE, differently: not an MCP server but the policy hook routing an exact approved check argv to the engine, which runs it through `lib/checks.mjs` in the check sandbox (`lib/selfcheck.mjs`, docs/security.md protection 6). `worker.self_check` is off in strict and on in node-library; capped by `worker.self_checks_max` (default 5); events `orch.check.self_run` / `orch.check.self_capped`. Why not MCP: the worker runs with `--strict-mcp-config` and an empty server list, and a hook needs no new process type or protocol.
 4. **No model-behaviour eval suite (rows 5, 8).** **Change:** add an opt-in `orchestrator/evals/` (never in `npm test`) with 20-50
    small goals taken from real runs and their failures. Each one runs from a fresh throwaway repo and records
    pass^k (k=3), tier reached, tokens and ask count into `evals/results.ndjson`. Read transcripts for every failure.

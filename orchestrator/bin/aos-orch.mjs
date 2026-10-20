@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // aos-orch: CLI for the AOS orchestrator engine (`aos-orch --help` lists every command).
-//   aos-orch run <goal.json | goal-id> [--no-wait] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--replan] [--poll-ms N] [--interval-s N]
+//   aos-orch run <goal.json | goal-id> [--no-wait] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers|--no-sandbox-workers] [--replan] [--poll-ms N] [--interval-s N]
 //   aos-orch doctor [--live]
 //   aos-orch status [goal-id]
 //   aos-orch plan <goal-id>            (read-only: the plan review and rules summary, approves nothing)
@@ -32,7 +32,8 @@ const USAGE = `usage: aos-orch <command> ...   (node orchestrator/bin/aos-orch.m
   draft "<prompt>" --repo <path>   write a goal.json from a sentence (one small model call; review it)
         [--out goal.json] [--profile strict|node-library|docs-only] [--answers "..."] [--branch main] [--max-tokens N] [--max-wall-s N] [--tier haiku|sonnet|opus]
   run <goal.json|goal-id>          plan and run a goal. Stays attached and waits for your approvals (plan, human-verified criteria)
-        [--no-wait] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--accept-repo-loosening ids] [--replan] [--poll-ms N] [--interval-s N]
+        [--no-wait] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers|--no-sandbox-workers] [--accept-repo-loosening ids] [--replan] [--poll-ms N] [--interval-s N]
+                                   --sandbox-workers is the default on macOS; --no-sandbox-workers opts out (warned)
                                    --replan: ask the planner again for a goal blocked at planning
                                    --no-wait: exit at the first approval gate (code 4 for a plan), as before
   status [goal-id] | goals [--json]   list goals / show one
@@ -110,6 +111,21 @@ async function driveOnce(dir) {
   return { status, s: eng.summary() };
 }
 
+/** The worker OS sandbox is the DEFAULT on macOS (opt out: --no-sandbox-workers or orch.sandbox_workers: false, both warned loudly).
+ *  Linux and others: off (unsupported there; it fails closed when asked for), with a notice that checks stay sandboxed. */
+function workerSandboxDefault(specValue, f, platform = process.platform) {
+  if (platform === 'darwin') {
+    if (f['no-sandbox-workers'] || specValue === false) {
+      console.error(`aos-orch: WARNING: worker OS sandbox DISABLED (${f['no-sandbox-workers'] ? '--no-sandbox-workers' : 'orch.sandbox_workers: false'}): the worker \`claude\` processes run unsandboxed, constrained only by the policy hook. Checks and self-checks stay sandboxed.`);
+      return false;
+    }
+    console.error('aos-orch: workers run inside the macOS sandbox (sandbox-exec; the default on macOS, --no-sandbox-workers to opt out)');
+    return true;
+  }
+  if (specValue !== true) console.error(`aos-orch: notice: the worker OS sandbox is not supported on ${platform === 'linux' ? 'Linux' : platform}: workers run unsandboxed (policy hook only); acceptance checks and self-checks still run in the OS check sandbox${platform === 'linux' ? ' (bubblewrap)' : ''}`);
+  return specValue === true;
+}
+
 async function main() {
   ensureDir(orch);
   switch (cmd) {
@@ -121,8 +137,9 @@ async function main() {
         if (spec._partial) die(`${arg1} is an INCOMPLETE draft (_partial): fix its _errors, then delete the keys starting with "_" before running it`, 64);
         if (flags['trust-repo-config']) spec.orch = { ...(spec.orch || {}), trust_repo_config: true };
         if (flags['unsandboxed-checks']) spec.orch = { ...(spec.orch || {}), unsandboxed_checks: true };
+        if (flags['sandbox-workers'] && flags['no-sandbox-workers']) die('--sandbox-workers and --no-sandbox-workers contradict each other', 64);
         if (flags['sandbox-workers'] && process.platform !== 'darwin') die(`--sandbox-workers: ${workerSandboxAvailable().reason}`);
-        if (flags['sandbox-workers']) spec.orch = { ...(spec.orch || {}), sandbox_workers: true };
+        spec.orch = { ...(spec.orch || {}), sandbox_workers: workerSandboxDefault(spec.orch?.sandbox_workers, flags) };
         if (typeof flags['accept-repo-loosening'] === 'string') spec.orch = { ...(spec.orch || {}), accept_repo_loosening: flags['accept-repo-loosening'].split(',').map((x) => x.trim()).filter(Boolean) };
         if (flags['auto-approve']) spec.orch = { ...(spec.orch || {}), approval_policy: { ...(spec.orch?.approval_policy || {}), plan: 'auto' } };
         const id = spec.id && fs.existsSync(paths(goalDirOf(orch, spec.id)).goal) ? spec.id : null;

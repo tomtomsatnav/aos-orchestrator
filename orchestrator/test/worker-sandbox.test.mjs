@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { buildWorkerProfile, wrapWorkerCommand, sandboxAvailable, projectSlug } from '../lib/sandbox.mjs';
+import { buildWorkerProfile, wrapWorkerCommand, wrapCommand, sandboxAvailable, projectSlug, developerDirs } from '../lib/sandbox.mjs';
 import { mkSandbox, drive, goalOf, fakeCalls, ptask, crit, edit, allowAllHook, HERE } from './helpers.mjs';
 import { readEvents, readJSON } from '../lib/state.mjs';
 
@@ -64,7 +64,8 @@ test('worker sandbox: writes succeed in the worktree, goal tmp, approvals, decis
   const r = w.sh(targets.map((f) => `mkdir -p ${q(path.dirname(f))} && echo ok > ${q(f)}`).join(' && '));
   assert.equal(r.status, 0, r.stderr);
   for (const f of targets) assert.equal(fs.readFileSync(f, 'utf8'), 'ok\n', f);
-  assert.equal(w.sh(`cat ${q(path.join(w.repo, '.git', 'HEAD'))} && git status --short`).status, 0, 'the repo .git is readable: git works in the worktree');
+  const gr = w.sh(`cat ${q(path.join(w.repo, '.git', 'HEAD'))} && git status --short`);
+  assert.equal(gr.status, 0, `the repo .git is readable: git works in the worktree (developer dirs ${JSON.stringify(developerDirs())}): ${gr.stderr}`);
 });
 
 test('worker sandbox: cannot touch shell snapshots, ~/.claude.json, other sessions\' session-env or other scratchpads (S1)', S, (t) => {
@@ -142,4 +143,40 @@ test('worker sandbox: `aos-orch run goal.json --sandbox-workers` records the fie
   const dir = path.join(sb.orch, 'goals', 'g-cli-sbx');
   assert.equal(goalOf(dir).orch.sandbox_workers, true);
   assert.equal(readEvents(dir).find((e) => e.type === 'orch.worker.started' && e.data.role === 'planner').data.sandboxed, true);
+});
+
+test('worker sandbox is the DEFAULT for `aos-orch run goal.json` on macOS; --no-sandbox-workers opts out loudly', S, async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [edit('a.txt', 'alpha')] } });
+  const CLI = path.join(HERE, '..', 'bin', 'aos-orch.mjs');
+  const runOne = (id, extra) => {
+    const gf = path.join(sb.root, `${id}.json`);
+    fs.writeFileSync(gf, JSON.stringify({ id, title: 'default sandbox', success_criteria: [crit('a.txt', 'alpha')], orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } }));
+    return spawnSync(process.execPath, [CLI, 'run', gf, '--no-wait', ...extra, '--poll-ms', '50', '--interval-s', '0.2'], { env: sb.env(), encoding: 'utf8', timeout: 60000 });
+  };
+  let r = runOne('g-def', []);
+  assert.equal(r.status, 4, r.stderr); assert.match(r.stderr, /workers run inside the macOS sandbox \(sandbox-exec; the default on macOS/);
+  assert.equal(goalOf(path.join(sb.orch, 'goals', 'g-def')).orch.sandbox_workers, true);
+  assert.equal(readEvents(path.join(sb.orch, 'goals', 'g-def')).find((e) => e.type === 'orch.worker.started' && e.data.role === 'planner').data.sandboxed, true);
+  r = runOne('g-off', ['--no-sandbox-workers']);
+  assert.equal(r.status, 4, r.stderr); assert.match(r.stderr, /WARNING: worker OS sandbox DISABLED \(--no-sandbox-workers\)/);
+  assert.equal(goalOf(path.join(sb.orch, 'goals', 'g-off')).orch.sandbox_workers, false);
+  r = runOne('g-both', ['--sandbox-workers', '--no-sandbox-workers']); assert.equal(r.status, 64); assert.match(r.stderr, /contradict/);
+});
+
+test('the macOS developer dir (xcode-select -p / DEVELOPER_DIR: git and the toolchain behind the /usr/bin shims) is readable, nothing writable, in worker and check profiles', S, (t) => {
+  assert.deepEqual(developerDirs({ DEVELOPER_DIR: '/Applications/Xcode_16.4.app/Contents/Developer' }, 'darwin'), ['/Applications/Xcode_16.4.app/Contents/Developer']);
+  assert.deepEqual(developerDirs({ DEVELOPER_DIR: '/' }, 'darwin'), []); assert.deepEqual(developerDirs({}, 'linux'), []);
+  const w = world(); t.after(w.cleanup);
+  const dev = path.join(w.root, 'Xcode_9.app', 'Contents', 'Developer'); fs.mkdirSync(path.join(dev, 'usr', 'bin'), { recursive: true }); fs.writeFileSync(path.join(dev, 'usr', 'bin', 'tool'), 'TOOLCHAIN\n');
+  const link = path.join(w.root, 'Xcode.app'); fs.symlinkSync(path.join(w.root, 'Xcode_9.app'), link);
+  const viaLink = path.join(link, 'Contents', 'Developer');
+  const run = (cfg, script) => { const x = wrapWorkerCommand(['/bin/sh', '-c', script], cfg); return spawnSync(x.bin, x.args, { cwd: w.wt, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: w.home } }); };
+  const file = path.join(viaLink, 'usr', 'bin', 'tool');
+  assert.notEqual(run({ ...w.cfg, developerDirs: [] }, `cat ${q(file)}`).status, 0, 'control: not readable without the parameter');
+  const cfg = { ...w.cfg, developerDirs: developerDirs({ DEVELOPER_DIR: viaLink }, 'darwin') };
+  const r = run(cfg, `cat ${q(file)}`); assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout, 'TOOLCHAIN\n');
+  assert.notEqual(run(cfg, `echo x > ${q(path.join(dev, 'usr', 'bin', 'planted'))}`).status, 0, 'read-only');
+  const c = wrapCommand(['/bin/cat', file], { worktree: w.wt, tmpDir: path.join(w.goal, 'tmp/t1'), home: w.home, profileDir: path.join(w.goal, 'sandbox'), developerDirs: cfg.developerDirs });
+  const cr = spawnSync(c.bin, c.args, { cwd: w.wt, encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } }); assert.equal(cr.status, 0, cr.stderr); assert.equal(cr.stdout, 'TOOLCHAIN\n');
 });

@@ -44,7 +44,7 @@ aos-orch run goal.json
 ## Commands
 
 ```sh
-node orchestrator/bin/aos-orch.mjs run <goal.json | goal-id> [--no-wait] [--replan] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--poll-ms N] [--interval-s N]
+node orchestrator/bin/aos-orch.mjs run <goal.json | goal-id> [--no-wait] [--replan] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers|--no-sandbox-workers] [--poll-ms N] [--interval-s N]
 node orchestrator/bin/aos-orch.mjs doctor [--live]     # preflight PASS/WARN/FAIL (exit 1 on FAIL): node, git worktree, claude version vs known-good table (lib/doctor.mjs) and required flags, `claude auth status`, sandbox-exec probes, state dir, port; --live = one tiny Haiku call validating the stream-json shapes
 node orchestrator/bin/aos-orch.mjs status [goal-id]
 node orchestrator/bin/aos-orch.mjs plan <goal-id>      # read-only: the plan review + rules summary; approves nothing
@@ -74,7 +74,7 @@ Goal file (`goal.json`):
 `orch.plan_approval`) is `required` (default; the run stops at `draft / awaiting_approval` until `approve-plan`) or `auto`,
 and `auto` only applies to plans without commands (see [docs/security.md](../docs/security.md)). Other goal fields: `orch.trust_repo_config`,
 `orch.unsandboxed_checks`, `orch.check_localhost_ports` (loopback ports checks may connect to), `orch.sandbox_workers`
-(opt-in OS sandbox for the worker `claude` processes; CLI `--sandbox-workers`, see [docs/security.md](../docs/security.md), protection 5). Plan checks must match
+(OS sandbox for the worker `claude` processes; `aos-orch run goal.json` sets it by default on macOS, `--no-sandbox-workers` opts out; see [docs/security.md](../docs/security.md), protection 5). Rules `worker.self_check` / `worker.self_checks_max` let a worker have the engine run its task's approved checks (protection 6). Plan checks must match
 `orch.check_allowlist` (argv prefix) or a criterion check; unsafe plans (cycles, bad tiers, path scopes outside the repo,
 `.git`/`.claude`, dangerous `allowed_commands`, shell/curl-style checks, missing timeouts) are rejected, never repaired.
 
