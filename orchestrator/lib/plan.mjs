@@ -42,6 +42,7 @@ export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: []
     `Constraints: max_tasks=${c.max_tasks}; allowed tiers: ${c.tiers.join(', ')}; command allowlist candidates for checks: ${JSON.stringify(c.check_allowlist)}`,
     'WORKERS CANNOT RUN CODE: their Bash is limited to read-only inspection (ls, cat, head, tail, wc, grep, rg, find -name, diff, git status/diff/log/show). '
       + 'node, npm/npx/pnpm/yarn, make, python, ruby, perl, shells, env/xargs wrappers, find -exec and git hooks-running subcommands are rejected: a plan whose allowed_commands contain any of them is REJECTED. '
+      + 'allowed_commands are ONLY for read-only inspection. Creating or editing files needs NO command: workers write files with their Write/Edit tools within path_scope, so never add printf/echo/tee/redirect/sed-style commands. '
       + 'Leave allowed_commands empty unless a read-only command is really needed. Put ALL verification (tests, builds, linters) in each task\'s `checks`: the engine runs those itself, in an OS sandbox (no network, writes only inside the task worktree). '
       + 'A human reviews every plan that has commands before anything is dispatched.',
     'Produce tasks that are small (one concern, ideally < 200 changed lines), have disjoint path_scope where possible, start at the cheapest plausible tier, and each have at least one check from the allowed commands.',

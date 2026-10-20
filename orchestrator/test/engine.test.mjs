@@ -40,6 +40,24 @@ test('happy path: 3-task DAG, merged into the integration branch, report, base b
   assertValidState(assert, dir);
 });
 
+test('a vacuous always-passing criterion does not achieve the goal until all 3 tasks are done (t1/t3 never cancelled)', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  sb.scenario(SCEN('all-success-3-tasks.json'));
+  const { dir } = await sb.goal({ success_criteria: [{ id: 'c1', text: 'vacuous', check: { argv: ['node', '-e', '0'], timeout_s: 30 } }] });
+  const eng = sb.engine(dir);
+  await eng.start();
+  await drive(eng);
+  const g = goalOf(dir);
+  assert.equal(g.status, 'achieved', JSON.stringify(g.blocked_reason));
+  assert.deepEqual(tasksOf(dir).map((x) => x.status), ['done', 'done', 'done']);
+  const ev = readEvents(dir);
+  const ach = ev.findIndex((e) => e.type === 'goal.achieved');
+  for (const id of ['t1', 't2', 't3']) assert.ok(ev.findIndex((e) => e.type === 'orch.integrate.merged' && e.task_id === id) < ach, `${id} merged before achieved`);
+  assert.equal(ev.filter((e) => e.type === 'goal.achieved').length, 1);
+  assertValidState(assert, dir);
+});
+
+
 // ---------------------------------------------------------------------------------------------------------------
 import { chk, ptask, crit, edit, fakeCalls, worktreesOf, fakeClock, allowAllHook } from './helpers.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';

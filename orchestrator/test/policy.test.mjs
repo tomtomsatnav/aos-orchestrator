@@ -67,6 +67,8 @@ const TABLE = [
   ['redirect outside', 'Bash', { command: 'ls > /tmp/out.txt' }, 'deny', 'outside_worktree'],
   ['redirect inside scope', 'Bash', { command: 'ls > a.txt' }, 'allow'],
   ['redirect to /dev/null', 'Bash', { command: 'ls 2>/dev/null' }, 'allow'],
+  ['printf redirect write not allowlisted -> ask', 'Bash', { command: "printf 'alpha\\n' > a.txt && cat a.txt" }, 'ask', 'unknown_command'],
+  ['echo redirect write not allowlisted -> ask', 'Bash', { command: 'echo alpha > a.txt' }, 'ask', 'unknown_command'],
   ['redirect to dotgit', 'Bash', { command: 'ls > .git/config' }, 'deny', 'path_denied'],
   ['cat outside', 'Bash', { command: 'cat /etc/passwd' }, 'deny', 'outside_read_root'],
   ['cat ..', 'Bash', { command: 'cat ../secret' }, 'deny'],

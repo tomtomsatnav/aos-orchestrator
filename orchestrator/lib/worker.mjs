@@ -9,7 +9,10 @@ export const WORKER_TOOLS = 'Read,Edit,Write,Glob,Grep,Bash';
 export const READ_ONLY_TOOLS = 'Read,Glob,Grep';
 export const PLANNER_MARKER = 'AOS_PLANNER';
 
-export const WORKER_RULES = 'Do not commit, push, install packages or use the network. If a tool call is denied, do not try to work around it: '
+export const FILE_WRITE_RULE = 'Create and modify files ONLY with the Write and Edit tools (they are checked against your path scope), never with shell redirects, tee, printf, echo or sed -i. '
+  + 'Bash is for read-only inspection of the listed commands only; verify by reading the file with Read. The engine runs the real checks.';
+
+export const WORKER_RULES = FILE_WRITE_RULE + ' Do not commit, push, install packages or use the network. If a tool call is denied, do not try to work around it: '
   + 'finish and state what you needed. End with a 3-line summary: changed files, how you checked, open issues.';
 
 export function claudeBin(env = process.env) { return env.AOS_CLAUDE_BIN || 'claude'; }
@@ -68,7 +71,7 @@ export function buildWorkerPrompt({ goal, task, deps = [], previous = null }) {
     if (previous.note) ctx.push(previous.note);
   }
   if (ctx.length) lines.push(`CONTEXT: ${ctx.join('\n')}`);
-  lines.push('RULES: Do not commit, push, install packages or use the network. If a tool call is denied, do not try to work around it: finish and state what you needed. End with a 3-line summary: changed files, how you checked, open issues.');
+  lines.push(`RULES: ${FILE_WRITE_RULE} Do not commit, push, install packages or use the network. If a tool call is denied, do not try to work around it: finish and state what you needed. End with a 3-line summary: changed files, how you checked, open issues.`);
   return lines.join('\n');
 }
 

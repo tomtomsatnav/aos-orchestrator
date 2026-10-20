@@ -75,7 +75,7 @@ flowchart LR
 
 Data flow for one goal: create (draft) → plan (Opus, read-only tools) → human approves plan → engine dispatches ready
 tasks into worktrees → workers edit and commit nothing (the engine commits) → engine runs checks → merges passing task
-branches into the integration branch → runs goal criteria there → `achieved` + report, or `blocked` with a reason.
+branches into the integration branch → once every task is done, runs goal criteria there → `achieved` + report, or `blocked` with a reason.
 
 ## 3. Data model
 
@@ -159,7 +159,7 @@ Each goal ticks every `interval_s` (default 10 s) in the order SPEC §4 requires
 | Beat | `heartbeat.json` as today |
 | Observe | Load state; drain control commands (pause, cancel, approve, budget change) |
 | Reap | Workers that exited: parse `result` → verify (below). Workers past `task_wall_clock_s` or silent past `stall_after_s` (no stream line): SIGTERM group, SIGKILL after 10 s **[S-7]** |
-| Verify | Goal criteria are only evaluated after integration; all met → `achieved`, write report, stop |
+| Verify | Goal criteria are only evaluated once no task is pending/ready/running/needs_review (every task done and integrated); never on a partial integration branch (a vacuous check such as `node --test` with no tests would pass early). All met → `achieved`, write report, stop |
 | Plan | Only once, at goal start (re-plan is a human action in v1) |
 | Dispatch | Governor gate → pick `ready` tasks (deps `done`, no write-scope overlap with running tasks) up to `min(goal.max_parallel, global free slots)` |
 | Budget | Caps from §8; soft → no new opus-tier work; hard → stop dispatch, `blocked` |

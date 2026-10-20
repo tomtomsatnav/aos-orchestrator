@@ -8,7 +8,7 @@ import { matchGlob, globsOverlap, scopesOverlap } from '../lib/glob.mjs';
 import { parseShell } from '../lib/shell.mjs';
 import { validatePlan, extractJson, findCycle, buildPlannerPrompt, validateScope } from '../lib/plan.mjs';
 import { Governor, parseRateLimitEvent, detectLimitFailure, usageOf, checkBudgets } from '../lib/governor.mjs';
-import { buildArgs, buildEnv, StreamTail, buildSettings, killGroup, groupAlive } from '../lib/worker.mjs';
+import { buildWorkerPrompt, WORKER_RULES, buildArgs, buildEnv, StreamTail, buildSettings, killGroup, groupAlive } from '../lib/worker.mjs';
 import { runCheck, runChecks, commandAllowed } from '../lib/checks.mjs';
 import { appendEvent, readEvents, atomicWrite, readJSON, normalizeGoalSpec, orchRoot, enqueueCommand, drainCommands } from '../lib/state.mjs';
 import { validateEvent, validateGoal } from '../lib/schema.mjs';
@@ -272,4 +272,15 @@ test('review: worktreeRemove refuses any path outside <repo>-aos-worktrees/ (no 
     assert.ok(!GIT.isUnderWorktreeRoot(sb.repo, `${sb.repo}-aos-worktrees`));
     assert.ok(!GIT.isUnderWorktreeRoot(sb.repo, `${sb.repo}-aos-worktrees-evil/x`));
   } finally { sb.cleanup(); }
+});
+
+test('prompts: worker told to use Write/Edit not shell redirects; planner told commands are read-only; Write/Edit are granted tools', () => {
+  const task = { id: 't1', title: 'T', acceptance: ['a.txt has alpha'], orch: { description: 'd', path_scope: ['a.txt'], allowed_commands: ['cat a.txt'], checks: [] } };
+  const p = buildWorkerPrompt({ goal: { title: 'G' }, task });
+  assert.match(p, /ONLY with the Write and Edit tools/); assert.match(p, /never with shell redirects/); assert.equal(p.split('ONLY with the Write and Edit tools').length, 2);
+  assert.match(WORKER_RULES, /Write and Edit tools/);
+  const args = buildArgs({ prompt: 'x', tier: 'haiku', sessionId: 's', settingsFile: '/s.json' });
+  assert.match(args[args.indexOf('--tools') + 1], /Write/); assert.match(args[args.indexOf('--tools') + 1], /Edit/);
+  const g = { title: 'G', success_criteria: [{ id: 'c1', text: 'x' }], orch: { budgets: { max_tasks: 3 }, check_allowlist: [] } };
+  assert.match(buildPlannerPrompt({ goal: g }).prompt, /ONLY for read-only inspection\. Creating or editing files needs NO command/);
 });

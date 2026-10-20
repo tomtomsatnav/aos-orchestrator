@@ -557,7 +557,7 @@ export class Engine {
     this.ev('task.completed', task.assignee, task.id, { result: task.orch.result_summary.slice(0, 200), tier: entry.tier, attempts: task.attempts });
     await this._dropWorktree(S, task);
     saveState(this.dir, S);
-    await this._runCriteria(S);
+    // goal criteria run only once every task is done (see _verify): a partial integration branch must never satisfy them
   }
 
   /** Run the goal's criteria checks on the integration branch (after every merge). */
@@ -628,7 +628,7 @@ export class Engine {
     const crit = goal.success_criteria;
     const allDone = S.tasks.length > 0 && S.tasks.every((t) => t.status === 'done');
     if (allDone && !crit.every((c) => c.met) && !o.final_checked) { await this._runCriteria(S); o.final_checked = true; saveState(this.dir, S); }
-    if (crit.length && crit.every((c) => c.met) && (allDone || crit.some((c) => c.check))) {
+    if (crit.length && crit.every((c) => c.met) && allDone) {
       await Promise.all([...this.workers.values()].map((r) => W.killGroup(r.pgid, { graceMs: this.killGraceMs })));
       this.workers.clear();
       for (const t of S.tasks) if (['pending', 'ready', 'running', 'needs_review'].includes(t.status)) { t.status = 'cancelled'; t.updated_at = iso(this.now()); }
