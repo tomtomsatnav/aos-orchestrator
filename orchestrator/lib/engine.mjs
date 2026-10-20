@@ -348,9 +348,9 @@ export class Engine {
   }
 
   /** Write a (new) non-legacy snapshot and the goal.json summary of it; applies the compiled values the engine reads from goal.json. */
-  _storeSnapshot(S, snap) {
+  _storeSnapshot(S, snap, prev = null) {
     const o = S.goal.orch;
-    applyCompiledToGoal(S.goal, snap.compiled);
+    applyCompiledToGoal(S.goal, snap.compiled, prev);
     atomicWrite(this.P.rules, snap);
     o.rules = { hash: snap.rules_hash.slice(0, 12), sha256: snap.rules_hash, version: snap.rules_version, profile: snap.compiled.profile, legacy: false,
       layers: snap.layers.map((l) => ({ layer: l.layer, sha12: l.sha256 ? l.sha256.slice(0, 12) : null })),
@@ -373,7 +373,7 @@ export class Engine {
     if (!r.ok) return refuse(r.errors.join('; ').slice(0, 200));
     if (r.snap.rules_hash === snapshotHash(snap)) return refuse('accepting these loosenings changes nothing (a repo can never loosen the sandbox, plan approval or trust settings)');
     o.accept_repo_loosening = [...new Set([...(o.accept_repo_loosening || []), ...ids])];
-    this._storeSnapshot(S, r.snap);
+    this._storeSnapshot(S, r.snap, snap.compiled); // a budget patch made since the snapshot survives the recompile
     if (S.tasks.length) o.plan_fingerprint = this._fingerprint(S);
     this.ev('orch.rules.changed', 'human', null, { rules_hash: o.rules.hash, by: c.by || 'cli', direction: 'loosen', accepted: ids });
     saveState(this.dir, S);

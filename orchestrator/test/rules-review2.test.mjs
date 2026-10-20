@@ -127,3 +127,51 @@ test('S5: plan-time allowed_commands are judged by the worst of the default and 
   assert.equal(run().ok, false, 'the default denies it');
   const r = run(weak); assert.equal(r.ok, false, 'a weaker goal policy cannot make it pass'); assert.match(r.errors.join(' '), /dangerous_pattern/);
 });
+
+// ---- engine-level helpers
+import { paths, readJSON, loadState, readEvents } from '../lib/state.mjs';
+import { normalizeGoalSpec } from '../lib/state.mjs';
+import { compileGoal } from '../lib/rules-store.mjs';
+const onePlan = (...tasks) => ({ tasks, risks: [] });
+const commitRules = (sb, rules) => {
+  fs.mkdirSync(path.join(sb.repo, '.aos'), { recursive: true });
+  fs.writeFileSync(path.join(sb.repo, '.aos', 'rules.json'), JSON.stringify(rules));
+  git(sb.repo, 'add', '-A'); git(sb.repo, 'commit', '-q', '-m', 'rules');
+};
+async function parked(sb, spec = {}) {
+  sb.scenario({ tasks: { t1: [edit('a.txt', 'alpha')] } });
+  const g = await sb.goal({ success_criteria: [crit('a.txt', 'alpha')], plan: onePlan(ptask('t1', 'a.txt', 'alpha')), ...spec, orch: { approval_policy: { plan: 'required' }, ...(spec.orch || {}) } });
+  const eng = sb.engine(g.dir, { humanApproves: false }); await eng.start(); await eng.tick();
+  return { ...g, eng };
+}
+
+test('S6a: an explicit goal value equal to the default still caps; it never raises a tighter user layer', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  const compileWith = (userRules, budget) => {
+    fs.writeFileSync(path.join(sb.orch, 'rules.json'), JSON.stringify(R(userRules)));
+    const goal = normalizeGoalSpec({ title: 'g', success_criteria: [crit('a.txt', 'alpha')], budget, orch: { repo: sb.repo } });
+    const r = compileGoal({ orchDir: sb.orch, goal, dir: sb.root }); assert.equal(r.ok, true, JSON.stringify(r.errors)); return r.snap.compiled;
+  };
+  // the probe: the user layer raises the cap to 20, the goal says max_usd 5 explicitly (= the default): the goal's 5 must win
+  assert.equal(compileWith({ budgets: { max_usd: 20 } }, { max_usd: 5 }).budgets.max_usd, 5);
+  // without an explicit value the user's 20 stands
+  assert.equal(compileWith({ budgets: { max_usd: 20 } }, {}).budgets.max_usd, 20);
+  // an explicit default does not undo a tighter user layer
+  assert.equal(compileWith({ budgets: { max_usd: 2 } }, { max_usd: 5 }).budgets.max_usd, 2);
+});
+
+test('S6b: accepting a repo loosening does not undo a human budget patch made before approval', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  commitRules(sb, R({ checks: { localhost_ports: [8080] }, budgets: { max_usd: 4 } }));
+  const { dir, eng } = await parked(sb, { budget: { max_ticks: 500, max_usd: 5, max_wall_clock_s: 7200 } });
+  assert.equal(goalOf(dir).budget.max_usd, 4);
+  await eng.command({ cmd: 'budgets', by: 'test', patch: { max_usd: 1, max_parallel: 1 } });
+  assert.equal(goalOf(dir).budget.max_usd, 1);
+  const id = readJSON(paths(dir).rules).dropped[0].rule_id;
+  await eng.command({ cmd: 'accept-repo-loosening', by: 'test', ids: [id] });
+  const g = goalOf(dir);
+  assert.deepEqual(readJSON(paths(dir).rules).compiled.checks.localhost_ports, [8080], 'the acceptance applied');
+  assert.equal(g.budget.max_usd, 1, 'the patch survived'); assert.equal(g.orch.budgets.max_parallel, 1);
+  const sm = (await import('../lib/rules-store.mjs')).readRulesSummary(dir, g);
+  assert.equal(sm.limits.max_usd, 1, 'the summary shows what is enforced, not the pre-patch snapshot value'); assert.equal(sm.limits.max_parallel, 1);
+});

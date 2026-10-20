@@ -241,6 +241,8 @@ export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
       repo: o.repo, base_branch: o.base_branch || 'main', base_commit: o.base_commit || null,
       integration_branch: `aos/${id}/integration`, worktree_root: null,
       budgets: { ...DEFAULT_BUDGETS, ...(o.budgets || {}) },
+      // which limits the spec itself named: an explicit value equal to a default still binds in the goal rules layer (a full budgets object is filled in above)
+      explicit_limits: { budgets: Object.keys(o.budgets || {}), budget: Object.keys(spec.budget || {}) },
       approval_policy: approval,
       trust_repo_config: o.trust_repo_config === true, unsandboxed_checks: o.unsandboxed_checks === true, sandbox_workers: o.sandbox_workers === true, check_localhost_ports: ports,
       policy: o.policy || 'policy.default.json',

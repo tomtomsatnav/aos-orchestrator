@@ -2,7 +2,7 @@
 // and builds the summary the approval screens show. rules.mjs stays pure.
 import fs from 'node:fs';
 import path from 'node:path';
-import { validateRules, policyToRules, goalLegacyRules, compileRules, buildRulesSnapshot, snapshotHash, summarizeRules, renderRulesSummary } from './rules.mjs';
+import { valueAt, validateRules, policyToRules, goalLegacyRules, compileRules, buildRulesSnapshot, snapshotHash, summarizeRules, renderRulesSummary } from './rules.mjs';
 import { sha256, canonical } from './plan.mjs';
 import { readJSON, paths } from './state.mjs';
 
@@ -45,6 +45,7 @@ export function parseRepoRules(buf) {
   return { rules: p.value, sha256: sha256(canonical(p.value)), errors: [] };
 }
 
+const setDeep = (o, p, v) => { const ks = p.split('.'); const last = ks.pop(); ks.reduce((x, k) => (x[k] ??= {}), o)[last] = v; };
 const isPlain = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const deepMerge = (a, b) => { const out = { ...a }; for (const [k, v] of Object.entries(b)) out[k] = isPlain(v) && isPlain(out[k]) ? deepMerge(out[k], v) : v; return out; };
 
@@ -61,7 +62,11 @@ export function collectLayers({ orchDir, goal, dir, repo = null }) {
   }
   // ONE goal layer: the legacy fields, then the legacy policy override, then the spec's orch.rules, each overriding the previous per key (lists are replaced)
   const legacy = goalLegacyRules(goal);
-  let rules = legacy.rules; const notes = [...legacy.notes]; const sources = ['goal.json'];
+  let rules = legacy.rules;
+  if (legacy.caps.length) { // explicit limits equal to the default: a cap on whatever the lower layers allow (it must not raise a tighter user/repo value)
+    const below = compileRules(layers, { accept: o.accept_repo_loosening || [] });
+    for (const [p, v] of legacy.caps) { const cur = below.ok ? valueAt(below.compiled, p) : undefined; if (cur === undefined || v < cur) setDeep(rules, p, v); }
+  } const notes = [...legacy.notes]; const sources = ['goal.json'];
   if (o.policy && typeof o.policy === 'object' && !Array.isArray(o.policy)) { const m = policyToRules(o.policy); rules = deepMerge(rules, m.rules); notes.push(...m.notes); sources.push('goal.orch.policy'); }
   if (o.rules_layer) { rules = deepMerge(rules, o.rules_layer); sources.push('goal.orch.rules'); }
   layers.push({ layer: 'goal', rules, source: sources.join('+'), notes });
@@ -113,7 +118,7 @@ export function readRulesSummary(dir, goal) {
   const o = goal?.orch; if (!o?.rules) return null;
   const snap = readJSON(paths(dir).rules, null);
   if (!snap || snapshotHash(snap) !== o.rules.sha256) return { tampered: true, rules_hash: String(o.rules.sha256 || '').slice(0, 12) };
-  return summarizeRules(snap);
+  return summarizeRules(snap, goal);
 }
 
 /** The summary as text for the CLI approval screens (also says so when the snapshot is tampered or not taken yet). */

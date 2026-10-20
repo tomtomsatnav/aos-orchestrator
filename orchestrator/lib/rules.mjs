@@ -194,6 +194,7 @@ function globProblem(glob, where, bad, absoluteOk = false) {
 }
 
 // ---------------------------------------------------------------- merge
+export const valueAt = (o, p) => getPath(o, p);
 const getPath = (o, p) => p.split('.').reduce((x, k) => (x && typeof x === 'object' && Object.hasOwn(x, k) ? x[k] : undefined), o);
 function setPath(o, p, v) { const ks = p.split('.'); const last = ks.pop(); ks.reduce((x, k) => (x[k] ??= {}), o)[last] = v; }
 /** 32 hex characters (128 bits) of the new value: what an acceptance id is bound to. */
@@ -404,14 +405,17 @@ export function policyToRules(p) {
  */
 export function goalLegacyRules(goal) {
   const o = goal.orch || {}; const B = o.budgets || {}; const rules = { rules_version: RULES_VERSION }; const notes = [];
-  const put = (path, val, dflt) => { if (val !== undefined && val !== null && val !== dflt) setPath(rules, path, val); };
-  const D = DEFAULT_RULES;
-  put('budgets.max_new_tokens', B.max_new_tokens, D.budgets.max_new_tokens); put('budgets.task_wall_clock_s', B.task_wall_clock_s, D.budgets.task_wall_clock_s);
-  put('budgets.stall_after_s', B.stall_after_s, D.budgets.stall_after_s); put('budgets.max_turns', B.max_turns, D.budgets.max_turns); put('budgets.attempt_usd_cap', B.attempt_usd_cap, D.budgets.attempt_usd_cap);
-  put('parallel.max_parallel', B.max_parallel, D.parallel.max_parallel); put('retry.max_attempts', B.max_attempts, D.retry.max_attempts); put('plan.max_tasks', B.max_tasks, D.plan.max_tasks);
-  put('worker.approval.ttl_s', B.approval_ttl_s, D.worker.approval.ttl_s);
+  const ex = o.explicit_limits; // absent on goals created before it was recorded: then only values that differ from the defaults count
+  // an explicit value equal to the default is a CAP: it binds when a lower layer raised the value above it, but never undoes a tighter lower layer (`caps`, resolved by collectLayers)
+  const caps = [];
+  const put = (path, val, dflt, explicit) => { if (val === undefined || val === null) return; if (val !== dflt) setPath(rules, path, val); else if (explicit) caps.push([path, val]); };
+  const D = DEFAULT_RULES; const eb = (k) => !!ex?.budgets?.includes(k); const eg = (k) => !!ex?.budget?.includes(k);
+  put('budgets.max_new_tokens', B.max_new_tokens, D.budgets.max_new_tokens, eb('max_new_tokens')); put('budgets.task_wall_clock_s', B.task_wall_clock_s, D.budgets.task_wall_clock_s, eb('task_wall_clock_s'));
+  put('budgets.stall_after_s', B.stall_after_s, D.budgets.stall_after_s, eb('stall_after_s')); put('budgets.max_turns', B.max_turns, D.budgets.max_turns, eb('max_turns')); put('budgets.attempt_usd_cap', B.attempt_usd_cap, D.budgets.attempt_usd_cap, eb('attempt_usd_cap'));
+  put('parallel.max_parallel', B.max_parallel, D.parallel.max_parallel, eb('max_parallel')); put('retry.max_attempts', B.max_attempts, D.retry.max_attempts, eb('max_attempts')); put('plan.max_tasks', B.max_tasks, D.plan.max_tasks, eb('max_tasks'));
+  put('worker.approval.ttl_s', B.approval_ttl_s, D.worker.approval.ttl_s, eb('approval_ttl_s'));
   const g = goal.budget || {};
-  put('budgets.max_ticks', g.max_ticks, D.budgets.max_ticks); put('budgets.max_usd', g.max_usd, D.budgets.max_usd); put('budgets.max_wall_clock_s', g.max_wall_clock_s, D.budgets.max_wall_clock_s);
+  put('budgets.max_ticks', g.max_ticks, D.budgets.max_ticks, eg('max_ticks')); put('budgets.max_usd', g.max_usd, D.budgets.max_usd, eg('max_usd')); put('budgets.max_wall_clock_s', g.max_wall_clock_s, D.budgets.max_wall_clock_s, eg('max_wall_clock_s'));
   if (Array.isArray(o.check_allowlist) && o.check_allowlist.length) {
     const ok = o.check_allowlist.map((e) => (Array.isArray(e) ? e.join(' ') : e)).filter((e) => {
       const first = typeof e === 'string' ? e.trim().split(/\s+/)[0] || '' : '';
@@ -427,17 +431,34 @@ export function goalLegacyRules(goal) {
   if (o.trust_repo_config === true) setPath(rules, 'repo_config.trust', true);
   if (o.approval_policy?.plan && o.approval_policy.plan !== 'required') setPath(rules, 'plan.approval', o.approval_policy.plan);
   if (isObj(o.governor) && Object.keys(o.governor).length) notes.push('goal governor settings are ignored: the governor is shared by every goal and only the user layer may set it');
-  return { rules, notes };
+  return { rules, notes, caps };
 }
 
-/** Write the compiled values the engine reads from goal.json back into it (compiled rules are the truth; legacy fields stay in step). Mutates goal. */
-export function applyCompiledToGoal(goal, c) {
-  const o = goal.orch; const B = o.budgets;
-  B.max_new_tokens = c.budgets.max_new_tokens; B.task_wall_clock_s = c.budgets.task_wall_clock_s; B.stall_after_s = c.budgets.stall_after_s; B.max_turns = c.budgets.max_turns;
-  B.attempt_usd_cap = c.budgets.attempt_usd_cap; B.max_parallel = c.parallel.max_parallel; B.max_attempts = c.retry.max_attempts; B.max_tasks = c.plan.max_tasks; B.approval_ttl_s = c.worker.approval.ttl_s;
-  goal.budget.max_ticks = c.budgets.max_ticks; goal.budget.max_usd = c.budgets.max_usd; goal.budget.max_wall_clock_s = c.budgets.max_wall_clock_s;
+// compiled path -> where goal.json keeps it: ['B', field] = goal.orch.budgets[field], ['G', field] = goal.budget[field]
+const LIMIT_MAP = [['budgets.max_new_tokens', 'B', 'max_new_tokens'], ['budgets.task_wall_clock_s', 'B', 'task_wall_clock_s'], ['budgets.stall_after_s', 'B', 'stall_after_s'], ['budgets.max_turns', 'B', 'max_turns'],
+  ['budgets.attempt_usd_cap', 'B', 'attempt_usd_cap'], ['parallel.max_parallel', 'B', 'max_parallel'], ['retry.max_attempts', 'B', 'max_attempts'], ['plan.max_tasks', 'B', 'max_tasks'],
+  ['worker.approval.ttl_s', 'B', 'approval_ttl_s'], ['budgets.max_ticks', 'G', 'max_ticks'], ['budgets.max_usd', 'G', 'max_usd'], ['budgets.max_wall_clock_s', 'G', 'max_wall_clock_s']];
+const holder = (goal, h) => (h === 'B' ? goal.orch.budgets : goal.budget);
+
+/**
+ * Write the compiled values the engine reads from goal.json back into it (compiled rules are the truth; legacy fields stay in step). Mutates goal.
+ * `prev` (the compiled rules of the snapshot being replaced) is given on a RECOMPILE: a limit a human patched since then (goal.json differs from `prev`) keeps the
+ * tighter of the patched and the new compiled value, so accepting a repo loosening cannot undo a budget patch.
+ */
+export function applyCompiledToGoal(goal, c, prev = null) {
+  const o = goal.orch;
+  for (const [p, h, f] of LIMIT_MAP) {
+    const now = getPath(c, p); const cur = holder(goal, h)[f];
+    const patched = prev && cur !== undefined && cur !== getPath(prev, p);
+    holder(goal, h)[f] = patched ? Math.min(cur, now) : now;
+  }
   o.check_localhost_ports = [...c.checks.localhost_ports]; o.unsandboxed_checks = c.checks.sandbox === 'off'; o.sandbox_workers = c.worker.sandbox === 'required';
   o.approval_policy = { ...o.approval_policy, plan: c.plan.approval };
+}
+/** The limits as goal.json holds them NOW (after any human budget patch), keyed like the summary's `limits`. */
+export function effectiveLimits(goal) {
+  const B = goal.orch.budgets; const G = goal.budget;
+  return { max_usd: G.max_usd, max_new_tokens: B.max_new_tokens, max_wall_clock_s: G.max_wall_clock_s, max_ticks: G.max_ticks, max_attempts: B.max_attempts, max_parallel: B.max_parallel, max_tasks: B.max_tasks };
 }
 
 /** Snapshot of a compile result (R5+). Not legacy: `policy` is exactly toPolicy(compiled). `inputs` (each layer's rules) lets an accepted loosening recompile without re-reading files. */
@@ -455,7 +476,7 @@ const val = (v) => (v === null || v === undefined ? '(none)' : typeof v === 'obj
  * Human-readable facts about a snapshot, for the approval screens: what the worker may do, the hard limits, and EVERY loosening (and dropped repo loosening)
  * with its layer and id. Pure; `snap` is a rules.snapshot.json (verified by the caller). Plain strings only (no raw rule bodies beyond commands/globs).
  */
-export function summarizeRules(snap) {
+export function summarizeRules(snap, goal = null) {
   const c = snap?.compiled; const pol = snap?.policy;
   if (!c || !pol) return null;
   const layerLine = (snap.layers || []).map((l) => {
@@ -470,8 +491,8 @@ export function summarizeRules(snap) {
       ask_on: [...pol.bash.ask_on], approval_wait_s: pol.approval.wait_in_hook_s, approval_ttl_s: pol.approval.ttl_s },
     denies: { bash: [...pol.bash.deny], paths: [...pol.paths.deny], patterns: pol.bash.deny_patterns.length, scope_deny: c.plan.scope_deny.map((e) => e.glob), floor: ['.git', '.claude/settings*.json', '.aos', '~/.claude', '~/.ssh', '~/.config'] },
     checks: { allowlist: c.checks.allowlist.map((e) => e.cmd), sandbox: c.checks.sandbox, max_timeout_s: c.checks.max_timeout_s, localhost_ports: [...c.checks.localhost_ports] },
-    plan: { approval: c.plan.approval, max_tasks: c.plan.max_tasks, tiers: [...c.plan.tiers], max_start_tier: c.plan.max_start_tier },
-    limits: { max_usd: c.budgets.max_usd, max_new_tokens: c.budgets.max_new_tokens, max_wall_clock_s: c.budgets.max_wall_clock_s, max_ticks: c.budgets.max_ticks, max_attempts: c.retry.max_attempts, max_parallel: c.parallel.max_parallel },
+    plan: { approval: c.plan.approval, max_tasks: goal ? effectiveLimits(goal).max_tasks : c.plan.max_tasks, tiers: [...c.plan.tiers], max_start_tier: c.plan.max_start_tier },
+    limits: goal ? effectiveLimits(goal) : { max_usd: c.budgets.max_usd, max_new_tokens: c.budgets.max_new_tokens, max_wall_clock_s: c.budgets.max_wall_clock_s, max_ticks: c.budgets.max_ticks, max_attempts: c.retry.max_attempts, max_parallel: c.parallel.max_parallel }, // after a budget patch, what goal.json enforces
     loosenings: lo, dropped: dr, notes: [...(snap.notes || [])].slice(0, 10),
   };
 }
