@@ -2,11 +2,11 @@
 
 What the orchestrator enforces, what it does not, and the residual risks. The short version is in the [README](../README.md#safety); how to report a vulnerability is in [SECURITY.md](../SECURITY.md).
 
-**Run it on throwaway repos or clones first.** The orchestrator launches real `claude` workers that can edit files in your repo, and its guardrails are defense in depth, not a proof. Platforms: macOS (`sandbox-exec`) and Linux (bubblewrap) for acceptance checks; the opt-in worker sandbox is macOS-only. See "Platform sandbox notes" at the end.
+**Run it on throwaway repos or clones first.** The orchestrator launches real `claude` workers that can edit files in your repo, and its guardrails are defense in depth, not a proof. Platforms: macOS (`sandbox-exec`) and Linux (bubblewrap) for acceptance checks; the worker sandbox (default on macOS for `aos-orch run goal.json`) is macOS-only. See "Platform sandbox notes" at the end.
 
 ## The five protections in one paragraph
 
-Workers get only read-only shell commands plus Edit/Write inside their task's `path_scope`; the policy hook denies everything else. Repos that carry their own Claude Code hooks, MCP servers or permissions are refused. Plans that contain commands always need your approval, and the approval is bound to a hash of the exact plan. Acceptance checks run in a deny-default OS sandbox with no network. The worker `claude` process itself is OS-sandboxed only if you opt in with `--sandbox-workers`.
+Workers get only read-only shell commands plus Edit/Write inside their task's `path_scope`; the policy hook denies everything else. Repos that carry their own Claude Code hooks, MCP servers or permissions are refused. Plans that contain commands always need your approval, and the approval is bound to a hash of the exact plan. Acceptance checks run in a deny-default OS sandbox with no network. On macOS `aos-orch run goal.json` also OS-sandboxes the worker `claude` process by default (`--no-sandbox-workers` opts out). With `worker.self_check` a worker may have the engine run its own approved checks in the check sandbox.
 
 ## What is enforced, and what is not
 
@@ -44,8 +44,10 @@ Enforced by code and covered by tests:
    parameters through `execFile` (the profile text is static). If `sandbox-exec` is missing or fails its probe, checks are refused and
    the goal blocks before dispatch unless `orch.unsandboxed_checks` is set (recorded, warned, event-logged). Linux uses bubblewrap instead
    (see "Platform sandbox notes").
-5. **Opt-in worker sandbox** (`orch.sandbox_workers: true` or `aos-orch run goal.json --sandbox-workers`; default OFF, behaviour
-   unchanged). The planner and every task worker are launched as `sandbox-exec -f <goal>/sandbox/worker-<hash>.sb -D ... claude -p ...`
+5. **Worker sandbox** (`orch.sandbox_workers: true`). `aos-orch run goal.json` sets it by DEFAULT on macOS and prints that it did;
+   `--no-sandbox-workers` (or `orch.sandbox_workers: false` in the goal file) turns it off with a WARNING on stderr. On Linux and elsewhere
+   it stays off with a notice (checks and self-checks are still bwrap-sandboxed); `--sandbox-workers` there fails closed. Goals created
+   another way (dashboard/`serve`, the engine API) keep whatever their spec says (default off). The planner and every task worker are launched as `sandbox-exec -f <goal>/sandbox/worker-<hash>.sb -D ... claude -p ...`
    (`wrapWorkerCommand` in `lib/sandbox.mjs`; static deny-default profile, paths only as `-D` parameters). If `sandbox-exec` is missing
    or fails its probe, no worker starts (the dispatch fails and the goal halts); it never falls back to unsandboxed.
    **Linux: not supported.** `--sandbox-workers` / `orch.sandbox_workers` FAIL CLOSED there (the CLI exits with an error, no worker starts).
@@ -67,7 +69,7 @@ Enforced by code and covered by tests:
      (also unreadable), keychain directories (`~/Library/Keychains`, `/Library/Keychains`).
    - **Reads allowed:** system locations, the node prefix, the claude binary's real directory, `orchestrator/lib` (the hook), the
      worktree, the repo `.git`, `~/.claude` (except `~/.claude/sessions`) and `~/.claude.json`, `~/.gitconfig`, `~/Library/Keychains`,
-     its goal tmp dir, the approvals dir, its policy and settings files. Other home files (`~/Documents`, other repos) are not readable.
+     its goal tmp dir, the approvals dir, its policy and settings files, the macOS developer directory (git/xcrun toolchain, read-only). Other home files (`~/Documents`, other repos) are not readable.
    - **Not restricted:** network (all of it: `claude` must reach `api.anthropic.com` and `sandbox-exec` cannot filter by host, so a
      worker shell can still talk to any host); Mach/XPC lookups; **keychain READ**: auth needs it, so a worker's shell can also run
      `security find-generic-password` and read the Claude credentials (and, combined with the open network, exfiltrate them). Other
@@ -79,7 +81,41 @@ Enforced by code and covered by tests:
      The write list is empirical for that claude version: a newer claude that writes elsewhere fails those writes (EPERM), which
      may break a feature; re-probe after upgrades.
 
+6. **Worker self-check** (rules `worker.self_check`, default OFF in the `strict` default rules, ON in the `node-library` profile;
+   `worker.self_checks_max`, default 5 runs per attempt, a cap that only tightens; a repo layer can never turn it on). Workers still
+   cannot run code. What they can do is ask the ENGINE to run one of their own task's approved checks (`lib/selfcheck.mjs`):
+   - The policy hook recognises a Bash call whose command is EXACTLY one approved check argv of this task: one plain command, no
+     shell syntax at all (`; & | < > ( ) $ \` ` \ { } # ~ !` and newlines are refused outright), token-for-token equal (no extra
+     arguments, no env prefix, no other spelling of the binary), run from the worktree root. Anything else falls through to the
+     normal policy, which hard-denies it as before.
+   - The hook DENIES that call (the worker's command never runs, in or outside a worker sandbox) and drops `{id, index}` into the
+     attempt's inbox (`<goal>/tmp/<task>/.aos-selfcheck/`, cleared per attempt). The engine process (outside every worker
+     sandbox, so no nested `sandbox-exec`) takes the argv from ITS OWN copy of the approved plan, never from the request,
+     counts it, and runs it through `runChecks`: the same deny-default check sandbox (sandbox-exec / bwrap: no network, writes
+     only in the worktree and a private TMPDIR outside the worker's tmp dir), env, allowlist, 64 KB output cap. Its timeout is
+     `min(check timeout, 300 s, the attempt's remaining wall clock)`, so the run counts against the task wall clock. If the
+     goal's checks are not sandboxed (`checks.sandbox: off`), self-checks are refused.
+   - The hook returns the result as the deny reason: status line plus the last 6000 characters of output, fenced as UNTRUSTED
+     (`lib/untrusted.mjs`). Probed with a real `claude -p --model haiku` (2.1.304): the model reads the reason text.
+   - Every run is an `orch.check.self_run` event (argv, ok, exit code, sandboxed, duration, output bytes); refusals past the cap
+     are `orch.check.self_capped`; the attempt record gets `self_checks {runs, capped, ms, output_bytes, max}`. These denials are
+     not counted as policy denials. The hook's PreToolUse timeout is 360 s so it can wait for a run; approval waits stay at 25 s.
+   - Informational only: after the attempt the engine runs the integrity, scope, anti-cheat and authoritative checks exactly as
+     before. A self-check result never decides anything.
+   - Strict stays off because the strict default is the measurement-pending, nothing-new baseline and has no check allowlist
+     of its own; node-library turns it on because its checks are `node --test`-style and blind writing costs a whole attempt there.
+   The rules summary at plan approval shows `worker self-check: ON ... at most N per attempt` or `off`.
+
 Residual risks (honest list):
+
+- **Self-check (protection 6):** a self-check executes worker-written code in the check sandbox while the worker is still running,
+  i.e. BEFORE the anti-cheat diff and the scope check (both still run afterwards on everything in the worktree, so a write the run
+  makes outside `path_scope` fails the attempt; a check that leaves untracked build output that is not git-ignored now fails the
+  attempt as a scope violation). The inbox is in the worker's writable tmp dir: a worker can forge requests (they only spend its
+  own cap) or responses (only fooling itself); the engine refuses a symlinked inbox and request files that are not small regular
+  files. Workers re-adopted after an engine restart get no self-check service (the hook times out and says so). It gives a
+  worker an execution oracle for its approved checks: output (up to 6000 chars per run, 5 runs) of code it wrote, from inside
+  the check sandbox.
 
 - **Workers (`claude` itself) are OS-sandboxed only when you opt in** (`--sandbox-workers`, protection 5). By default they are
   constrained only by the policy hook (PreToolUse and PermissionRequest) and the isolation flags, and the hook is a heuristic shell
@@ -107,7 +143,9 @@ Residual risks (honest list):
 
 ## Platform sandbox notes
 
-- **macOS:** acceptance checks run under `sandbox-exec` (deny-default profile); `--sandbox-workers` can also sandbox workers.
+- **macOS:** acceptance checks run under `sandbox-exec` (deny-default profile); workers too by default for `aos-orch run goal.json` (`--no-sandbox-workers` opts out).
+  Both profiles may READ the active developer directory (`DEVELOPER_DIR` or `xcode-select -p`, as given and resolved; e.g.
+  `/Applications/Xcode_<v>.app/Contents/Developer` on GitHub's macOS runners), because the `/usr/bin/git` shim runs the toolchain from there.
 - **Linux:** acceptance checks run under bubblewrap (`bwrap`, install `bubblewrap`). Instead of a deny-default profile it builds a fresh mount
   namespace containing only read-only `/usr /bin /sbin /lib*` and a short `/etc` allow-list, the node prefix, `~/.npm` (read-only), the
   worktree and the private TMPDIR (read-write) and a tmpfs `/tmp`; the root is remounted read-only. HOME, secrets, other worktrees and engine

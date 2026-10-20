@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { evaluate, callSummary, safeLabel } from './policy.mjs';
 import { createApproval, waitForDecision } from './approvals.mjs';
+import { matchSelfCheck, requestSelfCheck } from './selfcheck.mjs';
 
 /** Where an unresolvable path (symlink loop) is reported: outside every worktree, so it is always denied. */
 export const UNRESOLVABLE = '/dev/null/aos-unresolvable-path';
@@ -63,6 +64,18 @@ export async function decideForPayload(payload, env = process.env) {
   }
   const ctx = { ...cfg.ctx, home: cfg.ctx?.home || process.env.HOME, realpath: realpathDeepest };
   const call = { tool_name: payload.tool_name, tool_input: payload.tool_input, cwd: payload.cwd };
+  // worker.self_check: an EXACT approved check argv is never run here; the engine runs it in the check sandbox and the output is the deny reason
+  const sc = cfg.ctx?.self_check;
+  if (sc && event === 'PreToolUse' && call.tool_name === 'Bash' && Array.isArray(sc.checks) && sc.dir) {
+    const idx = matchSelfCheck(call.tool_input?.command, sc.checks);
+    if (idx >= 0) {
+      const cwdOk = realpathDeepest(path.resolve(String(call.cwd || cfg.ctx.worktree))) === cfg.ctx.worktree;
+      const reason = cwdOk ? await requestSelfCheck(sc, idx, { pollMs: Number(env.AOS_APPROVAL_POLL_MS) || 100 })
+        : 'AOS self-check: run the check from the task worktree root (the directory you started in), exactly as approved; not run.';
+      logDecision(env, { event, decision: 'deny', rule: cwdOk ? 'self_check' : 'self_check_cwd', rule_id: `floor:${cwdOk ? 'self_check' : 'self_check_cwd'}`, rule_layer: 'floor', rules_hash: ids({}, cfg).rules_hash, label: safeLabel(call) });
+      return { event, decision: 'deny', reason, rule: 'self_check', rule_id: 'floor:self_check' };
+    }
+  }
   const v = evaluate(cfg.policy, call, ctx);
   if (v.decision !== 'ask') {
     logDecision(env, { event, decision: v.decision, rule: v.rule, ...ids(v, cfg), label: safeLabel(call) });

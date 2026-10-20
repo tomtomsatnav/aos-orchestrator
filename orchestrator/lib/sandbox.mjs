@@ -27,6 +27,25 @@ const SYSTEM_READ = ['/usr', '/bin', '/sbin', '/System', '/Library', '/opt/homeb
 export const SECRET_DIRS = ['.ssh', '.aws', '.config', '.claude', '.gnupg', '.netrc', '.npmrc', '.git-credentials', '.docker', '.kube', 'Library/Keychains', 'Library/Cookies',
   '.zsh_history', '.bash_history', '.zhistory', '.history', '.python_history', '.node_repl_history', '.zsh_sessions'];
 
+/**
+ * macOS developer directory (git, xcrun and the rest of the Command Line Tools / Xcode toolchain behind the /usr/bin shims) as
+ * [as-given, real] paths, read-only in both profiles. Stock CLT lives under /Library (already readable); GitHub's macOS runners
+ * select /Applications/Xcode_<v>.app/Contents/Developer, which no other rule covers, so without this `git` fails in the sandbox.
+ */
+let devDirCache;
+export function developerDirs(env = process.env, platform = process.platform) {
+  if (platform !== 'darwin') return [];
+  if (env === process.env && devDirCache) return devDirCache;
+  let d = env.DEVELOPER_DIR || null;
+  if (!d) { try { d = execFileSync('/usr/bin/xcode-select', ['-p'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim(); } catch { d = null; } }
+  const out = [];
+  if (d && path.isAbsolute(d) && !/[\0\n]/.test(d)) { out.push(path.resolve(d)); try { out.push(fs.realpathSync(d)); } catch { /* missing: nothing more */ } }
+  const r = [...new Set(out)].filter((x) => x !== '/' && x.split('/').length > 2); // never a whole top-level directory
+  if (env === process.env) devDirCache = r;
+  return r;
+}
+const devParams = (cfg) => { const [a, b] = cfg.developerDirs || developerDirs(); const none = '/nonexistent-aos-sandbox'; return { DEV_DIR0: a || none, DEV_DIR1: b || a || none }; };
+
 /** Static profile text. `ports` = number of allowed loopback ports (each is the parameter PORT<i>). No caller data goes in here. */
 export function buildProfile({ ports = 0, loopback = false } = {}) {
   const n = Math.max(0, Math.min(16, ports | 0));
@@ -37,6 +56,7 @@ export function buildProfile({ ports = 0, loopback = false } = {}) {
     '(allow sysctl-read)', '(allow file-read-metadata)', '(allow file-ioctl)', '(allow ipc-posix-shm*)', '(allow mach-lookup)',
     `(allow file-read* ${SYSTEM_READ.map((p) => `(subpath "${p}")`).join(' ')} (literal "/"))`,
     '(allow file-read* (subpath (param "NODE_PREFIX")) (subpath (param "WORKTREE")) (subpath (param "TMPDIR_CHECK")) (subpath (param "TOOL_CACHE")))',
+    '(allow file-read* (subpath (param "DEV_DIR0")) (subpath (param "DEV_DIR1")))',
     '(allow file-read* file-write* (subpath (param "WORKTREE")) (subpath (param "TMPDIR_CHECK")))',
     '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))',
     ';; deny AFTER the allows: later rules win',
@@ -73,7 +93,7 @@ export function buildWorkerProfile() {
     ';; network: needed for the Anthropic API. sandbox-exec cannot restrict by host name, so ALL network is allowed',
     '(allow network*)', '(allow system-socket)',
     `(allow file-read* ${SYSTEM_READ.map((p) => `(subpath "${p}")`).join(' ')} (literal "/") (literal "/private/tmp") (literal "/private/var/folders"))`,
-    '(allow file-read* (subpath (param "NODE_PREFIX")) (subpath (param "CLAUDE_PREFIX")) (literal (param "CLAUDE_LINK")) (subpath (param "HOOK_DIR"))',
+    '(allow file-read* (subpath (param "NODE_PREFIX")) (subpath (param "CLAUDE_PREFIX")) (literal (param "CLAUDE_LINK")) (subpath (param "HOOK_DIR")) (subpath (param "DEV_DIR0")) (subpath (param "DEV_DIR1"))',
     '  (subpath (param "WORKTREE")) (subpath (param "GIT_COMMON")) (subpath (param "TMPDIR_W")) (subpath (param "APPROVALS"))',
     '  (literal (param "POLICY_FILE")) (literal (param "SETTINGS_FILE")) (literal (param "DECISION_LOG"))',
     '  (subpath (param "CLAUDE_DIR")) (literal (param "CLAUDE_JSON")) (literal (string-append (param "CLAUDE_JSON") ".backup"))',
@@ -136,6 +156,7 @@ export function wrapWorkerCommand(argv, cfg) {
     PROJECT_DIR: path.join(home, '.claude', 'projects', projectSlug(wt)),
     SYS_TMP: cfg.sysTmp ? realDeepest(cfg.sysTmp) : none, SCRATCH_ROOT: realDeepest(`/tmp/claude-${process.getuid?.() ?? 0}`), SCRATCH_DIR: realDeepest(`/tmp/claude-${process.getuid?.() ?? 0}/${projectSlug(wt)}`),
     SESSION_ENV: path.join(home, '.claude', 'session-env', /^[0-9a-zA-Z-]{8,64}$/.test(cfg.sessionId || '') ? cfg.sessionId : 'none-aos-no-session'),
+    ...devParams(cfg),
   };
   const args = ['-f', file];
   for (const [k, v] of Object.entries(params)) args.push('-D', `${k}=${v}`);
@@ -211,7 +232,7 @@ export function wrapCommand(argv, cfg) {
   const toolCache = cfg.toolCache || path.join(os.homedir(), '.npm');
   const params = {
     WORKTREE: realDeepest(cfg.worktree), TMPDIR_CHECK: realDeepest(cfg.tmpDir), GOAL_DIR: cfg.goalDir ? realDeepest(cfg.goalDir) : none, ORCH_DIR: cfg.orchDir ? realDeepest(cfg.orchDir) : none,
-    HOME0: home0, HOME1: home1, NODE_PREFIX: nodePrefix, TOOL_CACHE: realDeepest(toolCache),
+    HOME0: home0, HOME1: home1, NODE_PREFIX: nodePrefix, TOOL_CACHE: realDeepest(toolCache), ...devParams(cfg),
   };
   ports.forEach((p, i) => { params[`PORT${i}`] = String(p); });
   const args = ['-f', file];

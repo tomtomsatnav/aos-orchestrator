@@ -4,7 +4,7 @@ export const PROFILES = Object.freeze({
   strict: null,
   'node-library': { rules_version: 1,
     checks: { allowlist: [cm('node-test', 'node --test', 'built-in test runner'), cm('npm-test', 'npm test'), cm('node-check', 'node --check')], max_timeout_s: 600, allow_loopback: false, protect_existing_tests: true, acceptance_first: true },
-    worker: { paths: { deny: [gl('lockfile', '**/package-lock.json'), gl('ci', '**/.github/**')] } },
+    worker: { paths: { deny: [gl('lockfile', '**/package-lock.json'), gl('ci', '**/.github/**')] }, self_check: true },
     plan: { scope_deny: [gl('no-node-modules', 'node_modules/**')], max_tasks: 8 }, retry: { max_attempts: 3 } },
   'docs-only': { rules_version: 1,
     worker: { tools: { allow: ['Read', 'Glob', 'Grep', 'Edit', 'Write'] }, paths: { on_outside_scope: 'deny' } },

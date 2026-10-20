@@ -12,6 +12,8 @@ import {
 import * as G from './git.mjs';
 import { escCtrl } from './ctrl.mjs';
 import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
+import * as SC from './selfcheck.mjs';
+import { isSelfCheckDenial } from './selfcheck.mjs';
 import { matchAny, scopesOverlap } from './glob.mjs';
 import { mergePolicy, DEFAULT_POLICY, isProtectedRel } from './policy.mjs';
 import { DEFAULT_RULES, q, buildSnapshot, snapshotHash, rulesFingerprint, applyCompiledToGoal, validateRules, toPolicy } from './rules.mjs';
@@ -61,7 +63,8 @@ export class Engine {
     this.testUnsandboxed = o.testUnsandboxedChecks === true; // TEST HARNESS ONLY (hosts without a sandbox): a constructor option, not a goal/CLI/env setting
     this.sandboxBin = o.sandboxBin || DEFAULT_SANDBOX_BIN; // tests may point this at a missing binary
     this.hookScript = o.hookScript || HOOK_SCRIPT; // tests may substitute a stub hook
-    this.workerSandbox = o.workerSandbox || null; // tests: overrides for wrapWorkerCommand (e.g. sysTmp)
+    this.workerSandbox = o.workerSandbox || null;
+    this.selfCheckPollMs = o.selfCheckPollMs || 150; // tests: overrides for wrapWorkerCommand (e.g. sysTmp)
     this.ownerLabel = o.ownerLabel || 'run';
     this.lockRefreshMs = o.lockRefreshMs ?? null; // default: a third of the lock TTL
     this.bin = o.claudeBin || W.claudeBin(this.env);
@@ -91,6 +94,9 @@ export class Engine {
     clearInterval(this._lockTimer);
     this._lockTimer = setInterval(() => { if (!this.dead && this.started) touchLock(this.dir, { pid: this.pid, now: Date.now() }); }, this.lockRefreshMs ?? Math.floor(this.lockTtlMs() / 3));
     this._lockTimer.unref?.();
+    clearInterval(this._scTimer); // worker.self_check requests are answered between ticks (a tick can be seconds away)
+    this._scTimer = setInterval(() => { if (!this.dead && this.started) this._serviceSelfChecks(); }, this.selfCheckPollMs);
+    this._scTimer.unref?.();
     for (const d of [this.P.approvals, this.P.workers, this.P.commands, this.P.tmp]) ensureDir(d);
     this.gov = new Governor(this.orchDir, {}); // thresholds come from the rules (user layer only, G5): _syncGovernor() at the first tick
     atomicWrite(path.join(this.P.workers, 'settings.json'), W.buildSettings(this.hookScript));
@@ -101,10 +107,10 @@ export class Engine {
   }
 
   /** Release the lock; workers keep running (a later engine re-adopts them). */
-  async stop() { this.stopped = true; this._wake(); await this._chain.catch(() => {}); clearInterval(this._lockTimer); releaseLock(this.dir, { pid: this.pid }); this.started = false; }
+  async stop() { this.stopped = true; this._wake(); await this._chain.catch(() => {}); clearInterval(this._lockTimer); clearInterval(this._scTimer); releaseLock(this.dir, { pid: this.pid }); this.started = false; }
 
   /** Simulate a hard crash: stop everything in this process, leave lock + workers + files exactly as they are. */
-  crash() { this.dead = true; this.stopped = true; clearInterval(this._lockTimer); this.workers.clear(); this._wake(); }
+  crash() { this.dead = true; this.stopped = true; clearInterval(this._lockTimer); clearInterval(this._scTimer); this.workers.clear(); this._wake(); }
 
   isDone() {
     const g = readJSON(this.P.goal);
@@ -564,7 +570,9 @@ export class Engine {
     const u = rec.tail.usage();
     const stderr = (() => { try { return fs.readFileSync(this.wpath(task.id, rec.seq, 'stderr'), 'utf8'); } catch { return ''; } })();
     const rl = rec.lastRL;
-    const denials = res ? (res.permission_denials || []).map((d) => ({ tool_name: d.tool_name, tool_input_label: String(d.tool_input?.command ?? d.tool_input?.file_path ?? '').split(/\s+/)[0] })) : rec.tail.denials.map((d) => ({ tool_name: d.tool_name }));
+    // a self-check is a Bash call the hook denies on purpose (the engine ran the approved argv instead): not a policy denial
+    const scChecks = rec.selfCheck?.checks || null;
+    const denials = res ? (res.permission_denials || []).filter((d) => !(scChecks && isSelfCheckDenial(d, scChecks))).map((d) => ({ tool_name: d.tool_name, tool_input_label: String(d.tool_input?.command ?? d.tool_input?.file_path ?? '').split(/\s+/)[0] })) : rec.tail.denials.map((d) => ({ tool_name: d.tool_name }));
     const collected = { task: task.id, seq: rec.seq, exit_code: rec.exited?.exit_code ?? null, signal: rec.exited?.signal ?? null, spawn_error: rec.exited?.error || null,
       killReason: rec.killReason === 'budget' && res ? null : rec.killReason, // a budget kill that raced a delivered result changes nothing
       result: res ? { subtype: res.subtype, is_error: res.is_error, result: String(res.result ?? '').slice(0, 4000), errors: res.errors, api_error_status: res.api_error_status, usage: res.usage, total_cost_usd: res.total_cost_usd, num_turns: res.num_turns, terminal_reason: res.terminal_reason } : null,
@@ -577,6 +585,7 @@ export class Engine {
       goal.budget.spent_usd = o.usage.notional_usd;
       task.orch.tokens.new += u.new_tokens; task.orch.tokens.cache_read += u.cache_read_tokens;
     }
+    if (rec.selfCheck) entry.self_checks = { ...rec.selfCheck.stats, max: rec.selfCheck.max };
     if (stderr.trim() && (!res || res.is_error || collected.exit_code)) entry.stderr_tail = stderrTail(stderr); // what a human needs to see when a worker crashed or errored
     entry.ended_at = iso(this.now()); entry.collected = true;
     const a = S.agents.find((x) => x.id === task.assignee); if (a) { a.status = 'idle'; a.current_task = null; a.last_event_at = entry.ended_at; }
@@ -1076,7 +1085,7 @@ export class Engine {
     const guard = this._configGuard(goal, wt);
     if (guard) return { error: guard };
     const rc = this._rulesView(goal)?.compiled;
-    const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), replan, constraints: { max_tasks: rc ? rc.plan.max_tasks : o.budgets.max_tasks, tiers: startableTiers(rc?.plan.tiers ?? TIERS, rc?.plan.max_start_tier), max_start_tier: rc?.plan.max_start_tier, scope_deny: (rc?.plan.scope_deny || []).map((d) => d.glob), protected_tests: o.protected_tests?.files || [], check_allowlist: this._checkAllowlist(goal), acceptance_first: rc?.checks.acceptance_first === true && goal.success_criteria.some((c) => c.check) } });
+    const { prompt } = buildPlannerPrompt({ goal, facts: gatherRepoFacts(wt), replan, constraints: { max_tasks: rc ? rc.plan.max_tasks : o.budgets.max_tasks, tiers: startableTiers(rc?.plan.tiers ?? TIERS, rc?.plan.max_start_tier), max_start_tier: rc?.plan.max_start_tier, scope_deny: (rc?.plan.scope_deny || []).map((d) => d.glob), protected_tests: o.protected_tests?.files || [], check_allowlist: this._checkAllowlist(goal), acceptance_first: rc?.checks.acceptance_first === true && goal.success_criteria.some((c) => c.check), self_check: rc?.worker.self_check === true, self_checks_max: rc?.worker.self_checks_max } });
     const sessionId = crypto.randomUUID();
     const policyFile = path.join(this.P.workers, 'planner.policy.json');
     atomicWrite(policyFile, { ...this._policyHead(goal), ctx: { worktree: realpathDeepest(wt), path_scope: [], allowed_tools: ['Read', 'Glob', 'Grep'], allowed_commands: [], grants: [], home: this.env.HOME, base_branch: o.base_branch } });
@@ -1194,10 +1203,11 @@ export class Engine {
     task.orch.worktree = wt;
     const real = realpathDeepest(wt);
     const policyFile = this.wpath(task.id, seq, 'policy.json');
+    const sc = this._selfCheckSetup(goal, task, real);
     atomicWrite(policyFile, { ...this._policyHead(goal), ctx: { worktree: real, path_scope: task.orch.path_scope, allowed_tools: task.orch.allowed_tools,
-      allowed_commands: task.orch.allowed_commands, grants: task.orch.grants, home: this.env.HOME, base_branch: o.base_branch } });
+      allowed_commands: task.orch.allowed_commands, grants: task.orch.grants, home: this.env.HOME, base_branch: o.base_branch, ...(sc ? { self_check: sc.ctx } : {}) } });
     const deps = task.depends_on.map((d) => S.tasks.find((x) => x.id === d)).filter(Boolean).map((d) => ({ id: d.id, title: d.title, summary: d.orch.result_summary }));
-    const prompt = W.buildWorkerPrompt({ goal, task, deps, previous: task.orch.last_failure ? { check_output: task.orch.last_failure.check_output, denials: task.orch.last_failure.denials, note: task.orch.last_failure.note } : null });
+    const prompt = W.buildWorkerPrompt({ goal, task, deps, previous: task.orch.last_failure ? { check_output: task.orch.last_failure.check_output, denials: task.orch.last_failure.denials, note: task.orch.last_failure.note } : null, selfCheck: sc ? { max: sc.ctx.max } : null });
     fs.writeFileSync(this.wpath(task.id, seq, 'prompt.txt'), prompt, { mode: 0o600 });
     const args = W.buildArgs({ prompt, tier, sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, settingsFile: path.join(this.P.workers, 'settings.json') });
     const env = W.buildEnv({ base: this.env, goalId: goal.id, taskId: task.id, attempt: task.attempts, worktree: real, policyFile, approvalsDir: this.P.approvals, tmpDir: this._tmp(task.id), decisionLog: path.join(this.P.workers, 'decisions.ndjson'), bin: this.bin });
@@ -1205,7 +1215,7 @@ export class Engine {
     const cmd = this._workerCommand(goal, args, env, { worktree: real, tmpDir: env.TMPDIR, policyFile });
     const h = W.startWorker({ bin: cmd.bin, args: cmd.args, env, cwd: wt, stdoutFile: stdout, stderrFile: stderr, spawnFn: this.spawnFn });
     const rec = { task: task.id, seq, pid: h.pid, pgid: h.pgid, session_id: sessionId, tail: new W.StreamTail(stdout), handle: h, exited: null,
-      startedMs: this.now(), lastProgressMs: this.now(), killReason: null, termAtReal: 0 };
+      startedMs: this.now(), lastProgressMs: this.now(), killReason: null, termAtReal: 0, selfCheck: sc ? sc.state : null };
     this.workers.set(task.id, rec);
     if (h.pid) atomicWrite(this.wpath(task.id, seq, 'pid.json'), { pid: h.pid, pgid: h.pgid, started_at: iso(this.now()), session_id: sessionId, tier, attempt: task.attempts, sandboxed: cmd.sandboxed });
     if (agent?.orch) agent.orch.pid = h.pid;
@@ -1240,6 +1250,59 @@ export class Engine {
       gitCommon: path.join(goal.orch.repo, '.git'), claudeBin: W.resolveBin(this.bin, env.PATH), sessionId: args[args.indexOf('--session-id') + 1], sysTmp: env.AOS_FAKE_STATE ? path.dirname(env.AOS_FAKE_STATE) : undefined /* test mode only: the scripted fake's scenario + state */, home: this.env.HOME, profileDir: path.join(this.dir, 'sandbox'),
       bin: this.sandboxBin, ...(this.workerSandbox || {}) });
     return { bin: w.bin, args: w.args, sandboxed: true };
+  }
+  // ------------------------------------------------------------------ worker self-check (lib/selfcheck.mjs)
+  /** For an attempt whose rules allow it: {ctx (goes into the policy file), state (engine memory)}; else null. The inbox is cleared per attempt. */
+  _selfCheckSetup(goal, task, realWt) {
+    const R = this._R(goal).worker;
+    if (R.self_check !== true || !(task.orch.checks || []).length) return null;
+    const dir = path.join(this._tmp(task.id), SC.INBOX_NAME);
+    fs.rmSync(dir, { recursive: true, force: true }); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const checks = task.orch.checks.map((c) => ({ argv: [...c.argv], timeout_s: c.timeout_s }));
+    const max = R.self_checks_max ?? SC.SELF_CHECKS_MAX_DEFAULT;
+    return { ctx: { dir: realpathDeepest(dir), checks, max },
+      state: { dir, checks, max, wt: realWt, attempt: task.attempts, busy: false, stats: { runs: 0, capped: 0, ms: 0, output_bytes: 0 } } };
+  }
+  /** Answer pending self-check requests: one run at a time per worker, the argv always from the engine's copy of the plan. */
+  _serviceSelfChecks() {
+    for (const rec of this.workers.values()) {
+      const sc = rec.selfCheck;
+      if (!sc || sc.busy) continue;
+      const reqs = SC.readRequests(sc.dir);
+      if (!reqs.length) continue;
+      const q0 = reqs[0];
+      try { fs.rmSync(q0.file, { force: true }); } catch { /* answered anyway */ }
+      if (rec.exited || rec.termAtReal) { SC.writeResponse(sc.dir, q0.id, { error: 'the attempt is ending' }); continue; }
+      if (q0.index < 0 || q0.index >= sc.checks.length) { SC.writeResponse(sc.dir, q0.id, { error: 'unknown check' }); continue; }
+      if (sc.stats.runs >= sc.max) {
+        sc.stats.capped++; SC.writeResponse(sc.dir, q0.id, { capped: true, max: sc.max });
+        this.ev('orch.check.self_capped', 'orchestrator', rec.task, { attempt: sc.attempt, max: sc.max });
+        continue;
+      }
+      sc.busy = true; sc.stats.runs++;
+      const run = sc.stats.runs;
+      this._runSelfCheck(rec, sc, q0.index).then((r) => {
+        sc.stats.ms += r.duration_ms || 0; sc.stats.output_bytes += Buffer.byteLength(r.output || '');
+        SC.writeResponse(sc.dir, q0.id, r.refused ? { error: r.refused } : { ok: r.ok, exit_code: r.exit_code, timed_out: r.timed_out, duration_ms: r.duration_ms, run, max: sc.max,
+          output: tail(r.output || '', SC.OUTPUT_TAIL), truncated: (r.output || '').length > SC.OUTPUT_TAIL });
+        this.ev('orch.check.self_run', 'orchestrator', rec.task, { attempt: sc.attempt, run, max: sc.max, argv: sc.checks[q0.index].argv.join(' ').slice(0, 300), ok: !!r.ok, exit_code: r.exit_code ?? null,
+          timed_out: !!r.timed_out, sandboxed: r.sandboxed ?? null, duration_ms: r.duration_ms || 0, output_bytes: Buffer.byteLength(r.output || ''), ...(r.refused ? { refused: r.refused.slice(0, 200) } : {}) });
+      }).catch((e) => { SC.writeResponse(sc.dir, q0.id, { error: `engine error: ${String(e.message).slice(0, 120)}` }); })
+        .finally(() => { sc.busy = false; });
+    }
+  }
+  /** One self-check: the same runChecks path, env, allowlist and OS sandbox as the authoritative checks; never unsandboxed. Bounded by the attempt's wall clock. */
+  async _runSelfCheck(rec, sc, idx) {
+    const goal = readJSON(this.P.goal);
+    const name = `selfcheck-${rec.task}`; // its own TMPDIR root: not inside the worker's writable tmp dir
+    const opts = this._sandboxOpts(goal, sc.wt, name);
+    if (opts.unsandboxed) return { refused: 'checks are not OS-sandboxed for this goal, so self-checks are disabled', duration_ms: 0 };
+    const left = Math.floor((goal.orch.budgets.task_wall_clock_s * 1000 - (this.now() - rec.startedMs)) / 1000);
+    if (left < 2) return { refused: 'the attempt has no wall-clock time left', duration_ms: 0 };
+    const c = sc.checks[idx];
+    const check = { argv: c.argv, timeout_s: Math.max(1, Math.min(Number(c.timeout_s) || SC.SELF_CHECK_MAX_S, SC.SELF_CHECK_MAX_S, left)) };
+    const r = await runChecks([check], { cwd: sc.wt, env: checkEnv({ base: this.env, tmpDir: this._tmp(name) }), allowlist: this._checkAllowlist(goal), ...opts });
+    return r.results[0] || { refused: 'no result', duration_ms: 0 };
   }
   _sandboxOpts(goal, wt, name) {
     const o = goal.orch;

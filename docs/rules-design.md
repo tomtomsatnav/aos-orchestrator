@@ -520,6 +520,8 @@ allow. Everything still passes plan validation and human plan approval, and the 
 3. **Should a profile ever let a worker run code (for example `node --test`) when `sandbox_workers` is on?**
    Recommended: no, for now. Keep code execution in sandboxed checks (floor A13). The worker sandbox leaves the network
    open and keychain reads possible, so it is not a boundary that can carry that grant.
+   **Implemented answer (worker.self_check):** still no for the worker itself. Instead the worker may ask the ENGINE to run its
+   task's approved check argv in the check sandbox (`lib/selfcheck.mjs`); the floor A13 is unchanged (the raw call is denied).
 4. **Where do user defaults live?** Recommended: `$AOS_ORCH_DIR/rules.json`, read with `policy.default.json` as a legacy
    alias. That directory is already outside every repo and forbidden as a repo (`supervisor.mjs:33`). There is then no
    second location under `~`.
@@ -698,3 +700,7 @@ R8 (verification findings N1, N2, S3a, S3b, S4):
 - `acceptance_first` is applied only to goals with at least one criterion that has a `check` (a "code criterion"). It adds to `validatePlan`: >= 1 task with `role: "acceptance"` whose `path_scope` holds only test paths, every other task depends (transitively) on one, and no other task's `path_scope` can reach an acceptance task's scope. At run time the files an acceptance task commits are recorded (`goal.orch.anticheat.acceptance.items[{task, files, commit}]`); a later change to them fails the attempt (`acceptance_modified`), and at verify they are written from `commit` over the integration tree and run (`Engine._runAcceptanceTests`).
 - Task plan fields `role` and `allow_skip` are covered by the tasks hash (only when present, so older approvals still verify) and by the plan review text (`ACCEPTANCE TASK`, `!! ALLOW_SKIP`). A named config file in `path_scope` is highlighted as `CONFIG FILE IN SCOPE` in the plan warnings.
 - Baselines: `goal.orch.anticheat.baselines[<argv>] = {tests, source: run|static}`, taken once before the first dispatch (the integration branch still equals the base commit). A check that cannot run at base falls back to a static `test(`/`it(` count over the test files it names.
+- **worker.self_check / worker.self_checks_max.** Both are absent from `DEFAULT_RULES` (like `review.*`), so the default rules hash is unchanged:
+  absent = off and 5. `worker.self_check` is kind `safe` (false is the safe value; true is a listed loosening, shown in its own line when the chosen
+  profile sets it) and is in `NEVER_FROM_REPO`. `worker.self_checks_max` is kind `mincap` (a `min` whose base defaults to 5 when absent). The engine
+  reads both from the compiled snapshot (`_R(goal)`), so they are part of the approved rules hash.

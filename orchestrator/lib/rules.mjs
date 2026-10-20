@@ -10,6 +10,7 @@ import { allowlistEntryProblem } from './policy.mjs';
 import { canonical, sha256, UNSAFE_CHECK_CMDS } from './plan.mjs';
 import { DEFAULT_BUDGETS } from './state.mjs';
 import { PROFILES } from './profiles.mjs';
+import { SELF_CHECKS_MAX_DEFAULT } from './selfcheck.mjs';
 
 export const RULES_VERSION = 1;
 
@@ -72,6 +73,7 @@ export const RULES_SCHEMA = obj({
     bash: obj({ allow: cmdRules, deny: cmdRules, deny_patterns: entry('regex'), ask_on: list(enums('substitution', 'unparsed', 'unknown_command'), 8) }),
     approval: obj({ wait_in_hook_s: num(0, 25), ttl_s: int(1, 604800), grant_scopes: list(enums('once', 'task'), 2) }),
     sandbox: enums('off', 'required'),
+    self_check: { type: 'boolean' }, self_checks_max: int(1, 50), // worker.self_check (lib/selfcheck.mjs); absent from DEFAULT_RULES (= off, 5 runs) so the default rules hash is unchanged
   }),
   plan: obj({ approval: enums('required', 'auto'), planner_tier: enums(...TIER), draft_tier: enums('haiku', 'sonnet'), planner_timeout_s: int(1, 1800), max_tasks: int(1, 50),
     tiers: { ...list(enums(...TIER), 3), minItems: 1 }, max_start_tier: enums(...TIER), scope_deny: globRules, auto_approvable_checks: cmdRules }),
@@ -222,11 +224,12 @@ const SPEC = [
   ['checks.allow_loopback', 'rank', [true, false]], ['checks.protect_existing_tests', 'rank', [false, true]], ['checks.acceptance_first', 'rank', [false, true]], ['checks.literal_copy', 'rank', ['warn', 'fail']], // true = a check may listen on / connect to 127.0.0.1 (looser); true = original tests are re-run (tighter)
   ['repo_config.trust', 'safe', false],
   ['review.advisory', 'safe', false], ['review.tier', 'safe', 'haiku'],
+  ['worker.self_check', 'safe', false], ['worker.self_checks_max', 'mincap', SELF_CHECKS_MAX_DEFAULT], // true = the engine runs a worker's approved checks on request (looser)
   ...Object.keys(DEFAULT_RULES.governor).map((k) => [`governor.${k}`, 'free']),
 ];
 // a repo may never loosen these, not even with human acceptance (design 3.3)
 const NON_EMPTY = new Set(['plan.tiers']);
-const NEVER_FROM_REPO = new Set(['worker.sandbox', 'checks.sandbox', 'plan.approval', 'repo_config.trust']);
+const NEVER_FROM_REPO = new Set(['worker.sandbox', 'checks.sandbox', 'plan.approval', 'repo_config.trust', 'worker.self_check']);
 
 const tag = (e, layer) => (e && typeof e === 'object' ? { ...e, layer } : e);
 const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -260,6 +263,7 @@ function applyOne(base, val, [p, kind, arg], L) {
       return [...base, ...val.filter((e) => !have.has(ident(e))).map((e) => tag(e, L.layer))];
     }
     case 'min': return val <= base || loose('', base, val) ? val : base;
+    case 'mincap': return val <= (base ?? arg) || loose('', base ?? arg, val) ? val : base; // a cap absent from DEFAULT_RULES: `arg` is its default
     case 'minmap': {
       const out = { ...base };
       for (const [k, v] of Object.entries(val)) { if (v <= (base[k] ?? 0) || loose(k, base[k] ?? 0, v)) out[k] = v; }
@@ -505,12 +509,14 @@ export function summarizeRules(snap, goal = null, profile = null, limitsOverride
   });
   const pname = goal?.orch?.profile_name || profile; const pAllow = new Set((PROFILES[pname]?.checks?.allowlist || []).map((e) => e.cmd));
   // a command the chosen profile itself puts on the check allowlist is expected, not alarming: tagged (still listed, still part of the hash), shown in its own block
-  const lo = (snap.loosenings || []).map((l) => ({ layer: l.layer, rule_id: l.rule_id, path: l.path, ...(l.layer === 'goal' && l.path === 'checks.allowlist' && (l.from === null || l.from === undefined) && pAllow.has(l.to) ? { kind: 'profile_allowlist' } : {}), change: l.from === null || l.from === undefined ? `+ ${val(l.to)}` : `${val(l.from)} -> ${val(l.to)}` }));
+  const lo = (snap.loosenings || []).map((l) => ({ layer: l.layer, rule_id: l.rule_id, path: l.path, ...(l.layer === 'goal' && l.path === 'checks.allowlist' && (l.from === null || l.from === undefined) && pAllow.has(l.to) ? { kind: 'profile_allowlist' } : {}),
+    ...(l.layer === 'goal' && l.path === 'worker.self_check' && l.to === true && PROFILES[pname]?.worker?.self_check === true ? { kind: 'profile_self_check' } : {}), change: l.from === null || l.from === undefined ? `+ ${val(l.to)}` : `${val(l.from)} -> ${val(l.to)}` }));
   const dr = (snap.dropped || []).map((l) => ({ layer: l.layer, rule_id: l.rule_id, path: l.path, change: l.from === null || l.from === undefined ? `+ ${val(l.to)}` : `${val(l.from)} -> ${val(l.to)}`, reason: l.reason || 'loosening' }));
   return {
     rules_hash: snapshotHash(snap).slice(0, 12), profile: goal?.orch?.profile_name || profile || c.profile, description: c.description, legacy: !!snap.legacy, layers: layerLine,
     worker: { tools: [...pol.tools.allow], bash_allow: [...pol.bash.allow], read_extra: [...(pol.paths.read_extra || [])], on_outside_scope: pol.paths.on_outside_scope, sandbox: c.worker.sandbox,
-      ask_on: [...pol.bash.ask_on], approval_wait_s: pol.approval.wait_in_hook_s, approval_ttl_s: pol.approval.ttl_s },
+      ask_on: [...pol.bash.ask_on], approval_wait_s: pol.approval.wait_in_hook_s, approval_ttl_s: pol.approval.ttl_s,
+      self_check: c.worker.self_check === true, self_checks_max: c.worker.self_checks_max ?? SELF_CHECKS_MAX_DEFAULT },
     denies: { bash: [...pol.bash.deny], paths: [...pol.paths.deny], patterns: pol.bash.deny_patterns.length, scope_deny: c.plan.scope_deny.map((e) => e.glob), floor: ['.git', '.claude/settings*.json', '.aos', '~/.claude', '~/.ssh', '~/.config'] },
     checks: { criteria: goal ? (goal.success_criteria || []).filter((x) => Array.isArray(x.check?.argv)).map((x) => x.check.argv.map(q).join(' ')) : [], allowlist: c.checks.allowlist.map((e) => e.cmd), sandbox: c.checks.sandbox, max_timeout_s: c.checks.max_timeout_s, localhost_ports: [...c.checks.localhost_ports], allow_loopback: c.checks.allow_loopback === true, protect_existing_tests: c.checks.protect_existing_tests === true, acceptance_first: c.checks.acceptance_first === true, literal_copy: c.checks.literal_copy === 'fail' ? 'fail' : 'warn' },
     plan: { approval: c.plan.approval, max_tasks: goal ? effectiveLimits(goal).max_tasks : c.plan.max_tasks, tiers: [...c.plan.tiers], max_start_tier: c.plan.max_start_tier },
@@ -524,6 +530,8 @@ export function renderRulesSummary(sm) {
   if (!sm) return 'rules: (no snapshot yet)';
   const L = [`rules ${sm.rules_hash}  profile=${q(sm.profile)}${sm.legacy ? '  (legacy goal: rules predate rule sets)' : ''}  layers: ${sm.layers.map(q).join(' ')}`];
   L.push(`  worker tools: ${sm.worker.tools.map(q).join(' ')}   outside path_scope: ${sm.worker.on_outside_scope}   worker sandbox: ${sm.worker.sandbox}`);
+  L.push(sm.worker.self_check ? `  worker self-check: ON: a worker may have the ENGINE run its own task's approved check argv (exact match only, nothing else), sandboxed like every check, at most ${sm.worker.self_checks_max} per attempt; informational, the engine re-runs all checks after the attempt`
+    : '  worker self-check: off (workers cannot run their checks; set worker.self_check to allow engine-run, sandboxed runs of the approved check argv)');
   L.push(`  worker bash allow (${sm.worker.bash_allow.length}): ${cmdList(sm.worker.bash_allow)}${sm.worker.read_extra.length ? `   extra read roots: ${cmdList(sm.worker.read_extra)}` : ''}`);
   L.push(`  denied: bash ${sm.denies.bash.length} (${cmdList(sm.denies.bash, 6)}); paths ${cmdList(sm.denies.paths, 6)}; ${sm.denies.patterns} pattern(s); floor (never removable): ${sm.denies.floor.map(q).join(' ')}`);
   if (sm.denies.scope_deny.length) L.push(`  planner may not scope (and workers may not write): ${sm.denies.scope_deny.map(q).join(' ')}`);
@@ -531,11 +539,12 @@ export function renderRulesSummary(sm) {
   L.push(`  anti-cheat: always on (test counts, skips, config, deleted tests); acceptance tests written first: ${sm.checks.acceptance_first ? 'yes' : 'no'}; literal-copy heuristic: ${sm.checks.literal_copy}`);
   L.push(`  plan approval: ${sm.plan.approval}; max ${sm.plan.max_tasks} tasks; tiers ${sm.plan.tiers.map(q).join('/')}; start at most ${q(sm.plan.max_start_tier)}`);
   L.push(`  limits: $${sm.limits.max_usd}, ${sm.limits.max_new_tokens} tokens, ${sm.limits.max_wall_clock_s}s, ${sm.limits.max_attempts} attempts/task, ${sm.limits.max_parallel} parallel`);
-  const prof = sm.loosenings.filter((l) => l.kind === 'profile_allowlist'); const real = sm.loosenings.filter((l) => l.kind !== 'profile_allowlist');
+  const prof = sm.loosenings.filter((l) => l.kind === 'profile_allowlist'); const real = sm.loosenings.filter((l) => l.kind !== 'profile_allowlist' && l.kind !== 'profile_self_check');
   if (real.length) L.push(`LOOSENINGS YOU ARE APPROVING (${real.length}):`);
   for (const l of real) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]`);
   if (prof.length) L.push(`PROFILE ${q(sm.profile)} ADDS TO THE CHECK ALLOWLIST (${prof.length}; expected for this profile, listed for completeness; checks run sandboxed):`);
   for (const l of prof) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]`);
+  for (const l of sm.loosenings.filter((x) => x.kind === 'profile_self_check')) L.push(`PROFILE ${q(sm.profile)} TURNS ON WORKER SELF-CHECK (expected for this profile; engine-run, sandboxed, approved check argv only): ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]`);
   if (sm.dropped.length) {
     L.push(`NOT APPLIED (${sm.dropped.length}; a repo's loosenings need --accept-repo-loosening <rule_id>):`);
     for (const l of sm.dropped) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]${l.reason !== 'loosening' ? `  (${q(l.reason)})` : ''}`);

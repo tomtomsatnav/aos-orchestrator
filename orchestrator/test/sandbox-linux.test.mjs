@@ -140,3 +140,10 @@ test('aos-orch run --sandbox-workers exits non-zero off macOS and creates no goa
   assert.notEqual(r.status, 0); assert.match(r.stderr, /not yet supported on Linux/);
   assert.equal(fs.existsSync(path.join(root, 'orch', 'goals', 'g-x')), false);
 });
+
+test('aos-orch run off macOS: worker sandbox defaults OFF with a notice that checks stay sandboxed', { skip: process.platform === 'darwin' && 'macOS defaults it on' }, (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aos-swn-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const gf = path.join(root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify({ id: 'g-n', title: 't', success_criteria: [{ id: 'c1', text: 'x', verify: 'human' }], orch: { repo: root } }));
+  const r = spawnSync(NODE, [path.join(HERE, '..', 'bin', 'aos-orch.mjs'), 'run', gf, '--no-wait'], { env: { ...process.env, AOS_ORCH_DIR: path.join(root, 'orch') }, encoding: 'utf8' });
+  assert.match(r.stderr, /worker OS sandbox is not supported on Linux: workers run unsandboxed \(policy hook only\); acceptance checks and self-checks still run in the OS check sandbox/);
+});

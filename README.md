@@ -30,13 +30,14 @@ Without `npm link` use `node orchestrator/bin/aos-orch.mjs ...` (or `npm link` l
 - Workers never commit or merge. The engine commits onto its own `aos/<goal>/integration` branch, never touches your base branch, never pushes.
 - Plans that contain commands always need your approval, and the approval is bound to a hash of exactly what you read.
 - Acceptance checks run in a deny-default sandbox (macOS `sandbox-exec`, Linux bubblewrap) with no network. Repos that bring their own Claude hooks, MCP servers or permissions are refused.
-- The worker `claude` process itself is **not** OS-sandboxed by default (opt in with `--sandbox-workers`; it limits writes only). Run it on a throwaway repo or clone first.
+- On macOS `aos-orch run goal.json` OS-sandboxes the worker `claude` process by default (`--no-sandbox-workers` opts out, with a warning; it limits writes only). On Linux it is not supported and stays off, with a notice. Run it on a throwaway repo or clone first.
+- With `worker.self_check` (on in the `node-library` profile, off in `strict`) a worker can have the engine run its own task's approved checks, sandboxed, a few times per attempt, and read the output. It cannot run anything else. See [docs/security.md](docs/security.md), protection 6.
 
 Details and residual risks: [docs/security.md](docs/security.md). Reporting a vulnerability: [SECURITY.md](SECURITY.md).
 
 ## Status
 
-Experimental. Platforms: macOS and Linux (bubblewrap); the opt-in worker sandbox (`--sandbox-workers`) is macOS-only and fails closed on Linux; Windows via WSL is untested. The test suite runs on both (sandbox tests skip where no sandbox works). 10 real goals so far: 9 achieved, 1 blocked by a test-setup error. Costs in reports are notional USD (list price, not money spent on a subscription). Everything else is tested against a scripted fake `claude`. A real `claude -p` plan-limit result has never been observed, so the rate-limit handling is keyed on error shapes from interactive transcripts.
+Experimental. Platforms: macOS and Linux (bubblewrap); the worker sandbox (`--sandbox-workers`, the default on macOS) is macOS-only and fails closed on Linux; Windows via WSL is untested. The test suite runs on both (sandbox tests skip where no sandbox works). 10 real goals so far: 9 achieved, 1 blocked by a test-setup error. Costs in reports are notional USD (list price, not money spent on a subscription). Everything else is tested against a scripted fake `claude`. A real `claude -p` plan-limit result has never been observed, so the rate-limit handling is keyed on error shapes from interactive transcripts.
 
 ## Try it without spending tokens
 
