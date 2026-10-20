@@ -355,6 +355,8 @@ export class Engine {
     }
     this._storeSnapshot(S, r.snap);
     this.ev('orch.rules.snapshotted', 'orchestrator', null, { rules_hash: o.rules.hash, profile: o.rules.profile, legacy: false, loosenings: r.snap.loosenings.length, dropped: r.snap.dropped.length, notes: r.snap.notes.slice(0, 5) });
+    const dep = r.snap.notes.filter((n) => n.startsWith('deprecated: '));
+    if (dep.length) this.ev('orch.rules.deprecated', 'orchestrator', null, { notes: dep.slice(0, 10) });
     saveState(this.dir, S);
   }
 

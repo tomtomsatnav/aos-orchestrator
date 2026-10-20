@@ -659,3 +659,9 @@ R8 (verification findings N1, N2, S3a, S3b, S4):
 - **soft_frac / soft_budget_blocks_tier.** `checkBudgets(..., {softFrac})` (default 0.8, the golden `{soft, hard}` shape is unchanged); `parallel.soft_budget_blocks_tier: none` lifts the "no new opus work" rule.
 - **Governor (G5).** `engine._syncGovernor` sets `gov.cfg` from the compiled `governor` (user layer only) at every tick; a goal's `orch.governor` is ignored for rule-set goals, legacy goals keep reading it. `retry.uncertain_limit_max` replaces the constant 2.
 - **Event rule ids.** `data.rule` (unqualified, engine-level: `retry.ladder`, `retry.same_tier_retries`, `retry.no_escalate`, `retry.max_attempts`, `retry.uncertain_limit_max`, `budgets.<key>`, `governor.{reserve_5h,hold_7d,overload_backoff_s,backoff_min}`, `merge.on_conflict`, `plan.approval`, `plan.planner_tier`). Not wired: `merge.on_conflict: fail` and `ask_human.*` are still pinned enums with one meaningful value each.
+
+### R9 (dead config)
+
+- `outside_allowlist: "deny"` maps to `worker.bash.ask_on` minus `unknown_command` (computed against the layers below, so it never adds an entry back). The design also named `on_outside_scope`; that setting is about paths outside `path_scope`, not commands outside the allowlist, so it is NOT touched (the user can set it in `rules.json`).
+- Dead values (`outside_allowlist` other than ask/deny, `dangerous` other than deny, unknown `approval_policy` keys, a non-default `policy.paths.write`, `policy.approval.on_timeout`) become snapshot notes starting `deprecated: `; the engine emits one `orch.rules.deprecated {notes}` event at snapshot time. `task.orch.read_scope` is still written (constant `["**"]`): removing it would change the task shape the dashboard reads.
+

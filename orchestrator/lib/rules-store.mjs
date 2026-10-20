@@ -2,7 +2,7 @@
 // and builds the summary the approval screens show. rules.mjs stays pure.
 import fs from 'node:fs';
 import path from 'node:path';
-import { valueAt, validateRules, policyToRules, goalLegacyRules, compileRules, buildRulesSnapshot, snapshotHash, summarizeRules, renderRulesSummary } from './rules.mjs';
+import { DEFAULT_RULES, valueAt, validateRules, policyToRules, goalLegacyRules, compileRules, buildRulesSnapshot, snapshotHash, summarizeRules, renderRulesSummary } from './rules.mjs';
 import { sha256, canonical } from './plan.mjs';
 import { readJSON, paths } from './state.mjs';
 
@@ -66,6 +66,10 @@ export function collectLayers({ orchDir, goal, dir, repo = null }) {
   if (legacy.caps.length) { // explicit limits equal to the default: a cap on whatever the lower layers allow (it must not raise a tighter user/repo value)
     const below = compileRules(layers, { accept: o.accept_repo_loosening || [] });
     for (const [p, v] of legacy.caps) { const cur = below.ok ? valueAt(below.compiled, p) : undefined; if (cur === undefined || v < cur) setDeep(rules, p, v); }
+  }
+  if (legacy.denyUnknown) { // approval_policy.outside_allowlist "deny": drop unknown_command from whatever ask_on the lower layers left (never adds an entry back)
+    const below = compileRules(layers, { accept: o.accept_repo_loosening || [] });
+    setDeep(rules, 'worker.bash.ask_on', (below.ok ? below.compiled : DEFAULT_RULES).worker.bash.ask_on.filter((x) => x !== 'unknown_command'));
   } const notes = [...legacy.notes]; const sources = ['goal.json'];
   if (o.policy && typeof o.policy === 'object' && !Array.isArray(o.policy)) { const m = policyToRules(o.policy); rules = deepMerge(rules, m.rules); notes.push(...m.notes); sources.push('goal.orch.policy'); }
   if (o.rules_layer) { rules = deepMerge(rules, o.rules_layer); sources.push('goal.orch.rules'); }

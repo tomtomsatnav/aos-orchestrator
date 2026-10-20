@@ -378,7 +378,7 @@ export function policyToRules(p) {
     if (Array.isArray(p.paths.read_extra)) pa.read_extra = entries(strs(p.paths.read_extra), 'glob');
     if (typeof p.paths.on_outside_scope === 'string') pa.on_outside_scope = p.paths.on_outside_scope;
     if (Object.keys(pa).length) w.paths = pa;
-    for (const k of Object.keys(p.paths)) if (!['deny', 'read_extra', 'on_outside_scope'].includes(k) && !(k === 'write' && p.paths.write === 'worktree+scope')) notes.push(`policy.paths.${escCtrl(k).slice(0, 40)} is not a rule: ignored`);
+    for (const k of Object.keys(p.paths)) if (!['deny', 'read_extra', 'on_outside_scope'].includes(k) && !(k === 'write' && p.paths.write === 'worktree+scope')) notes.push(`${k === 'write' ? 'deprecated: ' : ''}policy.paths.${escCtrl(k).slice(0, 40)} is not a rule: ignored`);
   }
   if (isObj(p.bash)) {
     const b = {};
@@ -396,7 +396,7 @@ export function policyToRules(p) {
     if (p.approval.wait_in_hook_s !== undefined) a.wait_in_hook_s = p.approval.wait_in_hook_s;
     if (p.approval.ttl_s !== undefined) a.ttl_s = p.approval.ttl_s;
     if (Object.keys(a).length) w.approval = a;
-    if (p.approval.on_timeout !== undefined && p.approval.on_timeout !== 'deny') notes.push('policy.approval.on_timeout is not a rule (always deny): ignored');
+    if (p.approval.on_timeout !== undefined && p.approval.on_timeout !== 'deny') notes.push('deprecated: policy.approval.on_timeout is not a rule (always deny): ignored');
   }
   for (const [sec, known] of [['tools', ['allow']], ['bash', ['allow', 'deny', 'deny_patterns', 'ask_on']], ['approval', ['wait_in_hook_s', 'ttl_s', 'on_timeout']]]) {
     if (isObj(p[sec])) for (const k of Object.keys(p[sec])) if (!known.includes(k)) notes.push(`policy.${sec}.${escCtrl(k).slice(0, 40)} is not a rule: ignored${k === '__proto__' ? ' (a __proto__ key is never applied)' : ''}`);
@@ -438,8 +438,15 @@ export function goalLegacyRules(goal) {
   if (o.sandbox_workers === true) setPath(rules, 'worker.sandbox', 'required');
   if (o.trust_repo_config === true) setPath(rules, 'repo_config.trust', true);
   if (o.approval_policy?.plan && o.approval_policy.plan !== 'required') setPath(rules, 'plan.approval', o.approval_policy.plan);
+  // G3 (R9): outside_allowlist "deny" = a command outside the worker allowlist is denied instead of asked (ask_on without unknown_command: a tightening, resolved by collectLayers
+  // against the layers below); everything else in approval_policy is dead config: noted as deprecated, never an error (old goals keep loading)
+  const ap = isObj(o.approval_policy) ? o.approval_policy : {}; let denyUnknown = false;
+  if (ap.outside_allowlist === 'deny') denyUnknown = true;
+  else if (ap.outside_allowlist !== undefined && ap.outside_allowlist !== 'ask') notes.push(`deprecated: approval_policy.outside_allowlist ${escCtrl(JSON.stringify(ap.outside_allowlist)).slice(0, 40)} is not a rule value ("ask" or "deny"): ignored`);
+  if (ap.dangerous !== undefined && ap.dangerous !== 'deny') notes.push(`deprecated: approval_policy.dangerous ${escCtrl(JSON.stringify(ap.dangerous)).slice(0, 40)} is ignored: dangerous commands are always denied`);
+  for (const k of Object.keys(ap)) if (!['plan', 'outside_allowlist', 'dangerous'].includes(k)) notes.push(`deprecated: approval_policy.${escCtrl(k).slice(0, 40)} is not a rule: ignored`);
   if (isObj(o.governor) && Object.keys(o.governor).length) notes.push('goal governor settings are ignored: the governor is shared by every goal and only the user layer may set it');
-  return { rules, notes, caps };
+  return { rules, notes, caps, denyUnknown };
 }
 
 // compiled path -> where goal.json keeps it: ['B', field] = goal.orch.budgets[field], ['G', field] = goal.budget[field]
