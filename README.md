@@ -19,6 +19,7 @@ git clone https://github.com/tomtomsatnav/aos-orchestrator && cd aos-orchestrato
 npm test                                       # ~2 min, 531 tests, macOS only, uses a scripted fake claude: no tokens spent
 node orchestrator/bin/aos-orch.mjs --help      # command list (`aos-orch` in the docs means this script; there is no installed binary)
 node orchestrator/bin/aos-orch.mjs rules show  # what workers may do, and the default budgets
+node orchestrator/bin/aos-orch.mjs doctor      # preflight: node, git, claude version/flags/login, sandbox, state dir, port (`--live` adds one tiny Haiku call); see orchestrator/README.md
 ```
 
 Try the whole flow with no model calls, in a scratch directory (the "fake claude" is the test double the suite uses; needs a throwaway git repo with a `main` branch):

@@ -45,6 +45,7 @@ aos-orch run goal.json
 
 ```sh
 node orchestrator/bin/aos-orch.mjs run <goal.json | goal-id> [--wait-approval] [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--poll-ms N] [--interval-s N]
+node orchestrator/bin/aos-orch.mjs doctor [--live]     # preflight PASS/WARN/FAIL (exit 1 on FAIL): node, git worktree, claude version vs known-good table (lib/doctor.mjs) and required flags, `claude auth status`, sandbox-exec probes, state dir, port; --live = one tiny Haiku call validating the stream-json shapes
 node orchestrator/bin/aos-orch.mjs status [goal-id]
 node orchestrator/bin/aos-orch.mjs plan <goal-id>      # read-only: the plan review + rules summary; approves nothing
 node orchestrator/bin/aos-orch.mjs pause|resume|cancel|kill|approve-plan|reject-plan <goal-id>
