@@ -8,7 +8,8 @@ import { commandAllowed } from './checks.mjs';
 import crypto from 'node:crypto';
 import { evaluate, DEFAULT_POLICY, allowlistEntryProblem } from './policy.mjs';
 import { ID_RE, iso } from './state.mjs';
-import { scopeHitsDeny } from './glob.mjs';
+import { scopeHitsDeny, globCompileProblem } from './glob.mjs';
+import { CTRL_RE, escCtrl } from './ctrl.mjs';
 
 export const TIERS = ['haiku', 'sonnet', 'opus'];
 export const PLANNER_SYSTEM = 'You are the planner for an AOS-1 goal. You do not edit files. Output ONLY one JSON object.';
@@ -83,7 +84,8 @@ export function validateScope(g) {
   if (g.split('/').includes('..')) return `path_scope "${g}" escapes the repo`;
   if (BROAD.has(g)) return `path_scope "${g}" is too broad`;
   if (BAD_SCOPE_ROOTS.test(g.replace(/^\.\//, ''))) return `path_scope "${g}" targets protected files`;
-  if (/[\0\n]/.test(g)) return 'path_scope contains control characters';
+  if (CTRL_RE.test(g)) return 'path_scope contains control characters';
+  const p = globCompileProblem(g); if (p) return `path_scope "${g}" ${p}`;
   return null;
 }
 
@@ -109,7 +111,7 @@ export const UNSAFE_CHECK_CMDS = new Set(['sh', 'bash', 'zsh', 'fish', 'eval', '
  */
 export function validatePlan(plan, opts) {
   const errors = [];
-  const bad = (m) => errors.push(m);
+  const bad = (m) => errors.push(escCtrl(m)); // an error text never carries raw control characters
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return { ok: false, errors: ['plan must be a JSON object'], tasks: [] };
   if (!Array.isArray(plan.tasks) || !plan.tasks.length) return { ok: false, errors: ['plan.tasks must be a non-empty array'], tasks: [] };
   if (plan.tasks.length > opts.max_tasks) bad(`plan has ${plan.tasks.length} tasks, max_tasks is ${opts.max_tasks}`);
@@ -124,6 +126,13 @@ export function validatePlan(plan, opts) {
     else if (ids.has(t.id)) bad(`${at}: duplicate id`);
     else ids.add(t.id);
     for (const f of ['title', 'description', 'output_contract']) if (typeof t[f] !== 'string' || !t[f].trim()) bad(`${at}: ${f} is required`);
+    // control / bidi / zero-width characters would rewrite the approval screen: refused in every plan string (a description or output_contract may still span lines)
+    const ctrl = (v, what, multiline = false) => { if (typeof v === 'string' && CTRL_RE.test(multiline ? v.replace(/[\n\t]/g, ' ') : v)) bad(`${at}: ${what} contains control characters or bidi overrides`); };
+    ctrl(t.title, 'title'); ctrl(t.description, 'description', true); ctrl(t.output_contract, 'output_contract', true);
+    if (Array.isArray(t.acceptance)) t.acceptance.forEach((a, k) => ctrl(a, `acceptance[${k}]`));
+    if (Array.isArray(t.depends_on)) t.depends_on.forEach((d, k) => ctrl(d, `depends_on[${k}]`));
+    if (Array.isArray(t.allowed_commands)) t.allowed_commands.forEach((c, k) => ctrl(c, `allowed_commands[${k}]`));
+    if (Array.isArray(t.checks)) t.checks.forEach((c, j) => { if (Array.isArray(c?.argv)) c.argv.forEach((a, k) => ctrl(a, `checks[${j}].argv[${k}]`)); });
     if (!Array.isArray(t.depends_on)) bad(`${at}: depends_on must be an array`);
     if (!TIERS.includes(t.model_tier)) bad(`${at}: model_tier must be one of ${TIERS.join('|')}`);
     else if (R && !R.plan.tiers.includes(t.model_tier)) bad(`${at}: model_tier ${t.model_tier} is not allowed by the rules (plan.tiers: ${R.plan.tiers.join(', ')})`);
@@ -224,11 +233,12 @@ export function tasksHash(tasks) {
 /** Plain-text rendering of reviewView for `status` / `approvals` / `approve-plan`. `rulesText` (rules-store renderRulesFor) is printed after the tasks, next to the rules hash. */
 export function renderReview(view, rulesText) {
   const L = [];
+  const e = escCtrl; const arg = (a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : e(JSON.stringify(String(a))));
   for (const t of view) {
-    L.push(`task ${t.id}  tier=${t.model_tier}  scope=${t.path_scope.join(', ')}${t.depends_on.length ? `  after=${t.depends_on.join(',')}` : ''}`);
-    L.push(`  worker commands: ${t.allowed_commands.length ? t.allowed_commands.join(' | ') : '(none; read-only inspection only)'}`);
-    for (const c of t.checks) L.push(`  check (sandboxed, ${c.timeout_s}s): ${c.argv.map((a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : JSON.stringify(a))).join(' ')}`);
+    L.push(`task ${e(t.id)}  tier=${e(t.model_tier)}  scope=${t.path_scope.map(e).join(', ')}${t.depends_on.length ? `  after=${t.depends_on.map(e).join(',')}` : ''}`);
+    L.push(`  worker commands: ${t.allowed_commands.length ? t.allowed_commands.map(e).join(' | ') : '(none; read-only inspection only)'}`);
+    for (const c of t.checks) L.push(`  check (sandboxed, ${e(c.timeout_s)}s): ${c.argv.map(arg).join(' ')}`);
   }
-  if (rulesText) L.push(rulesText);
-  return L.join('\n');
+  if (rulesText) L.push(...String(rulesText).split('\n'));
+  return L.map(e).join('\n');
 }

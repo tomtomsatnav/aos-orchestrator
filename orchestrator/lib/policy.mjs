@@ -4,7 +4,7 @@
 import path from 'node:path';
 import vm from 'node:vm';
 import { parseShell, tokenize, WRITE_REDIRECTS } from './shell.mjs';
-import { matchAny, matchGlob, globToRegex } from './glob.mjs';
+import { matchAny, matchGlob, globTest, MAX_MATCH_LEN } from './glob.mjs';
 
 export const DEFAULT_POLICY = {
   version: 1, default: 'deny',
@@ -123,9 +123,9 @@ export const isRootRelative = (g) => !g.startsWith('/') && !g.startsWith('**');
 const hits = (globs, ps, roots = []) => globs.map(fold).some((g) => {
   if (isRootRelative(g)) {
     const rg = g.replace(/^\.\//, '');
-    return roots.some((root) => ps.some((p) => isInside(p, root) && matchGlob(rg, fold(path.relative(root, p)).split(path.sep).join('/'))));
+    return roots.some((root) => ps.some((p) => isInside(p, root) && matchGlob(rg, fold(path.relative(root, p)).split(path.sep).join('/'), true)));
   }
-  return ps.map(fold).some((p) => globToRegex(g).test(p) || matchGlob(g, p));
+  return ps.map(fold).some((p) => globTest(g, p, true) || matchGlob(g, p, true));
 });
 /** Which layer protects one of these paths: 'floor' (code), 'default' (the policy's own deny list) or null. Floor wins when both match. */
 function pathDeniedBy(policy, ctx, ...ps) {
@@ -139,6 +139,7 @@ function pathDeniedBy(policy, ctx, ...ps) {
 /** mode: 'read' | 'write'. Returns null when the path is acceptable, else a result. */
 function checkPath(policy, ctx, R, arg, mode, base) {
   const { abs, real } = R.resolve(arg, base);
+  if (abs.length > MAX_MATCH_LEN || real.length > MAX_MATCH_LEN) return res('deny', `path longer than ${MAX_MATCH_LEN} characters is not matched against globs`, 'path_too_long');
   const pd = pathDeniedBy(policy, ctx, abs, real);
   if (pd) return res('deny', `path is protected by policy: ${mode}`, 'path_denied', pd);
   if (mode === 'write') { const sd = policy.paths?.scope_deny; const wt = path.resolve(ctx.worktree); if (sd?.length && hits(sd.map((x) => expandHome(x, ctx.home)), [abs, real], [...new Set([wt, R.wt])])) return res('deny', 'path is on the rules plan.scope_deny list', 'scope_denied', 'default'); }
@@ -147,7 +148,7 @@ function checkPath(policy, ctx, R, arg, mode, base) {
     if (inside) return null;
     // read_extra entries are globs (docs/rules-design.md): a plain path is a directory root, `*` `**` `?` match the resolved real path
     const extra = (policy.paths?.read_extra || []).map((x) => path.resolve(R.wt, expandHome(x, ctx.home)));
-    if (extra.some((r) => (/[*?[]/.test(r) ? globToRegex(r).test(real) || globToRegex(`${r}/**`).test(real) : isInside(real, r)))) return null;
+    if (extra.some((r) => (/[*?[]/.test(r) ? globTest(r, real) || globTest(`${r}/**`, real) : isInside(real, r)))) return null;
     return res('deny', 'read outside the task worktree', 'outside_read_root');
   }
   if (!inside) return res('deny', 'write outside the task worktree', 'outside_worktree');
@@ -379,7 +380,7 @@ export function isProtectedRel(policy, rel) {
   const pol = mergePolicy(policy);
   const p = fold(`/${rel}`);
   const globs = [...(pol.paths?.deny || []), ...(pol.paths?.scope_deny || []), ...FLOOR_DENY_GLOBS].map(fold);
-  return globs.some((g) => (g.startsWith('**/') ? globToRegex(g).test(p) : g.startsWith('~') ? false : isRootRelative(g) && matchGlob(g.replace(/^\.\//, ''), fold(rel))));
+  return globs.some((g) => (g.startsWith('**') ? globTest(g, p, true) : g.startsWith('~') ? false : isRootRelative(g) && matchGlob(g.replace(/^\.\//, ''), fold(rel), true)));
 }
 
 /** Stable short key identifying a tool call (used to de-duplicate approval requests). */

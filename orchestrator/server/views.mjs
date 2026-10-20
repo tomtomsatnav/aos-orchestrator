@@ -5,6 +5,7 @@ import { loadState, loadHeartbeat, readEvents, paths, goalDirOf } from '../lib/s
 import { listApprovals } from '../lib/approvals.mjs';
 import { renderRulesSummary } from '../lib/rules.mjs';
 import { readRulesSummary } from '../lib/rules-store.mjs';
+import { escCtrl } from '../lib/ctrl.mjs';
 
 // absolute-path-looking token (leading slash, at least one more segment) -> its basename
 const PATH_RE = /(?<![\w.:/~-])\/(?:[^\s/"'`<>|;,()\\]+\/)+[^\s/"'`<>|;,()\\]*/g;
@@ -58,7 +59,7 @@ export function goalDetail(sup, id) {
       const ran = log.reduce((s, a) => s + Math.max(0, ((a.ended_at ? Date.parse(a.ended_at) : now) - Date.parse(a.started_at)) / 1000 || 0), 0);
       const last = log.at(-1);
       const lf = t.orch.last_failure;
-      const o = { id: t.id, title: t.title, status: t.status, phase: t.orch.phase || null, tier: t.orch.model_tier, depends_on: t.depends_on, attempts: t.attempts, max_attempts: t.max_attempts,
+      const o = { id: t.id, title: escCtrl(t.title), status: t.status, phase: t.orch.phase || null, tier: t.orch.model_tier, depends_on: t.depends_on, attempts: t.attempts, max_attempts: t.max_attempts,
         branch: t.orch.branch, ran_s: Math.round(ran), new_tokens: t.orch.tokens?.new || 0,
         check_summary: t.orch.phase === 'checking' ? 'checking' : last?.checks_ok === true ? 'checks passed' : last?.checks_ok === false ? 'checks failed' : t.status === 'done' ? 'checks passed' : null,
         waiting_for_human: t.status === 'needs_review' || pend.some((a) => a.task_id === t.id) };
@@ -69,15 +70,18 @@ export function goalDetail(sup, id) {
   };
 }
 
+/** Every string in a plan view is shown to a human: control, C1, bidi and zero-width characters are escaped. */
+const escDeep = (v) => (typeof v === 'string' ? escCtrl(v) : Array.isArray(v) ? v.map(escDeep) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [escCtrl(k), escDeep(x)])) : v);
+
 export function planView(sup, id) {
   const { S, dir } = sup.state(id);
   const h = sup.reviewHash(id);
   // additive: what the human approves besides the tasks (profile, key allows/denies, limits, EVERY loosening with its layer); rules_text is the same as the CLI prints it
   const rs = readRulesSummary(dir, S.goal);
   return { plan_state: S.goal.orch.plan_state, plan_hash: h ? h.combined : null, rules: rs ? scrubDeep(rs) : null, rules_text: rs && !rs.tampered ? scrub(renderRulesSummary(rs)) : null,
-    tasks: S.tasks.map((t) => ({ id: t.id, title: t.title, tier: t.orch.model_tier, depends_on: t.depends_on, path_scope: t.orch.path_scope,
+    tasks: escDeep(S.tasks.map((t) => ({ id: t.id, title: t.title, tier: t.orch.model_tier, depends_on: t.depends_on, path_scope: t.orch.path_scope,
       allowed_commands: t.orch.allowed_commands || [], checks: (t.orch.checks || []).map((c) => ({ cmd: cmdText(c.argv), argv: c.argv, timeout_s: c.timeout_s })),
-      allowed_tools: t.orch.allowed_tools || [] })) };
+      allowed_tools: t.orch.allowed_tools || [] }))) };
 }
 
 // any <repo>-aos-worktrees/<goal>/<task|integration> prefix (the task's own worktree is gone once it is merged)

@@ -4,6 +4,8 @@
 //   compileRules(layers)     merge layers (a lower layer may only TIGHTEN) -> {ok, compiled, loosenings, dropped, hash, layers}
 //   toPolicy(compiled)       the worker policy object policy.mjs evaluates (DEFAULT_RULES -> DEFAULT_POLICY exactly)
 import { validateSchema } from './schema.mjs';
+import { CTRL_RE, escCtrl, q } from './ctrl.mjs';
+import { globCompileProblem } from './glob.mjs';
 import { allowlistEntryProblem } from './policy.mjs';
 import { canonical, sha256, UNSAFE_CHECK_CMDS } from './plan.mjs';
 import { DEFAULT_BUDGETS } from './state.mjs';
@@ -135,11 +137,7 @@ const at = (p, i, f) => `$.${p}[${i}].${f}`;
 
 // Control characters (C0, DEL, C1) and Unicode bidi overrides in ANY rule string could erase or rewrite the approval screen: refused at validation, and
 // quoted at render time as a second line of defence.
-export const CTRL_RE = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
-const CTRL_G = new RegExp(CTRL_RE.source, 'g');
-export const escCtrl = (s) => String(s).replace(CTRL_G, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-/** A value for display: unchanged when plain, else JSON-quoted with every control/bidi character escaped. */
-export const q = (v) => { const s = String(v); return CTRL_RE.test(s) ? escCtrl(JSON.stringify(s)) : s; };
+export { CTRL_RE, escCtrl, q };
 function ctrlProblem(v, at, bad, depth = 0) {
   if (typeof v === 'string') { if (CTRL_RE.test(v)) bad(`${at}: contains control characters or bidi overrides`); return; }
   if (!v || typeof v !== 'object' || depth > 8) return;
@@ -188,7 +186,9 @@ function validateRulesRaw(rules, { layer = 'user' } = {}) {
 }
 
 function globProblem(glob, where, bad, absoluteOk = false) {
-  if ((glob.match(/\{/g) || []).length > 4 || (glob.match(/\*+/g) || []).length > 8) { bad(`${where}: too many braces or wildcards`); return; } // keeps the generated regex cheap
+  if ((glob.match(/\{/g) || []).length > 4) { bad(`${where}: too many braces or wildcards`); return; }
+  const p = globCompileProblem(glob);
+  if (p) { bad(`${where}: glob ${p.startsWith('has more than') ? 'has too many braces or wildcards' : p}`); return; }
   if (glob.startsWith('/') && !absoluteOk) bad(`${where}: must be relative or start with ~/`);
   else if (glob.startsWith('~') && !glob.startsWith('~/')) bad(`${where}: must be relative or start with ~/`);
 }
@@ -505,7 +505,6 @@ export function summarizeRules(snap, goal = null) {
   };
 }
 
-const escCtrl2 = (l) => l.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 /** Plain-text rendering of summarizeRules() for the CLI (design 3.6). */
 export function renderRulesSummary(sm) {
   if (!sm) return 'rules: (no snapshot yet)';
@@ -524,5 +523,5 @@ export function renderRulesSummary(sm) {
     for (const l of sm.dropped) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]${l.reason !== 'loosening' ? `  (${q(l.reason)})` : ''}`);
   }
   for (const n of sm.notes) L.push(`  note: ${q(n)}`);
-  return L.map(escCtrl2).join('\n'); // last line of defence: nothing but plain text reaches the terminal
+  return L.map(escCtrl).join('\n'); // last line of defence: nothing but plain text reaches the terminal
 }

@@ -83,7 +83,7 @@ test('S2: snapshotHash covers inputs and layers; recompileSnapshot refuses input
 
 test('S3: brace globs and root-relative deny globs bind (the reviewer probes)', async () => {
   const { evaluate, DEFAULT_POLICY, isProtectedRel } = await import('../lib/policy.mjs');
-  const { globToRegex, matchGlob } = await import('../lib/glob.mjs');
+  const { compileGlob: globToRegex, matchGlob } = await import('../lib/glob.mjs');
   const pol = { ...DEFAULT_POLICY, paths: { ...DEFAULT_POLICY.paths, deny: [...DEFAULT_POLICY.paths.deny, '**/*.{js,mjs}', 'node_modules/**'] } };
   const ctx = { worktree: '/w', path_scope: ['**'], allowed_tools: ['Write'], grants: [] };
   const w = (f) => evaluate(pol, { tool_name: 'Write', tool_input: { file_path: f }, cwd: '/w' }, ctx);
