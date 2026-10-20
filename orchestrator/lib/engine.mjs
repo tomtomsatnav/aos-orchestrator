@@ -18,7 +18,7 @@ import * as W from './worker.mjs';
 import { Governor, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
 import { buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHash, reviewView } from './plan.mjs';
 import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
-import { sandboxAvailable, SANDBOX_EXEC } from './sandbox.mjs';
+import { sandboxAvailable, wrapWorkerCommand, SANDBOX_EXEC } from './sandbox.mjs';
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
 import { buildReport } from './report.mjs';
 
@@ -47,6 +47,7 @@ export class Engine {
     this.slotGate = o.slotGate || null; // supervisor: global worker semaphore {acquire(goalId)->token|null, release(token)}
     this.sandboxBin = o.sandboxBin || SANDBOX_EXEC; // tests may point this at a missing binary
     this.hookScript = o.hookScript || HOOK_SCRIPT; // tests may substitute a stub hook
+    this.workerSandbox = o.workerSandbox || null; // tests: overrides for wrapWorkerCommand (e.g. sysTmp)
     this.ownerLabel = o.ownerLabel || 'run';
     this.lockRefreshMs = o.lockRefreshMs ?? null; // default: a third of the lock TTL
     this.bin = o.claudeBin || W.claudeBin(this.env);
@@ -708,10 +709,12 @@ export class Engine {
     for (const f of [stdout, stderr]) { try { fs.unlinkSync(f); } catch { /* none */ } }
     const args = W.buildArgs({ prompt, tier: 'opus', sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, tools: W.READ_ONLY_TOOLS, allowedTools: W.READ_ONLY_TOOLS, appendSystemPrompt: 'You are the planner for an AOS-1 goal. You do not edit files. Output ONLY one JSON object.', settingsFile: path.join(this.P.workers, 'settings.json') });
     const env = W.buildEnv({ base: this.env, goalId: goal.id, taskId: 'planner', attempt: 1, worktree: wt, policyFile, approvalsDir: this.P.approvals, tmpDir: this._tmp('planner'), decisionLog: path.join(this.P.workers, 'decisions.ndjson'), bin: this.bin });
-    const h = W.startWorker({ bin: this.bin, args, env, cwd: wt, stdoutFile: stdout, stderrFile: stderr, spawnFn: this.spawnFn });
-    if (h.pid) atomicWrite(this.wpath('planner', 1, 'pid.json'), { pid: h.pid, pgid: h.pgid, started_at: iso(this.now()), session_id: sessionId, tier: 'opus' });
+    let cmd;
+    try { cmd = this._workerCommand(goal, args, env, { worktree: wt, tmpDir: env.TMPDIR, policyFile }); } catch (e) { return { error: e.message }; }
+    const h = W.startWorker({ bin: cmd.bin, args: cmd.args, env, cwd: wt, stdoutFile: stdout, stderrFile: stderr, spawnFn: this.spawnFn });
+    if (h.pid) atomicWrite(this.wpath('planner', 1, 'pid.json'), { pid: h.pid, pgid: h.pgid, started_at: iso(this.now()), session_id: sessionId, tier: 'opus', sandboxed: cmd.sandboxed });
     o.plan_session_id = sessionId; o.usage.workers_started++;
-    this.ev('orch.worker.started', 'orchestrator', null, { role: 'planner', pid: h.pid, tier: 'opus', session_id: sessionId });
+    this.ev('orch.worker.started', 'orchestrator', null, { role: 'planner', pid: h.pid, tier: 'opus', session_id: sessionId, sandboxed: cmd.sandboxed });
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; W.signalGroup(h.pgid, 'SIGTERM'); setTimeout(() => W.signalGroup(h.pgid, 'SIGKILL'), this.killGraceMs).unref(); }, this.plannerTimeoutMs);
     const exit = await h.done; clearTimeout(timer);
@@ -816,15 +819,16 @@ export class Engine {
     const args = W.buildArgs({ prompt, tier, sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, settingsFile: path.join(this.P.workers, 'settings.json') });
     const env = W.buildEnv({ base: this.env, goalId: goal.id, taskId: task.id, attempt: task.attempts, worktree: real, policyFile, approvalsDir: this.P.approvals, tmpDir: this._tmp(task.id), decisionLog: path.join(this.P.workers, 'decisions.ndjson'), bin: this.bin });
     const stdout = this.wpath(task.id, seq, 'stream.ndjson'); const stderr = this.wpath(task.id, seq, 'stderr');
-    const h = W.startWorker({ bin: this.bin, args, env, cwd: wt, stdoutFile: stdout, stderrFile: stderr, spawnFn: this.spawnFn });
+    const cmd = this._workerCommand(goal, args, env, { worktree: real, tmpDir: env.TMPDIR, policyFile });
+    const h = W.startWorker({ bin: cmd.bin, args: cmd.args, env, cwd: wt, stdoutFile: stdout, stderrFile: stderr, spawnFn: this.spawnFn });
     const rec = { task: task.id, seq, pid: h.pid, pgid: h.pgid, session_id: sessionId, tail: new W.StreamTail(stdout), handle: h, exited: null,
       startedMs: this.now(), lastProgressMs: this.now(), killReason: null, termAtReal: 0 };
     this.workers.set(task.id, rec);
-    if (h.pid) atomicWrite(this.wpath(task.id, seq, 'pid.json'), { pid: h.pid, pgid: h.pgid, started_at: iso(this.now()), session_id: sessionId, tier, attempt: task.attempts });
+    if (h.pid) atomicWrite(this.wpath(task.id, seq, 'pid.json'), { pid: h.pid, pgid: h.pgid, started_at: iso(this.now()), session_id: sessionId, tier, attempt: task.attempts, sandboxed: cmd.sandboxed });
     if (agent?.orch) agent.orch.pid = h.pid;
     h.done.then((info) => { if (this.workers.get(task.id) === rec) { rec.exited = info; this._wake(); } });
     this.ev('agent.spawned', task.assignee, task.id, { pid: h.pid, tier, session_id: sessionId });
-    this.ev('orch.worker.started', 'orchestrator', task.id, { pid: h.pid, tier, attempt: task.attempts, seq });
+    this.ev('orch.worker.started', 'orchestrator', task.id, { pid: h.pid, tier, attempt: task.attempts, seq, sandboxed: cmd.sandboxed });
     saveState(this.dir, S);
   }
 
@@ -843,6 +847,17 @@ export class Engine {
     return wt;
   }
   _integrationWt(goal) { return path.join(goal.orch.worktree_root, 'integration'); }
+  /** {bin, args, sandboxed}: the worker argv, wrapped in sandbox-exec when the goal sets orch.sandbox_workers (throws if unavailable). */
+  _workerCommand(goal, args, env, { worktree, tmpDir, policyFile }) {
+    if (!goal.orch.sandbox_workers) return { bin: this.bin, args, sandboxed: false };
+    const av = sandboxAvailable({ bin: this.sandboxBin });
+    if (!av.ok) throw new Error(`worker OS sandbox unavailable (${av.reason}): orch.sandbox_workers is set, refusing to start the worker unsandboxed`);
+    const w = wrapWorkerCommand([W.resolveBin(this.bin, env.PATH), ...args], { worktree, tmpDir, policyFile, approvalsDir: this.P.approvals,
+      decisionLog: path.join(this.P.workers, 'decisions.ndjson'), settingsFile: path.join(this.P.workers, 'settings.json'), hookDir: path.dirname(this.hookScript),
+      gitCommon: path.join(goal.orch.repo, '.git'), claudeBin: W.resolveBin(this.bin, env.PATH), home: this.env.HOME, profileDir: path.join(this.dir, 'sandbox'),
+      bin: this.sandboxBin, ...(this.workerSandbox || {}) });
+    return { bin: w.bin, args: w.args, sandboxed: true };
+  }
   _sandboxOpts(goal, wt, name) {
     const o = goal.orch;
     return { sandbox: { worktree: wt, tmpDir: this._tmp(name), goalDir: this.dir, orchDir: this.orchDir, home: this.env.HOME, ports: o.check_localhost_ports || [], profileDir: path.join(this.dir, 'sandbox') },
@@ -937,7 +952,7 @@ export function summarize(S, hb) {
   return { id: S.goal.id, title: S.goal.title, status: S.goal.status, blocked_reason: S.goal.blocked_reason || null, plan_state: S.goal.orch.plan_state,
     heartbeat: { seq: hb.seq, status: hb.status, ts: hb.ts }, tasks: counts, usage: S.goal.orch.usage, paused_reason: S.goal.orch.paused_reason, resume_at: S.goal.orch.resume_at || null,
     task_list: S.tasks.map((t) => ({ id: t.id, status: t.status, tier: t.orch.model_tier, attempts: t.attempts })),
-    plan_review: reviewView(S.tasks), plan_approval: S.goal.orch.plan_approval || null, trust_repo_config: !!S.goal.orch.trust_repo_config, unsandboxed_checks: !!S.goal.orch.unsandboxed_checks };
+    plan_review: reviewView(S.tasks), plan_approval: S.goal.orch.plan_approval || null, trust_repo_config: !!S.goal.orch.trust_repo_config, unsandboxed_checks: !!S.goal.orch.unsandboxed_checks, sandbox_workers: !!S.goal.orch.sandbox_workers };
 }
 
 /**

@@ -8,7 +8,7 @@ An experimental engine that turns one human-written Goal into merge-ready work o
 
 ## Safety
 
-- Strict guardrails are enforced outside the model: a policy hook (deny rules, per-task grants, default deny), a per-task `path_scope` that fails any attempt touching other files, OS-sandboxed acceptance checks, and token / time / attempt budgets. The worker `claude` process itself is **not** OS-sandboxed: it is restricted by the policy hook and isolation flags only.
+- Strict guardrails are enforced outside the model: a policy hook (deny rules, per-task grants, default deny), a per-task `path_scope` that fails any attempt touching other files, OS-sandboxed acceptance checks, and token / time / attempt budgets. By default the worker `claude` process itself is **not** OS-sandboxed: it is restricted by the policy hook and isolation flags only. An opt-in macOS OS sandbox for workers is available (`--sandbox-workers`): it limits file writes, not network or keychain reads (see `orchestrator/README.md`).
 - Workers never commit or merge. The engine commits and merges onto its own `aos/<goal>/integration` branch, never touches your base branch, never pushes, and only deletes branches it created.
 - It still launches real `claude` workers that can run commands in your repo. Run it against a **throwaway repo or clone** first, not a repo you care about, and read the plan before approving it.
 

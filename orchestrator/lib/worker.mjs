@@ -16,6 +16,12 @@ export const WORKER_RULES = FILE_WRITE_RULE + ' Do not commit, push, install pac
   + 'finish and state what you needed. End with a 3-line summary: changed files, how you checked, open issues.';
 
 export function claudeBin(env = process.env) { return env.AOS_CLAUDE_BIN || 'claude'; }
+/** Absolute path of `bin` (as given when absolute, else the first match on `PATH`), or `bin` unchanged when not found. */
+export function resolveBin(bin, PATH = '') {
+  if (path.isAbsolute(bin)) return bin;
+  for (const d of String(PATH).split(':')) { try { if (d && fs.statSync(path.join(d, bin)).isFile()) return path.join(d, bin); } catch { /* next */ } }
+  return bin;
+}
 
 /** Exact argv (after the binary) per the design. Every flag is spike-verified (rows 1a-1d, 8e). */
 export function buildArgs({ prompt, tier, sessionId, maxTurns = 30, maxBudgetUsd = 2, tools = WORKER_TOOLS, allowedTools = READ_ONLY_TOOLS,

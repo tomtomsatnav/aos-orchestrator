@@ -42,7 +42,7 @@ aos-orch run goal.json
 ## Commands
 
 ```sh
-node orchestrator/bin/aos-orch.mjs run <goal.json | goal-id> [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--poll-ms N] [--interval-s N]
+node orchestrator/bin/aos-orch.mjs run <goal.json | goal-id> [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--poll-ms N] [--interval-s N]
 node orchestrator/bin/aos-orch.mjs status [goal-id]
 node orchestrator/bin/aos-orch.mjs pause|resume|cancel|kill|approve-plan|reject-plan <goal-id>
 node orchestrator/bin/aos-orch.mjs approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
@@ -69,7 +69,8 @@ Goal file (`goal.json`):
 `plan` is optional and skips the planner (it is validated exactly like a planner plan). `approval_policy.plan` (alias
 `orch.plan_approval`) is `required` (default; the run stops at `draft / awaiting_approval` until `approve-plan`) or `auto`,
 and `auto` only applies to plans without commands (see Security model). Other goal fields: `orch.trust_repo_config`,
-`orch.unsandboxed_checks`, `orch.check_localhost_ports` (loopback ports checks may connect to). Plan checks must match
+`orch.unsandboxed_checks`, `orch.check_localhost_ports` (loopback ports checks may connect to), `orch.sandbox_workers`
+(opt-in OS sandbox for the worker `claude` processes; CLI `--sandbox-workers`, see Security model 5). Plan checks must match
 `orch.check_allowlist` (argv prefix) or a criterion check; unsafe plans (cycles, bad tiers, path scopes outside the repo,
 `.git`/`.claude`, dangerous `allowed_commands`, shell/curl-style checks, missing timeouts) are rejected, never repaired.
 
@@ -108,12 +109,43 @@ Enforced by code and covered by tests:
    shell history, other worktrees and the engine's goal/approvals/policy directories are denied. Paths reach the profile only as `-D`
    parameters through `execFile` (the profile text is static). If `sandbox-exec` is missing or fails its probe, checks are refused and
    the goal blocks before dispatch unless `orch.unsandboxed_checks` is set (recorded, warned, event-logged).
+5. **Opt-in worker sandbox** (`orch.sandbox_workers: true` or `aos-orch run goal.json --sandbox-workers`; default OFF, behaviour
+   unchanged). The planner and every task worker are launched as `sandbox-exec -f <goal>/sandbox/worker-<hash>.sb -D ... claude -p ...`
+   (`wrapWorkerCommand` in `lib/sandbox.mjs`; static deny-default profile, paths only as `-D` parameters). If `sandbox-exec` is missing
+   or fails its probe, no worker starts (the dispatch fails and the goal halts); it never falls back to unsandboxed.
+   `orch.worker.started` events and `<task>.<n>.pid.json` carry `sandboxed: true|false`.
+   - **Writes allowed only to:** the task worktree; `<goal>/tmp/<task>` (the worker's TMPDIR); `<goal>/approvals/` and
+     `<goal>/workers/decisions.ndjson` (the policy hook runs inside the sandbox and writes them); the Claude files a `claude -p` run
+     writes: `~/.claude/projects/<slug of the worktree>/`, `~/.claude/{session-env,shell-snapshots,todos,file-history}`, `~/.claude.json`
+     (+ its `.tmp`/`.lock`/`.backup` siblings), `~/.local/state/claude` (version locks); system temp: the engine's `$TMPDIR`,
+     `/tmp/claude-<uid>/` and the Bash tool's `/tmp/claude-<hex>-cwd` file; `/dev/null`, ttys.
+   - **Writes denied to everything else**, including the main repo working tree and its `.git` (read-only, so git works in a worktree),
+     other worktrees, the rest of `<goal>/` (goal/tasks state, policy files, other tasks' tmp), `~` itself and shell rc files,
+     `~/.claude/settings.json`, `CLAUDE.md`, skills, plugins, other projects' session dirs and auto-memory, `~/.ssh ~/.aws ~/.gnupg`
+     (also unreadable), keychain directories (`~/Library/Keychains`, `/Library/Keychains`).
+   - **Reads allowed:** system locations, the node prefix, the claude binary's real directory, `orchestrator/lib` (the hook), the
+     worktree, the repo `.git`, `~/.claude` (except `~/.claude/sessions`) and `~/.claude.json`, `~/.gitconfig`, `~/Library/Keychains`,
+     its goal tmp dir, the approvals dir, its policy and settings files. Other home files (`~/Documents`, other repos) are not readable.
+   - **Not restricted:** network (all of it: `claude` must reach `api.anthropic.com` and `sandbox-exec` cannot filter by host, so a
+     worker shell can still talk to any host); Mach/XPC lookups; **keychain READ**: auth needs it, so a worker's shell can also run
+     `security find-generic-password` and read the Claude credentials (and, combined with the open network, exfiltrate them). Other
+     Claude sessions' IPC is blocked (`~/.claude/sessions` unreadable, `/tmp/cc-socks` sockets denied).
+   - Verified on macOS 27 (Darwin 27.0.0), claude 2.1.304, with real `claude -p --model haiku` runs under the profile: it starts,
+     authenticates from the keychain, writes its session transcript, and completes a Write + Bash (`ls`) turn with the policy hook
+     logging both decisions (cost < $0.002 per run). Shell probes inside the profile confirm writes to the main repo, another worktree,
+     `~/aos-sandbox-probe`, `~/.ssh`, `~/.claude/settings.json` and `~/Library/Keychains` fail while worktree writes succeed.
+     The write list is empirical for that claude version: a newer claude that writes elsewhere fails those writes (EPERM), which
+     may break a feature; re-probe after upgrades.
 
 Residual risks (honest list):
 
-- **Workers (`claude` itself) are NOT OS-sandboxed in this phase.** They are constrained only by the policy hook (PreToolUse and
-  PermissionRequest) and the isolation flags, and the hook is a heuristic shell parser: an unparsed construct is `ask`, not proof of safety.
-  A worker still holds Edit/Write inside its scope, and anything it writes is later executed by the sandboxed checks.
+- **Workers (`claude` itself) are OS-sandboxed only when you opt in** (`--sandbox-workers`, protection 5). By default they are
+  constrained only by the policy hook (PreToolUse and PermissionRequest) and the isolation flags, and the hook is a heuristic shell
+  parser: an unparsed construct is `ask`, not proof of safety. Even sandboxed, a worker has the network, keychain read and read access
+  to `~/.claude` (other sessions' transcripts), and can write the approvals inbox (the hook must), so a worker that gets a shell past the
+  hook could forge an approval file for its own later calls. `~/.claude.json` is writable (claude rewrites it), and it holds user-scope
+  MCP server config that an interactive session would load. A worker still holds Edit/Write inside its scope, and anything it writes
+  is later executed by the sandboxed checks.
 - The sandbox is defense in depth, not proof: `sandbox-exec` is deprecated and its profile language undocumented; a kernel or sandbox bug
   defeats it. It does not limit CPU, memory, disk use inside the worktree or processes (only the timeout and the group kill do).
   `file-read-metadata` is allowed everywhere, so a check can `stat` (not read or list) paths such as `~/.ssh`. Mach lookups are allowed
@@ -157,7 +189,7 @@ Worktrees live outside the repo: `<repo>-aos-worktrees/<goal>/{integration,<task
 | `governor.mjs` | rate-limit parsing, thresholds, backoff, limit-failure matcher (UNVERIFIED), budgets |
 | `worker.mjs` | command line (spike-verified flags only), minimal env, detached spawn, stream-json tail, process-group kill |
 | `git.mjs`, `checks.mjs` | execFile-only git helpers; check runner (sandboxed by default) |
-| `sandbox.mjs` | `sandbox-exec` probe, static deny-default profile, `-D` parameter builder |
+| `sandbox.mjs` | `sandbox-exec` probe, static deny-default profiles (checks; opt-in workers), `-D` parameter builder |
 | `repo-config.mjs` | scan for hostile repo Claude Code config; CLAUDE.md hashing |
 | `engine.mjs`, `report.mjs` | the tick, lifecycle, recovery, cancel, final report |
 
@@ -175,7 +207,9 @@ after grace), wall-clock kill with SIGKILL escalation, parallelism cap and scope
 worker), cancel/kill switch, pause/resume, locking, policy hook (table-driven plus real runs), approvals (granted, timeout
 = deny, expiry), scope violation, merge conflict, worker command line and env, event-log validity; `hardening.test.mjs` (no code execution via the allowlist, hostile repo configs,
 CLAUDE.md hash, plan approval gate and hash binding) and `sandbox.test.mjs` (macOS only, skipped elsewhere: write/read/network
-denials with canary files, private TMPDIR, timeouts, output cap, static profile with hostile worktree paths, refusal without the sandbox).
+denials with canary files, private TMPDIR, timeouts, output cap, static profile with hostile worktree paths, refusal without the sandbox) and `worker-sandbox.test.mjs` (macOS only: worker
+profile write allow/deny matrix with `/bin/sh` probes, engine and CLI `--sandbox-workers` with the fake claude and an allow-all hook
+proving a shell write to the main repo fails, refusal without `sandbox-exec`).
 Note: the engine tests use a stand-in for the human (`helpers.humanApproves`) because plans with node checks no longer auto-approve.
 
 ## Not done yet

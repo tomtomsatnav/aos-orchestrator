@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // aos-orch: minimal CLI for the AOS orchestrator engine (phase 1, headless, no HTTP server).
-//   aos-orch run <goal.json | goal-id> [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--poll-ms N] [--interval-s N]
+//   aos-orch run <goal.json | goal-id> [--auto-approve] [--trust-repo-config] [--unsandboxed-checks] [--sandbox-workers] [--poll-ms N] [--interval-s N]
 //   aos-orch status [goal-id]
 //   aos-orch pause|resume|cancel|kill|approve-plan|reject-plan <goal-id>
 //   aos-orch serve [--port 4319] [--max-workers N] [--dashboard-url URL] [--origins a,b] [--leave-workers|--kill-workers] [--drain-s N]
@@ -47,6 +47,7 @@ async function main() {
         const spec = JSON.parse(fs.readFileSync(arg1, 'utf8'));
         if (flags['trust-repo-config']) spec.orch = { ...(spec.orch || {}), trust_repo_config: true };
         if (flags['unsandboxed-checks']) spec.orch = { ...(spec.orch || {}), unsandboxed_checks: true };
+        if (flags['sandbox-workers']) spec.orch = { ...(spec.orch || {}), sandbox_workers: true };
         if (flags['auto-approve']) spec.orch = { ...(spec.orch || {}), approval_policy: { ...(spec.orch?.approval_policy || {}), plan: 'auto' } };
         const id = spec.id && fs.existsSync(paths(goalDirOf(orch, spec.id)).goal) ? spec.id : null;
         if (id) dir = goalDirOf(orch, id); else { const made = await createGoal(orch, spec); dir = made.dir; for (const n of made.notices) console.error(`aos-orch: ${n}`); }
