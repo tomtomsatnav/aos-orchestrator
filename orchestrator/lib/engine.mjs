@@ -23,6 +23,7 @@ import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructi
 import { sandboxAvailable, wrapWorkerCommand, SANDBOX_EXEC } from './sandbox.mjs';
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
 import { buildReport } from './report.mjs';
+import { probeClaudeVersion } from './cli-version.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_SCRIPT = path.join(HERE, 'policy-hook.mjs');
@@ -54,6 +55,7 @@ export class Engine {
     this.ownerLabel = o.ownerLabel || 'run';
     this.lockRefreshMs = o.lockRefreshMs ?? null; // default: a third of the lock TTL
     this.bin = o.claudeBin || W.claudeBin(this.env);
+    this.claudeVersionProbe = o.claudeVersion ?? null; // tests: a string or an async function replacing `claude --version`
     this.workers = new Map(); // task id -> live worker record (in memory; rebuilt from pid files after a crash)
     this.gov = null;
     this.dead = false; this.stopped = false; this.started = false; this._inTick = false; this._wakeFn = null; this._chain = Promise.resolve();
@@ -938,13 +940,20 @@ export class Engine {
     }
   }
 
+  /** `claude --version`, probed once per engine start and cached. */
+  _claudeVersion() {
+    return this._cv ??= Promise.resolve(typeof this.claudeVersionProbe === 'function' ? this.claudeVersionProbe() : this.claudeVersionProbe ?? probeClaudeVersion(this.bin, this.env));
+  }
+
   async _startAttempt(S, task) {
     const goal = S.goal; const o = goal.orch;
+    const claudeVersion = (await this._claudeVersion().catch(() => null)) || null;
+    if (claudeVersion && !o.claude_version_start) o.claude_version_start = claudeVersion;
     const seq = (task.orch.worker_seq || 0) + 1;
     const tier = task.orch.model_tier;
     const sessionId = crypto.randomUUID();
     task.orch.worker_seq = seq; task.status = 'running'; task.attempts += 1; task.orch.phase = 'working'; task.updated_at = iso(this.now());
-    task.orch.attempt_log.push({ n: seq, tier, session_id: sessionId, started_at: iso(this.now()), ended_at: null, outcome: null, denials: 0, new_tokens: 0, exit_code: null, counted: true });
+    task.orch.attempt_log.push({ n: seq, tier, session_id: sessionId, started_at: iso(this.now()), ended_at: null, outcome: null, denials: 0, new_tokens: 0, exit_code: null, counted: true, claude_version: claudeVersion });
     const agent = S.agents.find((a) => a.id === task.assignee);
     if (agent) { agent.status = 'running'; agent.current_task = task.id; agent.last_event_at = iso(this.now()); agent.orch = { pid: null, session_id: sessionId, tier }; }
     o.usage.workers_started++;

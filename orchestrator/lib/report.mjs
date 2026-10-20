@@ -1,5 +1,6 @@
 // Final report.md (design section 4): criteria with check output, per-task tier/attempts/tokens, approvals,
 // denials, `git diff --stat base..integration`, and the exact commands for the human to review and merge.
+import { versionDrift } from './cli-version.mjs';
 const fence = (s) => `\n\`\`\`\n${String(s || '').trim()}\n\`\`\`\n`;
 
 export function buildReport({ goal, tasks, approvals = [], denials = [], diffStat = '', criteriaResults = {}, events = [], governor = null }) {
@@ -8,7 +9,11 @@ export function buildReport({ goal, tasks, approvals = [], denials = [], diffSta
   L.push(`# Goal report: ${goal.title}`, '', `- id: \`${goal.id}\``, `- status: **${goal.status}**${goal.blocked_reason ? ` (${goal.blocked_reason})` : ''}`,
     `- repo: \`${o.repo}\`  base: \`${o.base_branch}\` @ \`${(o.base_commit || '').slice(0, 10)}\`  integration: \`${o.integration_branch}\``,
     `- new tokens: ${o.usage.new_tokens}  cache-read tokens: ${o.usage.cache_read_tokens}  workers started: ${o.usage.workers_started}`,
-    `- notional cost (list price, NOT money spent on a subscription): $${(o.usage.notional_usd || 0).toFixed(4)}`, '');
+    `- notional cost (list price, NOT money spent on a subscription): $${(o.usage.notional_usd || 0).toFixed(4)}`);
+  if (o.claude_version_start) L.push(`- claude CLI version at first dispatch: \`${o.claude_version_start}\``);
+  const drift = versionDrift(o.claude_version_start, tasks);
+  if (drift.length) L.push(`- **WARN: the claude CLI version changed during this goal** (started with \`${o.claude_version_start}\`): ${drift.map((d) => `${d.task}#${d.n} ran on \`${d.version}\``).join(', ')}. Results may not be comparable.`);
+  L.push('');
   L.push('## Success criteria', '');
   for (const c of goal.success_criteria) {
     L.push(`- [${c.met ? 'x' : ' '}] **${c.id}** ${c.text}${c.check ? ` (\`${c.check.argv.join(' ')}\`)` : ''}`);
