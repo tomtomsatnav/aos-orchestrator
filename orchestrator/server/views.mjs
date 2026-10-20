@@ -58,7 +58,7 @@ export function goalDetail(sup, id) {
       const lf = t.orch.last_failure;
       const o = { id: t.id, title: t.title, status: t.status, phase: t.orch.phase || null, tier: t.orch.model_tier, depends_on: t.depends_on, attempts: t.attempts, max_attempts: t.max_attempts,
         branch: t.orch.branch, ran_s: Math.round(ran), new_tokens: t.orch.tokens?.new || 0,
-        check_summary: last?.checks_ok === true ? 'passed' : last?.checks_ok === false ? 'failed' : 'not run',
+        check_summary: t.orch.phase === 'checking' ? 'checking' : last?.checks_ok === true ? 'checks passed' : last?.checks_ok === false ? 'checks failed' : t.status === 'done' ? 'checks passed' : null,
         waiting_for_human: t.status === 'needs_review' || pend.some((a) => a.task_id === t.id) };
       if (lf && t.status !== 'done') o.error = scrub(`${lf.kind}${lf.note ? `: ${lf.note}` : ''}`).slice(0, 300);
       return o;

@@ -35,7 +35,7 @@ test('e2e: create over HTTP -> plan -> review -> approve -> runs to completion; 
   assert.equal((await approve(s, id)).status, 200);
   d = await waitStatus(s, id, 'achieved');
   assert.deepEqual(d.tasks.map((x) => x.status), ['done', 'done', 'done']);
-  assert.equal(d.tasks_done, 3); assert.equal(d.tasks_failed, 0); assert.ok(d.budget.used_new_tokens > 4000); assert.ok(d.tasks.every((x) => x.new_tokens > 0 && x.check_summary === 'passed' && x.attempts === 1 && x.tier === 'haiku'));
+  assert.equal(d.tasks_done, 3); assert.equal(d.tasks_failed, 0); assert.ok(d.budget.used_new_tokens > 4000); assert.ok(d.tasks.every((x) => x.new_tokens > 0 && x.check_summary === 'checks passed' && x.attempts === 1 && x.tier === 'haiku'));
   assert.deepEqual(d.criteria.map((c) => c.met), [true]); assert.ok(d.last_events.length > 0 && d.last_events.length <= 25);
   assert.deepEqual(Object.keys(d.budget).sort(), ['max_attempts', 'max_new_tokens', 'max_parallel', 'max_wall_s', 'running', 'used_new_tokens', 'used_wall_s']);
   const list = (await s.api('GET', '/api/goals')).json.goals;

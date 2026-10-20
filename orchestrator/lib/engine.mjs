@@ -421,7 +421,7 @@ export class Engine {
       denials, usage: u, notional_usd: rec.tail.notionalUsd(), stderr_tail: stderr.slice(-2000), resets_at_ms: rl?.resets_at_ms ?? null };
     atomicWrite(this.wpath(task.id, rec.seq, 'result.json'), collected);
     if (!entry.accounted) {
-      entry.accounted = true; entry.new_tokens = u.new_tokens; entry.exit_code = collected.exit_code; entry.denials = denials.length;
+      entry.accounted = true; entry.new_tokens = u.new_tokens; entry.notional_usd = collected.notional_usd; entry.exit_code = collected.exit_code; entry.denials = denials.length;
       o.usage.new_tokens += u.new_tokens; o.usage.cache_read_tokens += u.cache_read_tokens; o.usage.notional_usd = Math.round((o.usage.notional_usd + collected.notional_usd) * 1e6) / 1e6;
       goal.budget.spent_usd = o.usage.notional_usd;
       task.orch.tokens.new += u.new_tokens; task.orch.tokens.cache_read += u.cache_read_tokens;
@@ -675,7 +675,7 @@ export class Engine {
     const review = humanReviewReason(S.tasks);
     if (o.approval_policy.plan === 'auto' && !review && this._activate(S, 'auto')) { /* only plans without commands may auto-approve */ } else {
       if (o.approval_policy.plan === 'auto' && review) this.ev('orch.plan.approval_required', 'orchestrator', null, { reason: review, note: 'plan_approval "auto" does not apply to plans with commands' });
-      o.plan_state = 'awaiting_approval'; this.ev('goal.updated', 'orchestrator', null, { status: 'draft', plan_state: 'awaiting_approval' });
+      o.plan_state = 'awaiting_approval'; o.plan_awaiting_since_ms = this.now(); this.ev('goal.updated', 'orchestrator', null, { status: 'draft', plan_state: 'awaiting_approval' });
     }
     saveState(this.dir, S);
   }

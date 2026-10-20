@@ -57,6 +57,8 @@ test('retry on failed checks, escalate to the next tier, check output goes into 
   assert.equal(g.status, 'achieved');
   assert.equal(t1.attempts, 2);
   assert.deepEqual(t1.orch.attempt_log.map((a) => [a.tier, a.outcome]), [['haiku', 'check_failed'], ['sonnet', 'success']]);
+  assert.ok(t1.orch.attempt_log.every((a) => typeof a.notional_usd === 'number' && a.notional_usd >= 0), 'per-attempt cost is recorded for the outcome summary');
+  assert.ok(Math.abs(t1.orch.attempt_log.reduce((x, a) => x + a.notional_usd, 0) - g.orch.usage.notional_usd) < 1e-6, 'attempt costs add up to the goal total');
   assert.match(fs.readFileSync(path.join(dir, 'workers', 't1.2.prompt.txt'), 'utf8'), /CHECKFAIL a\.txt has "WRONG"/);
   assert.equal(git(sb.repo, 'show', 'aos/g-test/integration:a.txt'), 'alpha');
   assert.deepEqual(fakeCalls(sb, 't1').map((c) => c.model), ['haiku', 'sonnet']);
@@ -117,6 +119,7 @@ test('plan approval: required plans wait for a human; the tick is idempotent whi
   const eng = sb.engine(dir); await eng.start();
   await eng.tick();
   assert.equal(goalOf(dir).status, 'draft'); assert.equal(goalOf(dir).orch.plan_state, 'awaiting_approval'); assert.equal(eng.isDone(), true);
+  assert.ok(Math.abs(goalOf(dir).orch.plan_awaiting_since_ms - Date.now()) < 60000, 'the moment the plan started waiting is recorded');
   const strip = (o) => JSON.stringify(o, (k, v) => (k === 'updated_at' ? undefined : v));
   const snap1 = strip(loadStateOf(dir)); const n1 = readEvents(dir).length;
   await eng.tick(); await eng.tick();
