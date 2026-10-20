@@ -4,7 +4,7 @@
 
 An experimental engine that turns one human-written Goal into merge-ready work on a git branch, by planning tasks and dispatching headless Claude Code workers in git worktrees. It implements [AOS-1](https://github.com/tomtomsatnav/aos-1-spec) (schemas are vendored in `schemas/`, see `schemas/VERSION`). Zero npm dependencies, Node 18+, macOS first.
 
-**Status: experimental, 3 real Haiku runs so far.** Everything else is tested against a scripted fake `claude`. Rate-limit handling is keyed on real error shapes captured from interactive transcripts, but a real `claude -p` limit result has never been observed.
+**Status: experimental. macOS only (acceptance checks run under `sandbox-exec`; the test suite does not pass on Linux). 8 small real runs so far** (one real Opus planner run; the Haiku-to-Sonnet-to-Opus retry ladder was exercised once, by an environment failure, not a natural one). Everything else is tested against a scripted fake `claude`. Rate-limit handling is keyed on real error shapes captured from interactive transcripts, but a real `claude -p` limit result has never been observed.
 
 ## Safety
 

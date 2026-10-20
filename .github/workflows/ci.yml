@@ -7,10 +7,11 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]  # macOS only: acceptance checks run under sandbox-exec
         node: [18, 22]
     steps:
       - uses: actions/checkout@v4

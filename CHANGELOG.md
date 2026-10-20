@@ -5,5 +5,5 @@
 
 ## 0.1.0 (experimental)
 - Engine that plans a Goal into tasks and dispatches headless Claude Code workers in git worktrees; policy hook, path scopes, budgets, control server and supervisor.
-- Status: experimental. Exercised by 3 real Haiku runs; everything else is tested against a scripted fake `claude`. Rate-limit handling has never met a real limit.
+- Status: experimental. Exercised by 8 small real runs (one with a real Opus planner; all tasks solved at the Haiku tier except one run that ladder-escalated through an environment failure); everything else is tested against a scripted fake `claude`. Rate-limit handling has never met a real limit.
 - Known issue: `aos-orch serve` can hold a goal's lock without ticking it; use `run` or `serve`, not both.
