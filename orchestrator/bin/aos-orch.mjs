@@ -24,7 +24,7 @@ const argv = process.argv.slice(2);
 const flags = {}; const pos = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
+  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s', 'accept-repo-loosening'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
 }
 const [cmd, arg1, arg2] = pos;
 const orch = flags['orch-dir'] ? path.resolve(flags['orch-dir']) : orchRoot();
@@ -52,6 +52,7 @@ async function main() {
         if (flags['trust-repo-config']) spec.orch = { ...(spec.orch || {}), trust_repo_config: true };
         if (flags['unsandboxed-checks']) spec.orch = { ...(spec.orch || {}), unsandboxed_checks: true };
         if (flags['sandbox-workers']) spec.orch = { ...(spec.orch || {}), sandbox_workers: true };
+        if (typeof flags['accept-repo-loosening'] === 'string') spec.orch = { ...(spec.orch || {}), accept_repo_loosening: flags['accept-repo-loosening'].split(',').map((x) => x.trim()).filter(Boolean) };
         if (flags['auto-approve']) spec.orch = { ...(spec.orch || {}), approval_policy: { ...(spec.orch?.approval_policy || {}), plan: 'auto' } };
         const id = spec.id && fs.existsSync(paths(goalDirOf(orch, spec.id)).goal) ? spec.id : null;
         if (id) dir = goalDirOf(orch, id); else { const made = await createGoal(orch, spec); dir = made.dir; for (const n of made.notices) console.error(`aos-orch: ${n}`); }
@@ -92,6 +93,11 @@ async function main() {
     case 'pause': case 'resume': case 'cancel': case 'kill': case 'approve-plan': case 'reject-plan': {
       const d = resolveGoalDir(arg1);
       let extra = {};
+      if (cmd === 'approve-plan' && typeof flags['accept-repo-loosening'] === 'string') { // accepting changes the rules hash: queue it, then review and approve again
+        enqueueCommand(d, { cmd: 'accept-repo-loosening', by: 'cli', ids: flags['accept-repo-loosening'].split(',').map((x) => x.trim()).filter(Boolean) });
+        out(`accept-repo-loosening: queued; the engine recompiles the rules and the rules hash changes. Run \`aos-orch status ${arg1}\` to review the new rules, then \`aos-orch approve-plan ${arg1}\` to approve them`);
+        break;
+      }
       if (cmd === 'approve-plan') { // approve exactly what is shown here: the engine refuses if the plan differs from this hash
         const S = loadState(d);
         if (!S.tasks.length) die('there is no plan to approve yet');

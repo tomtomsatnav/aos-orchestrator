@@ -14,7 +14,7 @@ import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
 import { matchAny, scopesOverlap } from './glob.mjs';
 import { mergePolicy, DEFAULT_POLICY, isProtectedRel } from './policy.mjs';
 import { buildSnapshot, snapshotHash, rulesFingerprint, applyCompiledToGoal, validateRules, toPolicy } from './rules.mjs';
-import { compileGoal, previewGoal } from './rules-store.mjs';
+import { compileGoal, recompileSnapshot, previewGoal, parseRepoRules, REPO_RULES_PATH, REPO_RULES_FILE } from './rules-store.mjs';
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
 import { Governor, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
@@ -239,6 +239,7 @@ export class Engine {
           this.ev('orch.budgets.updated', 'human', null, { by: c.by || 'cli', patch: v.patch });
           break;
         }
+        case 'accept-repo-loosening': this._acceptRepoLoosening(S, c); break;
         case 'approve-plan':
           if (goal.orch.plan_state === 'awaiting_approval') { this._activate(S, 'human', c.reviewed); saveState(this.dir, S); }
           break;
@@ -354,6 +355,28 @@ export class Engine {
     o.rules = { hash: snap.rules_hash.slice(0, 12), sha256: snap.rules_hash, version: snap.rules_version, profile: snap.compiled.profile, legacy: false,
       layers: snap.layers.map((l) => ({ layer: l.layer, sha12: l.sha256 ? l.sha256.slice(0, 12) : null })),
       loosenings: snap.loosenings.map((l) => ({ rule_id: l.rule_id, layer: l.layer })), dropped: snap.dropped.map((l) => ({ rule_id: l.rule_id, layer: l.layer, reason: l.reason })) };
+  }
+
+  /** `approve-plan --accept-repo-loosening <ids>`: recompile with those repo loosenings accepted. Only before the plan is approved; the rules hash changes, so the plan must be reviewed and approved again. */
+  _acceptRepoLoosening(S, c) {
+    const o = S.goal.orch;
+    const refuse = (reason) => this.ev('orch.rules.refused', 'orchestrator', null, { reason, command: 'accept-repo-loosening' });
+    if (!o.rules || o.rules.legacy) return refuse('this goal has no rule-set snapshot');
+    if (!['none', 'supplied', 'awaiting_approval'].includes(o.plan_state) || o.plan_approval) return refuse('loosenings can only be accepted before the plan is approved');
+    if (!this._rulesCheck(S).ok) return refuse('the rules snapshot is not intact');
+    const snap = readJSON(this.P.rules, null);
+    const want = Array.isArray(c.ids) ? c.ids.filter((x) => typeof x === 'string').slice(0, 64) : [];
+    const known = new Set((snap.dropped || []).filter((d) => d.layer === 'repo' && d.reason === 'loosening').map((d) => d.rule_id));
+    const ids = want.filter((x) => known.has(x));
+    if (!ids.length) return refuse(`none of the given ids is a dropped repo loosening (${want.length} given)`);
+    const r = recompileSnapshot(snap, [...new Set([...(o.accept_repo_loosening || []), ...ids])]);
+    if (!r.ok) return refuse(r.errors.join('; ').slice(0, 200));
+    if (r.snap.rules_hash === snapshotHash(snap)) return refuse('accepting these loosenings changes nothing (a repo can never loosen the sandbox, plan approval or trust settings)');
+    o.accept_repo_loosening = [...new Set([...(o.accept_repo_loosening || []), ...ids])];
+    this._storeSnapshot(S, r.snap);
+    if (S.tasks.length) o.plan_fingerprint = this._fingerprint(S);
+    this.ev('orch.rules.changed', 'human', null, { rules_hash: o.rules.hash, by: c.by || 'cli', direction: 'loosen', accepted: ids });
+    saveState(this.dir, S);
   }
 
   /** Does the snapshot on disk still hash to what goal.json (and the plan approval, when it carries one) recorded? */
@@ -1058,20 +1081,29 @@ export async function createGoal(orchDir, spec, { clock = realClock } = {}) {
   const instructions = {};
   for (const rel of INSTRUCTION_FILES) { const b = await G.showBlob(info.root, info.base_commit, rel); instructions[rel] = b ? sha256Buf(b) : null; }
   goal.orch.instructions = instructions;
-  // rule-set layers (R5): an invalid goal or user layer refuses the goal here, before anything is written
+  // rule-set layers (R5/R6). The repo's .aos/rules.json is read from base_commit (never the working tree), once, here; an invalid file refuses the repo like an invalid .claude/settings.json
   if (goal.orch.rules_layer !== undefined) {
     const v = validateRules(goal.orch.rules_layer, { layer: 'goal' });
     if (!v.ok) throw new Error(`goal.orch.rules is invalid:\n  ${v.errors.slice(0, 10).join('\n  ')}`);
   }
-  const pre = previewGoal({ orchDir, goal });
+  const rr = parseRepoRules(await G.showBlob(info.root, info.base_commit, REPO_RULES_PATH));
+  if (rr.errors.length) throw new Error(`refusing repo ${info.root}: its ${REPO_RULES_PATH} (at ${info.base_commit.slice(0, 12)}) is invalid:\n  ${rr.errors.slice(0, 10).join('\n  ')}\nFix it on the base branch; a repo's rules can only tighten.`);
+  if (rr.rules) goal.orch.repo_rules = { sha256: rr.sha256, path: REPO_RULES_PATH, base_commit: info.base_commit };
+  const pre = previewGoal({ orchDir, goal, repo: rr.rules || null });
   if (!pre.ok) throw new Error(`rules refused:\n  ${pre.errors.slice(0, 10).join('\n  ')}`);
   const dir = createGoalDir(orchDir, goal, spec.plan || null);
+  if (rr.rules) atomicWrite(path.join(dir, REPO_RULES_FILE), rr.rules);
   const notices = instructionNotice(info.root, instructions);
   appendEvent(dir, { type: 'goal.created', actor: 'human', goal_id: goal.id, data: { title: goal.title, criteria: goal.success_criteria.length } }, clock);
   if (notices.length) appendEvent(dir, { type: 'orch.repo_instructions', actor: 'orchestrator', goal_id: goal.id, data: { notices, files: Object.fromEntries(Object.entries(instructions).filter(([, h]) => h).map(([k, h]) => [k, h.slice(0, 12)])) } }, clock);
   if (findings.length) {
     notices.push(`WARNING: --trust-repo-config: repo configuration accepted without review by the engine: ${formatFindings(findings)}`);
     appendEvent(dir, { type: 'orch.repo_config.trusted', actor: 'human', goal_id: goal.id, data: { warning: 'repo config accepted via trust_repo_config; workers may be steered by it', findings: goal.orch.repo_config_findings.slice(0, 20) } }, clock);
+  }
+  if (rr.rules) {
+    const nd = pre.comp.dropped.filter((d) => d.layer === 'repo' && d.reason === 'loosening');
+    notices.push(`repo ${REPO_RULES_PATH} (${rr.sha256.slice(0, 12)}) was read from ${info.base_commit.slice(0, 12)}: it can only tighten${nd.length ? `; ${nd.length} loosening(s) are NOT applied (accept with approve-plan --accept-repo-loosening <id>): ${nd.slice(0, 5).map((d) => d.rule_id).join(', ')}` : ''}`);
+    appendEvent(dir, { type: 'orch.rules.repo_layer', actor: 'orchestrator', goal_id: goal.id, data: { sha12: rr.sha256.slice(0, 12), base_commit: info.base_commit.slice(0, 12), dropped: nd.map((d) => d.rule_id).slice(0, 20) } }, clock);
   }
   if (goal.orch.unsandboxed_checks) {
     notices.push('WARNING: unsandboxed_checks is set: acceptance checks will run worker-written code without the OS sandbox');

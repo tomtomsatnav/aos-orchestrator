@@ -607,3 +607,9 @@ Deviations and choices made while implementing R0-R4 (smallest sensible choice e
   (bash, paths, patterns, the floor), checks, plan approval and tiers, limits, then `LOOSENINGS YOU ARE APPROVING (n)` (layer, path, change, id) and `NOT APPLIED (n)` for dropped repo loosenings. `aos-orch status`,
   `approve-plan` and `approvals` print it after the plan (`renderReview(view, rulesText)`); a tampered snapshot prints `RULES TAMPERED` instead. The server plan endpoint adds `rules` (the summary object,
   absolute paths scrubbed) and `rules_text` to its existing JSON (`plan_state`, `plan_hash`, `tasks` unchanged).
+- **R6.** The repo layer is read once in `createGoal` with `git show <base_commit>:.aos/rules.json` (`showBlob`), capped at 64 KB, validated as layer `repo`; an invalid file refuses the repo (no goal directory is
+  created). The parsed file is stored as `<goal>/repo-rules.json` and its sha256 in `goal.orch.repo_rules`; the snapshot compile re-checks that hash. Neither the working tree nor later commits are read.
+  Acceptance: `orch.accept_repo_loosening` at creation (`run --accept-repo-loosening ids`), or `aos-orch approve-plan <goal> --accept-repo-loosening ids` which only QUEUES an `accept-repo-loosening` command
+  (the design wrote `approve`, which is the tool-approval command here) and does not approve: the engine recompiles from the snapshot's stored inputs, writes a new snapshot and fingerprint
+  (`orch.rules.changed {direction: loosen}`), the plan stays `awaiting_approval`, and the human reviews and approves again. It is refused after approval, for unknown ids, and when it would change nothing
+  (a repo can never loosen sandbox, plan approval or trust). The server has no accept endpoint yet. A worker-written `.aos` change was already a `scope_violation` since R2 (floor glob); R6 adds the test.

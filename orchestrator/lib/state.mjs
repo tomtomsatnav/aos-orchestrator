@@ -229,6 +229,7 @@ export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
   const ports = o.check_localhost_ports ?? [];
   if (!Array.isArray(ports) || ports.length > 16 || ports.some((x) => !Number.isInteger(x) || x < 1 || x > 65535)) throw new Error('goal.orch.check_localhost_ports must be an array of up to 16 ports (1-65535)');
   for (const k of ['trust_repo_config', 'unsandboxed_checks', 'sandbox_workers']) if (o[k] !== undefined && typeof o[k] !== 'boolean') throw new Error(`goal.orch.${k} must be a boolean`);
+  if (o.accept_repo_loosening !== undefined && (!Array.isArray(o.accept_repo_loosening) || o.accept_repo_loosening.length > 64 || o.accept_repo_loosening.some((x) => typeof x !== 'string' || !x || x.length > 200))) throw new Error('goal.orch.accept_repo_loosening must be an array of up to 64 rule ids');
   if (o.rules !== undefined && (!o.rules || typeof o.rules !== 'object' || Array.isArray(o.rules))) throw new Error('goal.orch.rules must be an object (a rules layer)');
   const approval = { plan: 'required', outside_allowlist: 'ask', dangerous: 'deny', ...(o.approval_policy || {}) };
   if (o.plan_approval !== undefined) approval.plan = o.plan_approval; // documented alias: orch.plan_approval
@@ -245,6 +246,7 @@ export function normalizeGoalSpec(spec, { clock = realClock } = {}) {
       policy: o.policy || 'policy.default.json',
       // the spec's `orch.rules` (a rules layer) is stored as rules_layer: orch.rules is the snapshot summary the engine writes (docs/rules-design.md, Implementation notes)
       ...(o.rules !== undefined ? { rules_layer: o.rules } : {}),
+      ...(o.accept_repo_loosening !== undefined ? { accept_repo_loosening: o.accept_repo_loosening } : {}),
       check_allowlist: o.check_allowlist || null,
       governor: o.governor || {},
       usage: { new_tokens: 0, cache_read_tokens: 0, notional_usd: 0, workers_started: 0 },
