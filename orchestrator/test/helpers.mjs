@@ -6,10 +6,14 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Engine, createGoal } from '../lib/engine.mjs';
 import { readJSON, loadState, readEvents, paths } from '../lib/state.mjs';
+import { sandboxAvailable } from '../lib/sandbox.mjs';
 import { validateEvent, validateGoal, validateTask, validateAgent, validateHeartbeat } from '../lib/schema.mjs';
 
 export const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const FAKE = path.join(HERE, 'fake-claude.mjs');
+/** Hosts with no working OS sandbox (e.g. Linux without bubblewrap/user namespaces): test engines run checks unsandboxed (constructor
+ *  option, never reachable from a goal, the CLI or the environment) so the engine suite can still run; sandbox tests skip there. */
+export const NO_OS_SANDBOX = !sandboxAvailable().ok;
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const git = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 export { git };
@@ -36,7 +40,7 @@ export function mkSandbox(name = 'aos-orch') {
       return g;
     },
     engine(goalDir, opts = {}) {
-      const e = new Engine({ goalDir, orchDir: orch, env: opts.env || sb.env(), intervalMs: 200, killGraceMs: 300, budgetGraceMs: 400, plannerTimeoutMs: 30000, ...opts });
+      const e = new Engine({ ...(NO_OS_SANDBOX && !opts.sandboxBin ? { testUnsandboxedChecks: true } : {}), goalDir, orchDir: orch, env: opts.env || sb.env(), intervalMs: 200, killGraceMs: 300, budgetGraceMs: 400, plannerTimeoutMs: 30000, ...opts });
       if (opts.humanApproves !== false) humanApproves(e);
       sb.engines.push(e); return e;
     },

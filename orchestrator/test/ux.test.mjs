@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { mkSandbox, ptask, crit, HERE, sleep } from './helpers.mjs';
+import { mkSandbox, ptask, crit, HERE, sleep, NO_OS_SANDBOX } from './helpers.mjs';
 import { draftGoal, renderDraft } from '../lib/draft.mjs';
 import { reviewView, renderReview, beyondPrompt, goalPromptText, buildPlannerPrompt } from '../lib/plan.mjs';
 import { paths, readJSON } from '../lib/state.mjs';
@@ -79,7 +79,7 @@ test('cli rules check accepts a whole goal file for --layer goal (extracts orch.
 test('cli: plan is read-only; run stops with the exact next command; run --wait-approval continues only after the human\'s approve-plan', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup());
   sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [{ behavior: 'success', edits: [{ path: 'a.txt', content: 'alpha\n' }] }] } });
-  const spec = { id: 'g-ux', title: 'Create a.txt with alpha', success_criteria: [crit('a.txt', 'alpha')], budget: { max_ticks: 1000, max_usd: 5, max_wall_clock_s: 600 }, orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
+  const spec = { id: 'g-ux', title: 'Create a.txt with alpha', success_criteria: [crit('a.txt', 'alpha')], budget: { max_ticks: 1000, max_usd: 5, max_wall_clock_s: 600 }, orch: { ...(NO_OS_SANDBOX ? { unsandboxed_checks: true } : {}), repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec)); const env = sb.env(); const dir = path.join(sb.orch, 'goals', 'g-ux');
   let r = await cli(['run', gf, '--poll-ms', '50', '--interval-s', '0.2'], env);
   assert.equal(r.code, 4, r.err); assert.match(r.err, /aos-orch plan g-ux/); assert.match(r.err, /aos-orch approve-plan g-ux/); assert.match(r.err, /aos-orch run g-ux/);
@@ -101,7 +101,7 @@ test('cli: plan is read-only; run stops with the exact next command; run --wait-
 test('cli: run stops at "awaiting human confirmation" with the exact confirm command', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup());
   sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [{ behavior: 'success', edits: [{ path: 'a.txt', content: 'alpha\n' }] }] } });
-  const spec = { id: 'g-hc', title: 'Create a.txt', success_criteria: [crit('a.txt', 'alpha'), { id: 'c2', text: 'reads well', verify: 'human' }], orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
+  const spec = { id: 'g-hc', title: 'Create a.txt', success_criteria: [crit('a.txt', 'alpha'), { id: 'c2', text: 'reads well', verify: 'human' }], orch: { ...(NO_OS_SANDBOX ? { unsandboxed_checks: true } : {}), repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec)); const env = sb.env();
   assert.equal((await cli(['run', gf, '--poll-ms', '50', '--interval-s', '0.2'], env)).code, 4);
   await cli(['approve-plan', 'g-hc'], env);

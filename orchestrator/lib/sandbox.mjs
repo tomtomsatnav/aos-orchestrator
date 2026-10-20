@@ -7,6 +7,10 @@
 // The profile text is STATIC (a function of the number of allowed ports only). Every path reaches sandbox-exec as a
 // `-D name=value` parameter through execFile, so no path from a user-controlled string is ever interpolated into the profile
 // and no shell is involved. sandbox-exec is deprecated by Apple but present; this is defense in depth, not proof.
+// LINUX: checks run under bubblewrap (`bwrap`) with an ALLOW-LIST filesystem instead of a deny-default profile: a fresh mount
+// namespace containing only read-only system dirs, the node prefix, the worktree (rw), the private TMPDIR (rw) and a tmpfs /tmp;
+// HOME, the engine state and other worktrees simply do not exist inside it. All namespaces are unshared (incl. network), the
+// environment is cleared and rebuilt from the caller's minimal env, --die-with-parent and --new-session are set. See SECURITY.md.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +18,10 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
+export const BWRAP = 'bwrap';
+/** The sandbox binary for a platform: sandbox-exec on macOS, bubblewrap on Linux (resolved via PATH), none elsewhere. */
+export const defaultSandboxBin = (platform = process.platform) => (platform === 'darwin' ? SANDBOX_EXEC : platform === 'linux' ? BWRAP : SANDBOX_EXEC);
+export const DEFAULT_SANDBOX_BIN = defaultSandboxBin();
 const SYSTEM_READ = ['/usr', '/bin', '/sbin', '/System', '/Library', '/opt/homebrew', '/private/etc', '/private/var/db', '/dev'];
 // relative to HOME and /Users/<x>: never readable, never writable, even if a broader allow (e.g. a worktree under HOME) covers them
 export const SECRET_DIRS = ['.ssh', '.aws', '.config', '.claude', '.gnupg', '.netrc', '.npmrc', '.git-credentials', '.docker', '.kube', 'Library/Keychains', 'Library/Cookies',
@@ -143,20 +151,37 @@ export function realDeepest(p) {
 }
 
 let probeCache = new Map();
-/** Does sandbox-exec exist and apply a deny-default profile here? -> {ok, reason?} (cached per binary). */
-export function sandboxAvailable({ bin = SANDBOX_EXEC, platform = process.platform, fresh = false } = {}) {
+/** Does the platform's sandbox binary exist and actually apply here? -> {ok, reason?} (cached per platform+binary). */
+export function sandboxAvailable({ bin, platform = process.platform, fresh = false } = {}) {
+  bin ||= defaultSandboxBin(platform);
   const key = `${platform}:${bin}`;
   if (!fresh && probeCache.has(key)) return probeCache.get(key);
   let r;
-  if (platform !== 'darwin') r = { ok: false, reason: `sandbox-exec is macOS only (platform ${platform})` };
-  else {
+  if (platform === 'darwin') {
     try {
       execFileSync(bin, ['-p', '(version 1)(deny default)(allow process-exec*)(allow file-read*)(allow sysctl-read)(allow mach-lookup)', '/usr/bin/true'], { stdio: 'ignore', timeout: 10000 });
       r = { ok: true };
     } catch (e) { r = { ok: false, reason: `sandbox-exec failed its probe: ${String(e.code || e.message).slice(0, 120)}` }; }
-  }
+  } else if (platform === 'linux') {
+    // run the real isolation flags once: catches a missing bwrap AND hosts that forbid unprivileged user namespaces
+    // (some containers, Ubuntu 24.04 AppArmor restriction) where bwrap exists but cannot create the sandbox.
+    try {
+      execFileSync(bin, [...BWRAP_BASE, ...bwrapSystemRoots(), '--tmpfs', '/tmp', '/usr/bin/true'], { stdio: 'pipe', timeout: 10000 });
+      r = { ok: true };
+    } catch (e) {
+      r = { ok: false, reason: e.code === 'ENOENT' ? 'bubblewrap (bwrap) is not installed; on Linux install it (e.g. apt-get install bubblewrap)'
+        : `bwrap failed its probe (user namespaces may be disabled): ${String((e.stderr || e.message || e.code)).trim().split('\n')[0].slice(0, 160)}` };
+    }
+  } else r = { ok: false, reason: `no OS sandbox for platform ${platform} (macOS sandbox-exec and Linux bubblewrap are supported)` };
   probeCache.set(key, r);
   return r;
+}
+/** Worker sandboxing (orch.sandbox_workers) exists on macOS only. On Linux it FAILS CLOSED: the bwrap equivalent of the macOS
+ *  profile (claude state paths, keychain-less auth, API network) is not verified against a real `claude` there. */
+export function workerSandboxAvailable(o = {}) {
+  const platform = o.platform || process.platform;
+  if (platform !== 'darwin') return { ok: false, reason: `worker sandboxing (--sandbox-workers) is not yet supported on ${platform === 'linux' ? 'Linux' : platform}; it is macOS-only. Refusing rather than running workers unsandboxed` };
+  return sandboxAvailable(o);
 }
 export const resetSandboxProbe = () => { probeCache = new Map(); };
 
@@ -170,6 +195,7 @@ export function wrapCommand(argv, cfg) {
   if (/\0/.test(argv.join(''))) throw new Error('sandbox: NUL in argv');
   const ports = (cfg.ports || []).map(Number);
   if (ports.some((p) => !Number.isInteger(p) || p < 1 || p > 65535)) throw new Error('sandbox: invalid localhost port');
+  if ((cfg.platform || process.platform) === 'linux') return wrapBwrap(argv, cfg);
   const profile = buildProfile({ ports: ports.length });
   const dir = cfg.profileDir;
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -189,4 +215,53 @@ export function wrapCommand(argv, cfg) {
   for (const [k, v] of Object.entries(params)) args.push('-D', `${k}=${v}`);
   args.push(...argv);
   return { bin: cfg.bin || SANDBOX_EXEC, args, profileFile: file, params };
+}
+
+// ---------------------------------------------------------------- Linux: bubblewrap
+const BWRAP_BASE = ['--unshare-all', '--die-with-parent', '--new-session', '--clearenv'];
+const ETC_ALLOW = ['ld.so.cache', 'ld.so.conf', 'ld.so.conf.d', 'alternatives', 'passwd', 'group', 'nsswitch.conf', 'localtime', 'ssl', 'ca-certificates', 'ca-certificates.conf', 'gitconfig'];
+
+/** Read-only system roots. Merged-usr symlinks (/bin -> usr/bin) are recreated as symlinks, real dirs are bound read-only. */
+function bwrapSystemRoots() {
+  const a = ['--ro-bind', '/usr', '/usr'];
+  for (const d of ['/bin', '/sbin', '/lib', '/lib32', '/lib64', '/libx32']) {
+    let st; try { st = fs.lstatSync(d); } catch { continue; }
+    if (st.isSymbolicLink()) a.push('--symlink', fs.readlinkSync(d), d);
+    else if (st.isDirectory()) a.push('--ro-bind', d, d);
+  }
+  for (const f of ETC_ALLOW) { const p = `/etc/${f}`; if (fs.existsSync(p)) a.push('--ro-bind', fs.realpathSync(p), p); }
+  a.push('--proc', '/proc', '--dev', '/dev');
+  return a;
+}
+
+/**
+ * bubblewrap wrapper for a check. Filesystem = allow-list (nothing but the binds below exists). Network: ALWAYS a fresh,
+ * empty network namespace (bwrap brings its loopback up), so a check can run and talk to its own servers on 127.0.0.1 but
+ * cannot reach the host's loopback or anything else. cfg.ports therefore cannot open specific HOST ports (bwrap cannot filter
+ * by port, only share the whole host network); we choose to ignore them rather than share the network.
+ * cfg: {worktree, tmpDir, goalDir?, orchDir?, home?, env?, profileDir?, bin?, nodeBin?, toolCache?}
+ */
+function wrapBwrap(argv, cfg) {
+  const wt = realDeepest(cfg.worktree); const tmp = realDeepest(cfg.tmpDir);
+  const nodeBin = cfg.nodeBin || process.execPath;
+  let nodePrefix; try { nodePrefix = path.dirname(path.dirname(fs.realpathSync(nodeBin))); } catch { nodePrefix = path.dirname(path.dirname(nodeBin)); }
+  const args = [...BWRAP_BASE, ...bwrapSystemRoots(), '--tmpfs', '/tmp'];
+  const covered = (p) => ['/usr', '/bin', '/sbin', '/lib', '/lib32', '/lib64', '/libx32'].some((r) => p === r || p.startsWith(`${r}/`));
+  if (nodePrefix !== '/' && !covered(nodePrefix) && fs.existsSync(nodePrefix)) args.push('--ro-bind', nodePrefix, nodePrefix);
+  const toolCache = cfg.toolCache || path.join(os.homedir(), '.npm');
+  if (fs.existsSync(toolCache)) args.push('--ro-bind', realDeepest(toolCache), realDeepest(toolCache));
+  args.push('--bind', wt, wt);
+  // things that must stay invisible even if the worktree contains or equals them (macOS profile: explicit denies after the allows)
+  const hidden = new Set();
+  for (const h of new Set([realDeepest(cfg.home || os.homedir()), realDeepest(os.homedir())])) for (const d of SECRET_DIRS) hidden.add(path.join(h, d));
+  for (const d of [cfg.goalDir, cfg.orchDir]) if (d) hidden.add(realDeepest(d));
+  for (const h of hidden) {
+    if (h !== wt && !h.startsWith(`${wt}/`)) continue; // not reachable inside the worktree bind: already invisible
+    let st; try { st = fs.lstatSync(h); } catch { continue; } // must exist: bwrap would create a mountpoint inside the rw worktree
+    args.push(...(st.isDirectory() ? ['--tmpfs', h] : ['--ro-bind', '/dev/null', h]));
+  }
+  args.push('--bind', tmp, tmp, '--remount-ro', '/', '--chdir', wt); // root tmpfs read-only: only the binds above and /tmp are writable
+  for (const [k, v] of Object.entries(cfg.env || {})) { if (/[=\0]/.test(k) || /\0/.test(String(v))) throw new Error('sandbox: bad env entry'); args.push('--setenv', k, String(v)); }
+  args.push('--', ...argv);
+  return { bin: cfg.bin || BWRAP, args, profileFile: null, params: { WORKTREE: wt, TMPDIR_CHECK: tmp } };
 }

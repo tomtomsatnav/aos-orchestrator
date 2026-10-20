@@ -4,7 +4,7 @@
 
 An experimental engine that turns one human-written Goal into merge-ready work on a git branch, by planning tasks and dispatching headless Claude Code workers in git worktrees. It implements [AOS-1](https://github.com/tomtomsatnav/aos-1-spec) (schemas are vendored in `schemas/`, see `schemas/VERSION`). Zero npm dependencies, Node 18+, macOS first.
 
-**Status: experimental. macOS only (acceptance checks run under `sandbox-exec`; the test suite does not pass on Linux). 8 small real runs so far: 7 achieved, 1 blocked by a test-setup error** (one real Opus planner run; the Haiku-to-Sonnet-to-Opus retry ladder was exercised once, by an environment failure, not a natural one). Everything else is tested against a scripted fake `claude`. Rate-limit handling is keyed on real error shapes captured from interactive transcripts, but a real `claude -p` limit result has never been observed.
+**Status: experimental. Platforms: macOS (`sandbox-exec`) and Linux (bubblewrap `bwrap`; checks only, see SECURITY.md); Windows via WSL untested. The opt-in worker sandbox (`--sandbox-workers`) is macOS-only and fails closed on Linux. 8 small real runs so far: 7 achieved, 1 blocked by a test-setup error** (one real Opus planner run; the Haiku-to-Sonnet-to-Opus retry ladder was exercised once, by an environment failure, not a natural one). Everything else is tested against a scripted fake `claude`. Rate-limit handling is keyed on real error shapes captured from interactive transcripts, but a real `claude -p` limit result has never been observed.
 
 ## Safety
 
@@ -16,7 +16,7 @@ An experimental engine that turns one human-written Goal into merge-ready work o
 
 ```sh
 git clone https://github.com/tomtomsatnav/aos-orchestrator && cd aos-orchestrator
-npm test                                       # ~2 min, 531 tests, macOS only, uses a scripted fake claude: no tokens spent
+npm test                                       # ~2 min, ~540 tests, macOS or Linux (sandbox tests skip where no sandbox works), uses a scripted fake claude: no tokens spent
 node orchestrator/bin/aos-orch.mjs --help      # command list (`aos-orch` in the docs means this script; there is no installed binary)
 node orchestrator/bin/aos-orch.mjs rules show  # what workers may do, and the default budgets
 ```

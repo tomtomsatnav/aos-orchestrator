@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { mkSandbox, drive, goalOf, tasksOf, fakeCalls, ptask, crit, edit, HERE, git } from './helpers.mjs';
+import { mkSandbox, drive, goalOf, tasksOf, fakeCalls, ptask, crit, edit, HERE, git, NO_OS_SANDBOX } from './helpers.mjs';
 import { startStack, until, createAndPlan, approve, detail, waitStatus } from './server-helpers.mjs';
 import { validateDraft, draftGoal, draftRules, matchedAllowRule, buildDraftPrompt, PROFILES, MAX_PROMPT, draftToSpec, retryTier } from '../lib/draft.mjs';
 import { compileRules } from '../lib/rules.mjs';
@@ -285,7 +285,7 @@ test('server: draft requests are rate limited per session', async (t) => {
 
 test('server: confirming a human-review criterion (authenticated) finishes the goal; before the tasks are done it is a 409', async (t) => {
   const { sb, s } = await stack(t, { planner: { behavior: 'success', plan: onePlan(ptask('t1', 'a.txt', 'alpha')) }, tasks: { t1: edit('a.txt', 'alpha') } });
-  const r = await s.api('POST', '/api/goals', { title: 't', description: 'd', repo: sb.repo, success_criteria: [{ text: 'a.txt holds alpha', check: { argv: ['grep', '-qx', 'alpha', 'a.txt'], timeout_s: 30 } }, { text: 'reads well', verify: 'human' }], check_allowlist: ['node'] });
+  const r = await s.api('POST', '/api/goals', { title: 't', description: 'd', repo: sb.repo, success_criteria: [{ text: 'a.txt holds alpha', check: { argv: ['grep', '-qx', 'alpha', 'a.txt'], timeout_s: 30 } }, { text: 'reads well', verify: 'human' }], check_allowlist: ['node'], ...(NO_OS_SANDBOX ? { unsandboxed_checks: true } : {}) });
   assert.equal(r.status, 201, r.text); const id = r.json.goal.id; const cid = r.json.goal.criteria[1].id;
   const u = `/api/goals/${id}/criteria/${cid}/confirm`;
   assert.equal((await s.req({ method: 'POST', path: u, headers: { 'Content-Type': 'application/json' }, body: {} })).status, 401);

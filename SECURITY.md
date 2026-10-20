@@ -7,3 +7,15 @@ Report vulnerabilities privately through GitHub: Security tab, "Report a vulnera
 This is experimental software that launches real `claude` workers able to run commands in your repo. Guardrails are enforced outside the model: a policy hook (deny rules, per-task grants, default deny), per-task `path_scope`, OS-sandboxed acceptance checks and token/time/attempt budgets. By default the worker `claude` process itself is **not** OS-sandboxed, only restricted by the policy hook and isolation flags. An opt-in macOS worker sandbox exists (`aos-orch run goal.json --sandbox-workers`, goal field `orch.sandbox_workers`): writes are limited to the task worktree, the goal's tmp dir, the approvals inbox and decision log, this run's own `~/.claude/session-env/<id>` and `/tmp/claude-<uid>/<slug>` scratchpad, and a few other Claude state dirs (`projects/<slug>`, `todos`, `file-history`); the main repo, other worktrees, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.claude/settings.json`, `~/.claude/shell-snapshots`, `~/.claude.json`, other sessions' `session-env` and scratchpads, and keychain directories are not writable. It does **not** restrict the network (`claude` needs `api.anthropic.com` and `sandbox-exec` cannot filter by host), keychain **reads** (needed for auth, so a worker shell can read the Claude credentials), or reads of `~/.claude`; other home files are unreadable. It guards against accidents and limits blast radius; it is not a boundary against a determined malicious worker. Details and verification: `orchestrator/README.md`, Security model 5. Workers never commit or merge; the engine works on its own `aos/<goal>/integration` branch and never pushes. The control server binds 127.0.0.1.
 
 **Run it on throwaway repos or clones only.** Policy bypasses, path-scope escapes and control-server auth issues are in scope.
+
+## Platform sandbox notes
+
+- **macOS:** acceptance checks run under `sandbox-exec` (deny-default profile); `--sandbox-workers` can also sandbox workers.
+- **Linux:** acceptance checks run under bubblewrap (`bwrap`): read-only system dirs, the worktree and a private TMPDIR as the only writable
+  paths, a tmpfs `/tmp`, no HOME or engine state, all namespaces unshared including network, cleared environment, `--die-with-parent`,
+  `--new-session`. Unlike macOS, `check_localhost_ports` does not reach host ports (checks get only a private loopback). `--sandbox-workers`
+  is **not supported on Linux and fails closed** (no worker starts). Verified with the full test suite in Docker (Node 18 and 22, privileged
+  container because bwrap needs user namespaces); CI runs it on ubuntu-latest.
+- **No sandbox available** (neither tool works, or user namespaces are disabled): checks are refused and the goal blocks. Only an explicit
+  `--unsandboxed-checks` / `orch.unsandboxed_checks` runs worker-written code unsandboxed, and it logs a loud warning and an `orch.sandbox.disabled` event.
+- Windows is untested (WSL2 with bubblewrap should behave like Linux, unverified).

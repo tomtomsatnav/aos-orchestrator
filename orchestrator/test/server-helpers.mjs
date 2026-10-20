@@ -3,7 +3,7 @@ import http from 'node:http';
 import { Supervisor } from '../lib/supervisor.mjs';
 import { createControlServer } from '../server/index.mjs';
 import { readCliToken } from '../server/auth.mjs';
-import { sleep } from './helpers.mjs';
+import { sleep, NO_OS_SANDBOX } from './helpers.mjs';
 
 export function request(port, { method = 'GET', path = '/', headers = {}, body, chunked = false, host } = {}) {
   return new Promise((resolve, reject) => {
@@ -45,7 +45,7 @@ export async function until(fn, { timeoutMs = 30000, pollMs = 40, what = 'condit
 
 export const goalBody = (repo, o = {}) => ({ title: 'API goal', description: 'made over http', repo, base_branch: 'main',
   success_criteria: [{ text: 'all files present' }], budgets: { max_new_tokens: 2000000, max_wall_s: 3600, max_parallel: 3, max_attempts: 3 },
-  check_allowlist: ['node'], ...o });
+  check_allowlist: ['node'], ...(NO_OS_SANDBOX ? { unsandboxed_checks: true } : {}), ...o });
 
 /** Create over HTTP, wait for the plan, return {id, plan}. */
 export async function createAndPlan(stack, repo, o = {}) {

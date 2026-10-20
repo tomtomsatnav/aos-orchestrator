@@ -22,6 +22,7 @@ import { q, escCtrl, escBeyondC0 } from '../lib/ctrl.mjs';
 import { draftGoal, renderDraft, PROFILES } from '../lib/draft.mjs';
 import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
+import { workerSandboxAvailable } from '../lib/sandbox.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
 import { createControlServer, parsePort, DEFAULT_PORT } from '../server/index.mjs';
 import { ensureCliToken, readCliToken, createLoginCode } from '../server/auth.mjs';
@@ -88,6 +89,7 @@ async function main() {
         const spec = JSON.parse(fs.readFileSync(arg1, 'utf8'));
         if (flags['trust-repo-config']) spec.orch = { ...(spec.orch || {}), trust_repo_config: true };
         if (flags['unsandboxed-checks']) spec.orch = { ...(spec.orch || {}), unsandboxed_checks: true };
+        if (flags['sandbox-workers'] && process.platform !== 'darwin') die(`--sandbox-workers: ${workerSandboxAvailable().reason}`);
         if (flags['sandbox-workers']) spec.orch = { ...(spec.orch || {}), sandbox_workers: true };
         if (typeof flags['accept-repo-loosening'] === 'string') spec.orch = { ...(spec.orch || {}), accept_repo_loosening: flags['accept-repo-loosening'].split(',').map((x) => x.trim()).filter(Boolean) };
         if (flags['auto-approve']) spec.orch = { ...(spec.orch || {}), approval_policy: { ...(spec.orch?.approval_policy || {}), plan: 'auto' } };

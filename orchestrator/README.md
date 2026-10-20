@@ -5,7 +5,7 @@ New here? Start with the top-level [README](../README.md): `npm test`, then the 
 A deterministic engine that turns one human-written Goal into merge-ready work on a git branch. Design:
 [docs/orchestrator-design.md](../docs/orchestrator-design.md). Verified CLI facts: [spike/README.md](spike/README.md).
 Phase 1 is the engine only: it is tested against a scripted fake `claude`, uses zero plan tokens and zero npm dependencies
-(Node 18+, macOS first).
+(Node 18+; macOS and Linux, see the Linux sandbox note under security condition 4).
 
 ## How it works
 
@@ -142,10 +142,23 @@ Enforced by code and covered by tests:
    shell history, other worktrees and the engine's goal/approvals/policy directories are denied. Paths reach the profile only as `-D`
    parameters through `execFile` (the profile text is static). If `sandbox-exec` is missing or fails its probe, checks are refused and
    the goal blocks before dispatch unless `orch.unsandboxed_checks` is set (recorded, warned, event-logged).
+   **Linux:** checks run under bubblewrap (`bwrap`, install `bubblewrap`). Different model, same guarantees: instead of a deny-default
+   profile it builds a fresh mount namespace that contains ONLY read-only `/usr /bin /sbin /lib* ` and a short `/etc` allow-list, the node
+   prefix, `~/.npm` (read-only), the worktree (read-write), the private TMPDIR (read-write) and a tmpfs `/tmp`; the root is remounted
+   read-only. HOME, secrets, other worktrees and the engine state do not exist inside it (if the worktree itself contains one of them, it is
+   masked). `--unshare-all` (incl. network), `--die-with-parent`, `--new-session`, `--clearenv` plus the caller's minimal env.
+   Differences from macOS: (a) `orch.check_localhost_ports` cannot open specific HOST ports, because bwrap can only share the whole host
+   network or none; we choose none, so named ports are ignored on Linux and a check can only talk to servers it starts itself on the sandbox's
+   private loopback; (b) writes to `/tmp` and to parent directories of the binds succeed but land in a private tmpfs and vanish; (c) the
+   probe runs the real flags once, so hosts that forbid unprivileged user namespaces (some containers, Ubuntu 24.04 with
+   `kernel.apparmor_restrict_unprivileged_userns=1`) count as "sandbox unavailable" and checks are refused. If neither `sandbox-exec` nor
+   `bwrap` works, the default refusal stands; `--unsandboxed-checks` / `orch.unsandboxed_checks` is the only override.
 5. **Opt-in worker sandbox** (`orch.sandbox_workers: true` or `aos-orch run goal.json --sandbox-workers`; default OFF, behaviour
    unchanged). The planner and every task worker are launched as `sandbox-exec -f <goal>/sandbox/worker-<hash>.sb -D ... claude -p ...`
    (`wrapWorkerCommand` in `lib/sandbox.mjs`; static deny-default profile, paths only as `-D` parameters). If `sandbox-exec` is missing
    or fails its probe, no worker starts (the dispatch fails and the goal halts); it never falls back to unsandboxed.
+   **Linux: not yet supported.** `--sandbox-workers` / `orch.sandbox_workers` FAIL CLOSED there (the CLI exits with an error, the engine starts no
+   worker): a bwrap equivalent of this profile was not validated against a real `claude` on Linux.
    `orch.worker.started` events and `<task>.<n>.pid.json` carry `sandboxed: true|false`.
    - **Writes allowed only to:** the task worktree; `<goal>/tmp/<task>` (the worker's TMPDIR); `<goal>/approvals/` and
      `<goal>/workers/decisions.ndjson` (the policy hook runs inside the sandbox and writes them); the Claude files a `claude -p` run
@@ -188,7 +201,7 @@ Residual risks (honest list):
   `~/.claude` (other sessions' transcripts) and `~/.claude.json`, and anything inside the writable set above (the worktree and goal tmp
   are executed later by the sandboxed checks). It guards against accidents and limits blast radius; it is not a boundary against a
   determined malicious worker.
-- The sandbox is defense in depth, not proof: `sandbox-exec` is deprecated and its profile language undocumented; a kernel or sandbox bug
+- The sandbox is defense in depth, not proof: `sandbox-exec` is deprecated (Linux: bubblewrap relies on unprivileged user namespaces and the kernel) and its profile language undocumented; a kernel or sandbox bug
   defeats it. It does not limit CPU, memory, disk use inside the worktree or processes (only the timeout and the group kill do).
   `file-read-metadata` is allowed everywhere, so a check can `stat` (not read or list) paths such as `~/.ssh`. Mach lookups are allowed
   (node and system tools need them), so local services reachable through Mach/XPC are not blocked. Git commands inside a check cannot read
@@ -248,7 +261,7 @@ idempotent ticks, rate-limit pause/resume and the utilisation reserve (injected 
 after grace), wall-clock kill with SIGKILL escalation, parallelism cap and scope overlap, crash/resume (re-adopt, lost
 worker), cancel/kill switch, pause/resume, locking, policy hook (table-driven plus real runs), approvals (granted, timeout
 = deny, expiry), scope violation, merge conflict, worker command line and env, event-log validity; `hardening.test.mjs` (no code execution via the allowlist, hostile repo configs,
-CLAUDE.md hash, plan approval gate and hash binding) and `sandbox.test.mjs` (macOS only, skipped elsewhere: write/read/network
+CLAUDE.md hash, plan approval gate and hash binding) and `sandbox-linux.test.mjs` (bubblewrap checks, fail-closed worker sandbox off macOS; skips where bwrap cannot run) and `sandbox.test.mjs` (macOS only, skipped elsewhere: write/read/network
 denials with canary files, private TMPDIR, timeouts, output cap, static profile with hostile worktree paths, refusal without the sandbox) and `worker-sandbox.test.mjs` (macOS only: worker
 profile write allow/deny matrix with `/bin/sh` probes, engine and CLI `--sandbox-workers` with the fake claude and an allow-all hook
 proving a shell write to the main repo fails, refusal without `sandbox-exec`).
