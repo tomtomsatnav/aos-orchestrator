@@ -13,8 +13,8 @@ mtime+size, rescanned at most once a second. A partial/corrupt write keeps the l
 | File | Read as | Fields used |
 |---|---|---|
 | `goal.json` (object) | goal | `title`, `description`, `status` (`achieved\|failed\|cancelled` are terminal), `created_at`, `updated_at`, `blocked_reason`, `success_criteria[{id,text,met}]`, `budget.max_wall_clock_s`, `orch.repo` (absolute; only its basename is exposed, and it maps tagged workers to a project), `orch.plan_state` (`planning\|awaiting_approval\|approved\|rejected\|none`; `supplied` -> `planning`; unknown -> `none`), `orch.plan_awaiting_since_ms`, `orch.paused_reason`, `orch.resume_at`, `orch.started_ms`, `orch.budgets.{max_new_tokens,max_parallel,max_attempts}`, `orch.usage.{new_tokens,notional_usd}` |
-| `tasks.json` (array, max 200) | tasks | `id`, `title`, `status` (`done\|failed\|cancelled\|needs_review\|running\|ready\|...`), `depends_on[]`, `attempts`, `max_attempts`, `orch.{phase,model_tier,branch,last_failure{kind,note},tokens.new}`, `orch.attempt_log[{tier,started_at,ended_at,new_tokens,notional_usd,checks_ok,counted}]` |
-| `events.ndjson` | last 25 lines (tail read of 256 KB; partial/bad lines dropped) | `type`, `ts`, `task_id`, `data.{reason,error,msg,title,status,plan_state,tier,attempt,outcome,rule,label,tool,exit_code,kind,cause,ok}` (first 4 scalar values become `text`) |
+| `tasks.json` (array, max 200) | tasks | `id`, `title`, `status` (`done\|failed\|cancelled\|needs_review\|running\|ready\|...`), `depends_on[]`, `attempts`, `max_attempts`, `orch.{phase,model_tier,branch,last_failure{kind,note},tokens.new}`, `orch.attempt_log[{tier,started_at,ended_at,new_tokens,notional_usd,checks_ok,counted,anticheat?}]` |
+| `events.ndjson` | last 25 lines (tail read of 256 KB; partial/bad lines dropped) | `type`, `ts`, `task_id`, `data.{reason,error,msg,title,status,plan_state,tier,attempt,outcome,rule,label,tool,exit_code,kind,cause,ok}` (`orch.anticheat.*` events use `kind` and `reason`) (first 4 scalar values become `text`) |
 | `approvals/A-<n>.json` | pending approvals | `status === 'pending'`, `task_id`, `requested_at` (else file mtime) |
 
 Free text is scrubbed (absolute paths and token-like strings removed) and length-capped before leaving the process.
@@ -49,6 +49,13 @@ the goal's repo (`orch.repo` basename) instead of the worktree, and count `worke
 - GoalDetail = summary + `description, criteria[{id,text,met}], last_events[{type,ts,task_id,text}], tasks[{id,title,status,phase,
   tier,depends_on,attempts,max_attempts,branch,ran_s,new_tokens,check_summary,outcome,retries,tier_path,cost_usd,waiting_s,
   waiting_for_human,error?}]`. No absolute path appears in any response.
+
+## Anti-cheat fields (additive, optional)
+
+`tasks.json` `orch.attempt_log[].anticheat` (present once the attempt reached verification): `{ status: "pass"|"warn"|"fail", failed: <kind>|null, findings: [{kind, severity: "fail"|"warn"|"allowed", path?, detail}] (max 20), tests: [{check, tests, pass, skipped, todo, baseline}] }`.
+`kind` is one of `vacuous_pass`, `tests_reduced`, `tests_skipped`, `check_config_changed`, `tests_deleted`, `acceptance_modified`, `acceptance_empty`, `literal_copy`; a failed attempt also has `attempt_log[].outcome` equal to that kind (and `orch.last_failure.kind`). `severity: "allowed"` means a rule fired but a human-approved plan field (`allow_skip`, an explicit config file in `path_scope`) let it through; `warn` is advisory.
+`goal.json` `orch.anticheat`: `{ baselines: {<check argv>: {tests, source: "run"|"static", at}}, criteria: {<criterion id>: {kind, reason}}, acceptance?: {items: [{task, files[], commit}]}, acceptance_result?: {ok, files, tests, output?} }`.
+Events: `orch.anticheat.baseline`, `.passed`, `.warning`, `.failed` (`data.kind`, `data.reason`), `.acceptance`. The control server's status JSON has `anticheat: {failures: {<kind>: n}, warnings, allowed, baselines, acceptance, criteria}`. `report.md` has an "Anti-cheat" section.
 
 ## Tests
 

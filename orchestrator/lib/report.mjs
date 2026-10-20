@@ -1,9 +1,10 @@
 // Final report.md (design section 4): criteria with check output, per-task tier/attempts/tokens, approvals,
 // denials, `git diff --stat base..integration`, and the exact commands for the human to review and merge.
 import { versionDrift } from './cli-version.mjs';
+import { reportLines } from './anticheat.mjs';
 const fence = (s) => `\n\`\`\`\n${String(s || '').trim()}\n\`\`\`\n`;
 
-export function buildReport({ goal, tasks, approvals = [], denials = [], diffStat = '', criteriaResults = {}, events = [], governor = null }) {
+export function buildReport({ goal, tasks, state = null, approvals = [], denials = [], diffStat = '', criteriaResults = {}, events = [], governor = null }) {
   const o = goal.orch;
   const L = [];
   L.push(`# Goal report: ${goal.title}`, '', `- id: \`${goal.id}\``, `- status: **${goal.status}**${goal.blocked_reason ? ` (${goal.blocked_reason})` : ''}`,
@@ -30,7 +31,8 @@ export function buildReport({ goal, tasks, approvals = [], denials = [], diffSta
     L.push('', '## Worker errors (last lines of stderr)');
     for (const { t, a } of errs) L.push('', `${t.id} attempt ${a.n} (${a.tier}): ${a.outcome || 'running'}`, fence(String(a.stderr_tail).replace(/```/g, "'''")).replace(/\n$/, ''));
   }
-  L.push('', '## Approvals', '');
+  L.push('', ...reportLines(state || { goal, tasks }));
+  L.push('## Approvals', '');
   if (!approvals.length) L.push('none');
   for (const a of approvals) L.push(`- ${a.id} ${a.task_id} ${a.tool}: ${a.status}${a.scope ? ` (${a.scope})` : ''} by ${a.decided_by || 'n/a'}`);
   L.push('', '## Policy denials', '');
