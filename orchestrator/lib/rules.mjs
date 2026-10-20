@@ -133,13 +133,29 @@ const MAX_SAME_TIER_KEYS = 8;
 const dup = (arr, key) => { const seen = new Set(); for (const e of arr) { if (seen.has(e.id)) return e.id; seen.add(e.id); } return null; };
 const at = (p, i, f) => `$.${p}[${i}].${f}`;
 
-/** Schema check, then domain checks. layer 'user'|'repo'|'goal' (governor is accepted in the user layer only). Never throws. */
-export function validateRules(rules, { layer = 'user' } = {}) {
+// Control characters (C0, DEL, C1) and Unicode bidi overrides in ANY rule string could erase or rewrite the approval screen: refused at validation, and
+// quoted at render time as a second line of defence.
+export const CTRL_RE = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+const CTRL_G = new RegExp(CTRL_RE.source, 'g');
+export const escCtrl = (s) => String(s).replace(CTRL_G, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+/** A value for display: unchanged when plain, else JSON-quoted with every control/bidi character escaped. */
+export const q = (v) => { const s = String(v); return CTRL_RE.test(s) ? escCtrl(JSON.stringify(s)) : s; };
+function ctrlProblem(v, at, bad, depth = 0) {
+  if (typeof v === 'string') { if (CTRL_RE.test(v)) bad(`${at}: contains control characters or bidi overrides`); return; }
+  if (!v || typeof v !== 'object' || depth > 8) return;
+  if (Array.isArray(v)) return v.forEach((x, i) => ctrlProblem(x, `${at}[${i}]`, bad, depth + 1));
+  for (const [k, x] of Object.entries(v)) { if (CTRL_RE.test(k)) bad(`${at}: a key contains control characters or bidi overrides`); ctrlProblem(x, `${at}.${escCtrl(k)}`, bad, depth + 1); }
+}
+
+/** Schema check, then domain checks. layer 'user'|'repo'|'goal' (governor is accepted in the user layer only). Never throws. Error texts never carry raw control characters. */
+export function validateRules(rules, opts) { const v = validateRulesRaw(rules, opts); return { ok: v.ok, errors: v.errors.map(escCtrl) }; }
+function validateRulesRaw(rules, { layer = 'user' } = {}) {
   if (!rules || typeof rules !== 'object' || Array.isArray(rules)) return { ok: false, errors: ['$: rules must be an object'] };
   if (rules.rules_version !== RULES_VERSION) return { ok: false, errors: [`$.rules_version: unsupported version ${JSON.stringify(rules.rules_version)} (only ${RULES_VERSION} is understood)`] };
   const errors = validateSchema(rules, RULES_SCHEMA);
   if (errors.length) return { ok: false, errors };
   const bad = (m) => errors.push(m);
+  ctrlProblem(rules, '$', bad);
   if (rules.governor && layer !== 'user') bad(`$.governor: only the user layer may set the governor (layer is ${layer})`);
   for (const p of ['worker.paths.deny', 'worker.paths.read_extra', 'worker.bash.allow', 'worker.bash.deny', 'worker.bash.deny_patterns', 'plan.scope_deny', 'plan.auto_approvable_checks', 'checks.allowlist']) {
     const a = getPath(rules, p); if (!a) continue;
@@ -172,16 +188,15 @@ export function validateRules(rules, { layer = 'user' } = {}) {
 }
 
 function globProblem(glob, where, bad, absoluteOk = false) {
-  if (/[\0\n]/.test(glob)) bad(`${where}: contains control characters`);
-  else if (glob.startsWith('/') && !absoluteOk) bad(`${where}: must be relative or start with ~/`);
+  if (glob.startsWith('/') && !absoluteOk) bad(`${where}: must be relative or start with ~/`);
   else if (glob.startsWith('~') && !glob.startsWith('~/')) bad(`${where}: must be relative or start with ~/`);
 }
 
 // ---------------------------------------------------------------- merge
 const getPath = (o, p) => p.split('.').reduce((x, k) => (x && typeof x === 'object' && Object.hasOwn(x, k) ? x[k] : undefined), o);
 function setPath(o, p, v) { const ks = p.split('.'); const last = ks.pop(); ks.reduce((x, k) => (x[k] ??= {}), o)[last] = v; }
-/** 8 hex characters of the new value: what an acceptance id is bound to. */
-export const bindHash = (v) => sha256(canonical(v)).slice(0, 8);
+/** 32 hex characters (128 bits) of the new value: what an acceptance id is bound to. */
+export const bindHash = (v) => sha256(canonical(v)).slice(0, 32);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 // kind per path (docs/rules-design.md 2.2). entry lists are identified by their `key` field.
@@ -430,8 +445,8 @@ export function buildRulesSnapshot(comp, layers) {
   return snap;
 }
 
-const cmdList = (a, n = 8) => { const c = a.map((e) => e.cmd ?? e.glob ?? e); return c.length <= n ? c.join(', ') || '(none)' : `${c.slice(0, n).join(', ')} +${c.length - n} more`; };
-const val = (v) => (v === null || v === undefined ? '(none)' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+const cmdList = (a, n = 8) => { const c = a.map((e) => q(e.cmd ?? e.glob ?? e)); return c.length <= n ? c.join(', ') || '(none)' : `${c.slice(0, n).join(', ')} +${c.length - n} more`; };
+const val = (v) => (v === null || v === undefined ? '(none)' : typeof v === 'object' ? escCtrl(JSON.stringify(v)) : q(v));
 
 /**
  * Human-readable facts about a snapshot, for the approval screens: what the worker may do, the hard limits, and EVERY loosening (and dropped repo loosening)
@@ -458,23 +473,24 @@ export function summarizeRules(snap) {
   };
 }
 
+const escCtrl2 = (l) => l.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 /** Plain-text rendering of summarizeRules() for the CLI (design 3.6). */
 export function renderRulesSummary(sm) {
   if (!sm) return 'rules: (no snapshot yet)';
-  const L = [`rules ${sm.rules_hash}  profile=${sm.profile}${sm.legacy ? '  (legacy goal: rules predate rule sets)' : ''}  layers: ${sm.layers.join(' ')}`];
-  L.push(`  worker tools: ${sm.worker.tools.join(' ')}   outside path_scope: ${sm.worker.on_outside_scope}   worker sandbox: ${sm.worker.sandbox}`);
+  const L = [`rules ${sm.rules_hash}  profile=${q(sm.profile)}${sm.legacy ? '  (legacy goal: rules predate rule sets)' : ''}  layers: ${sm.layers.map(q).join(' ')}`];
+  L.push(`  worker tools: ${sm.worker.tools.map(q).join(' ')}   outside path_scope: ${sm.worker.on_outside_scope}   worker sandbox: ${sm.worker.sandbox}`);
   L.push(`  worker bash allow (${sm.worker.bash_allow.length}): ${cmdList(sm.worker.bash_allow)}${sm.worker.read_extra.length ? `   extra read roots: ${cmdList(sm.worker.read_extra)}` : ''}`);
-  L.push(`  denied: bash ${sm.denies.bash.length} (${cmdList(sm.denies.bash, 6)}); paths ${cmdList(sm.denies.paths, 6)}; ${sm.denies.patterns} pattern(s); floor (never removable): ${sm.denies.floor.join(' ')}`);
-  if (sm.denies.scope_deny.length) L.push(`  planner may not scope: ${sm.denies.scope_deny.join(' ')}`);
-  L.push(`  checks: ${sm.checks.sandbox === 'required' ? 'sandboxed' : 'NOT sandboxed'}; allowlist: ${sm.checks.allowlist.join(', ') || '(none)'}${sm.checks.localhost_ports.length ? `; localhost ports ${sm.checks.localhost_ports.join(',')}` : ''}; max ${sm.checks.max_timeout_s}s`);
-  L.push(`  plan approval: ${sm.plan.approval}; max ${sm.plan.max_tasks} tasks; tiers ${sm.plan.tiers.join('/')}; start at most ${sm.plan.max_start_tier}`);
+  L.push(`  denied: bash ${sm.denies.bash.length} (${cmdList(sm.denies.bash, 6)}); paths ${cmdList(sm.denies.paths, 6)}; ${sm.denies.patterns} pattern(s); floor (never removable): ${sm.denies.floor.map(q).join(' ')}`);
+  if (sm.denies.scope_deny.length) L.push(`  planner may not scope: ${sm.denies.scope_deny.map(q).join(' ')}`);
+  L.push(`  checks: ${sm.checks.sandbox === 'required' ? 'sandboxed' : 'NOT sandboxed'}; allowlist: ${sm.checks.allowlist.map(q).join(', ') || '(none)'}${sm.checks.localhost_ports.length ? `; localhost ports ${sm.checks.localhost_ports.join(',')}` : ''}; max ${sm.checks.max_timeout_s}s`);
+  L.push(`  plan approval: ${sm.plan.approval}; max ${sm.plan.max_tasks} tasks; tiers ${sm.plan.tiers.map(q).join('/')}; start at most ${q(sm.plan.max_start_tier)}`);
   L.push(`  limits: $${sm.limits.max_usd}, ${sm.limits.max_new_tokens} tokens, ${sm.limits.max_wall_clock_s}s, ${sm.limits.max_attempts} attempts/task, ${sm.limits.max_parallel} parallel`);
   L.push(sm.loosenings.length ? `LOOSENINGS YOU ARE APPROVING (${sm.loosenings.length}):` : 'LOOSENINGS YOU ARE APPROVING: none');
-  for (const l of sm.loosenings) L.push(`  ${l.layer}:${l.path}  ${l.change}   [${l.rule_id}]`);
+  for (const l of sm.loosenings) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]`);
   if (sm.dropped.length) {
     L.push(`NOT APPLIED (${sm.dropped.length}; a repo's loosenings need --accept-repo-loosening <rule_id>):`);
-    for (const l of sm.dropped) L.push(`  ${l.layer}:${l.path}  ${l.change}   [${l.rule_id}]${l.reason !== 'loosening' ? `  (${l.reason})` : ''}`);
+    for (const l of sm.dropped) L.push(`  ${q(l.layer)}:${q(l.path)}  ${l.change}   [${q(l.rule_id)}]${l.reason !== 'loosening' ? `  (${q(l.reason)})` : ''}`);
   }
-  for (const n of sm.notes) L.push(`  note: ${n}`);
-  return L.join('\n');
+  for (const n of sm.notes) L.push(`  note: ${q(n)}`);
+  return L.map(escCtrl2).join('\n'); // last line of defence: nothing but plain text reaches the terminal
 }

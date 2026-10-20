@@ -19,7 +19,7 @@ test('review 1: an acceptance binds the rule CONTENT: swapping the body under an
   const allowed = (c) => c.compiled.worker.bash.allow.some((e) => e.id === 'sedn');
   // the probe: the old accept key (the bare id) accepts nothing any more
   const bare = compileRules([{ layer: 'repo', rules: sedn('sort') }], { accept: ['repo:worker.bash.allow.sedn'] });
-  assert.equal(allowed(bare), false); assert.equal(bare.dropped[0].rule_id, id('sort')); assert.match(bare.dropped[0].rule_id, /^repo:worker\.bash\.allow\.sedn@[0-9a-f]{8}$/);
+  assert.equal(allowed(bare), false); assert.equal(bare.dropped[0].rule_id, id('sort')); assert.match(bare.dropped[0].rule_id, /^repo:worker\.bash\.allow\.sedn@[0-9a-f]{32}$/);
   const ok = compileRules([{ layer: 'repo', rules: sedn('sort') }], { accept: [id('sort')] });
   assert.equal(allowed(ok), true); assert.equal(ok.loosenings[0].rule_id, id('sort')); assert.equal(ok.dropped.length, 0);
   // the same accepted id, a different body: dropped and reported as a NEW loosening

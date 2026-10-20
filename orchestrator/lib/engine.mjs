@@ -13,7 +13,7 @@ import * as G from './git.mjs';
 import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
 import { matchAny, scopesOverlap } from './glob.mjs';
 import { mergePolicy, DEFAULT_POLICY, isProtectedRel } from './policy.mjs';
-import { buildSnapshot, snapshotHash, rulesFingerprint, applyCompiledToGoal, validateRules, toPolicy } from './rules.mjs';
+import { q, buildSnapshot, snapshotHash, rulesFingerprint, applyCompiledToGoal, validateRules, toPolicy } from './rules.mjs';
 import { compileGoal, recompileSnapshot, previewGoal, parseRepoRules, REPO_RULES_PATH, REPO_RULES_FILE } from './rules-store.mjs';
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
@@ -1104,6 +1104,7 @@ export async function createGoal(orchDir, spec, { clock = realClock } = {}) {
   if (rr.rules) {
     const nd = pre.comp.dropped.filter((d) => d.layer === 'repo' && d.reason === 'loosening');
     notices.push(`repo ${REPO_RULES_PATH} (${rr.sha256.slice(0, 12)}) was read from ${info.base_commit.slice(0, 12)}: it can only tighten${nd.length ? `; ${nd.length} loosening(s) are NOT applied (accept with approve-plan --accept-repo-loosening <id>): ${nd.slice(0, 5).map((d) => d.rule_id).join(', ')}` : ''}`);
+    for (const l of pre.comp.loosenings.filter((x) => x.layer === 'repo')) notices.push(`ACCEPTED repo loosening ${q(l.rule_id)}: ${q(l.path)} ${l.from === null || l.from === undefined ? '+' : `${q(JSON.stringify(l.from))} ->`} ${q(JSON.stringify(l.to))}`);
     appendEvent(dir, { type: 'orch.rules.repo_layer', actor: 'orchestrator', goal_id: goal.id, data: { sha12: rr.sha256.slice(0, 12), base_commit: info.base_commit.slice(0, 12), dropped: nd.map((d) => d.rule_id).slice(0, 20) } }, clock);
   }
   if (goal.orch.unsandboxed_checks) {

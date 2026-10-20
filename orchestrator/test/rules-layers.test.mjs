@@ -147,7 +147,7 @@ test('R5: the rules summary: profile, key allows and denies, every loosening wit
   assert.ok(sm.worker.bash_allow.includes('ls') && sm.denies.bash.includes('git push') && sm.denies.floor.includes('.aos'));
   const text = renderRulesFor(dir, goalOf(dir));
   assert.match(text, new RegExp(`^rules ${sm.rules_hash}  profile=node-library  layers: default\\(\\w{6}\\) user\\(\\w{6}\\) goal\\(\\w{6}\\)`));
-  assert.match(text, /LOOSENINGS YOU ARE APPROVING \(4\):/); assert.match(text, /goal:budgets\.max_usd {2}5 -> 8 {3}\[goal:budgets\.max_usd@[0-9a-f]{8}\]/);
+  assert.match(text, /LOOSENINGS YOU ARE APPROVING \(4\):/); assert.match(text, /goal:budgets\.max_usd {2}5 -> 8 {3}\[goal:budgets\.max_usd@[0-9a-f]{32}\]/);
   assert.match(text, /user:worker\.paths\.read_extra {2}\+ ~\/shared\/\*\*/); assert.match(text, /goal:checks\.allowlist {2}\+ node/);
   assert.match(text, /worker bash allow \(13\): ls, cat/); assert.match(text, /floor \(never removable\): \.git/);
   // the CLI screens render it: renderReview appends it after the tasks
