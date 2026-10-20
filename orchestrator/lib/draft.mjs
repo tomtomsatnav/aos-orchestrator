@@ -11,6 +11,7 @@ import * as W from './worker.mjs';
 import { compileRules, summarizeRules, renderRulesSummary, buildRulesSnapshot } from './rules.mjs';
 import { readUserLayer, parseRepoRules, REPO_RULES_PATH } from './rules-store.mjs';
 import { extractJson, gatherRepoFacts, UNSAFE_CHECK_CMDS } from './plan.mjs';
+import { serverWarnings } from './protect.mjs';
 import { commandAllowed } from './checks.mjs';
 import { scanRepoConfig } from './repo-config.mjs';
 import { CTRL_RE, escCtrl, q } from './ctrl.mjs';
@@ -296,6 +297,11 @@ export async function draftGoal({ orchDir, repo, prompt, profile = 'strict', bra
   const ignored = Object.keys(last.draft.budgets); if (ignored.length) notes.push(`ignored model-proposed budgets (${ignored.join(', ')}): budgets come from the draft defaults, your flags and the rules`);
   for (const [k, v] of Object.entries(flagBudgets)) { budgets[k] = v; budget_notes[k] = { source: 'flag', limit: caps[k] }; }
   const draft = { ...last.draft, budgets }; notes.push(...(last.notes || []));
+  if (!compiled.checks.allow_loopback) { // a criterion that runs an existing test which starts a local server can never pass in the check sandbox
+    const rd = async (rel) => { const b = await G.showBlob(root, dr.info.base_commit, rel, { maxBytes: 200000 }); return b ? b.toString('utf8') : null; };
+    const withCheck = draft.success_criteria.filter((c) => c.check);
+    for (const m of await serverWarnings(withCheck.map((c) => c.check.argv), rd, { label: (i) => `criterion ${withCheck[i].id}` })) notes.push(`WARNING: ${m}`);
+  }
   const limits = { max_new_tokens: budgets.max_new_tokens, max_wall_clock_s: budgets.max_wall_s, max_attempts: budgets.max_attempts, ...(budgets.max_parallel ? { max_parallel: budgets.max_parallel } : {}), ...(budgets.max_usd ? { max_usd: budgets.max_usd } : {}) };
   return { ok: true, draft, budget_notes, start_tier: startTier, notes, spec: draftToSpec(draft, { root, branch, tier: base.tier, profile, profileRules: dr.profileRules, maxUsdCap: compiled.budgets.max_usd, startTier }), errors: [], questions: [], ...base, rules_text: textFor(limits) };
 }

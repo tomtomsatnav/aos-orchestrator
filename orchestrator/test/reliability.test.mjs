@@ -79,7 +79,7 @@ test('generated goal ids are unique (two goals from the same title and day); an 
 });
 
 // ---------------------------------------------------------------- draft
-import { draftGoal, normalizeCheck } from '../lib/draft.mjs';
+import { draftGoal, normalizeCheck, PROFILES } from '../lib/draft.mjs';
 import { compileRules } from '../lib/rules.mjs';
 const ALLOW = { rules_version: 1, checks: { allowlist: [{ id: 'grep', cmd: 'grep' }, { id: 'node-test', cmd: 'node --test' }, { id: 'npm-test', cmd: 'npm test' }] } };
 const compiled = () => compileRules([{ layer: 'user', rules: ALLOW }]).compiled;
@@ -128,4 +128,83 @@ test('draft: budgets proposed by the model are ignored (defaults, flags and rule
   assert.equal(r.ok, true, r.errors.join('; ')); assert.equal(r.spec.budget.max_usd, 5); assert.equal(r.draft.budgets.max_new_tokens, 150000);
   assert.ok(Object.values(r.budget_notes).every((n) => n.source !== 'model')); assert.match(r.notes.join(), /ignored model-proposed budgets \(max_usd, max_new_tokens\)/);
   assert.doesNotMatch(dcalls(sb)[0].prompt, /Budget limits|"max_usd"/);
+});
+
+// ---------------------------------------------------------------- checks.allow_loopback (macOS sandbox-exec profile)
+import os from 'node:os';
+import { runCheck } from '../lib/checks.mjs';
+import { sandboxAvailable, buildProfile } from '../lib/sandbox.mjs';
+const SBX = process.platform !== 'darwin' ? 'macOS only' : !sandboxAvailable().ok ? 'sandbox-exec unavailable' : false;
+const SERVER_CHECK = "const http=require('http');const s=http.createServer((q,r)=>r.end('hi')).listen(0,'127.0.0.1',()=>{http.get({host:'127.0.0.1',port:s.address().port},(r)=>{r.resume();r.on('end',()=>{s.close();console.log('LOOPBACK-OK')})}).on('error',(e)=>{console.error(e.code);process.exit(2)})});s.on('error',(e)=>{console.error(e.code);process.exit(2)})";
+const EXTERNAL_CHECK = "const n=require('net').connect({host:'1.1.1.1',port:80});n.on('connect',()=>{console.log('REACHED');process.exit(0)});n.on('error',(e)=>{console.error(e.code);process.exit(2)});setTimeout(()=>{console.error('TIMEOUT');process.exit(3)},3000)";
+test('sandbox: a server-spawning check fails with loopback blocked (default) and passes with checks.allow_loopback; external network stays blocked', { skip: SBX }, async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aos-lo-'))); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const wt = path.join(root, 'wt'); const tmp = path.join(root, 'goal', 'tmp'); fs.mkdirSync(wt); fs.mkdirSync(tmp, { recursive: true });
+  const run = (code, loopback) => runCheck({ argv: [process.execPath, '-e', code], timeout_s: 20 }, { cwd: wt, env: { PATH: `/usr/bin:/bin:${path.dirname(process.execPath)}`, HOME: root, TMPDIR: tmp }, sandbox: { worktree: wt, tmpDir: tmp, goalDir: path.join(root, 'goal'), orchDir: path.join(root, 'orch'), home: root, profileDir: path.join(root, 'goal', 'sandbox'), loopback } });
+  let r = await run(SERVER_CHECK, false); assert.equal(r.ok, false); assert.match(r.output, /EPERM|EACCES/);
+  r = await run(SERVER_CHECK, true); assert.equal(r.ok, true, r.output); assert.match(r.output, /LOOPBACK-OK/);
+  r = await run(EXTERNAL_CHECK, true); assert.equal(r.ok, false, 'no external network even with loopback'); assert.doesNotMatch(r.output, /REACHED/);
+});
+test('allow_loopback: false by default (also in node-library), shown in the rules summary; the profile text only changes when asked', () => {
+  assert.doesNotMatch(buildProfile(), /network-bind/); assert.match(buildProfile({ loopback: true }), /network-bind \(local ip "localhost:\*"\)/);
+  assert.equal(compileRules([]).compiled.checks.allow_loopback, false);
+  assert.equal(compileRules([{ layer: 'goal', rules: PROFILES['node-library'] }], { accept: [] }).compiled.checks.allow_loopback, false);
+  const on = compileRules([{ layer: 'user', rules: { rules_version: 1, checks: { allow_loopback: true } } }]);
+  assert.equal(on.ok, true); assert.equal(on.compiled.checks.allow_loopback, true);
+});
+
+// ---------------------------------------------------------------- protection of existing tests; server-needing checks
+import { git } from './helpers.mjs';
+import { reviewView, renderReview } from '../lib/plan.mjs';
+import { listTestFiles, isTestPath } from '../lib/protect.mjs';
+const PROTECT = { orch: { rules: { rules_version: 1, checks: { protect_existing_tests: true } } } };
+const ORIGINAL_TEST = "import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';\ntest('a.txt is alpha', () => assert.equal(fs.readFileSync('a.txt', 'utf8').trim(), 'alpha'));\n";
+const withTests = (sb, files = { 'test/pricing.test.mjs': ORIGINAL_TEST }) => { for (const [f, c] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(sb.repo, f)), { recursive: true }); fs.writeFileSync(path.join(sb.repo, f), c); } git(sb.repo, 'add', '-A'); git(sb.repo, 'commit', '-q', '-m', 'tests'); };
+
+test('protect: test files are recognised by name and directory', async (t) => {
+  for (const f of ['test/a.js', 'tests/x/y.py', '__tests__/z.js', 'src/pricing.test.mjs', 'src/a.spec.ts', 'test_foo.py', 'foo_test.go']) assert.equal(isTestPath(f), true, f);
+  for (const f of ['src/pricing.js', 'README.md', 'src/latest.js', 'contest.js']) assert.equal(isTestPath(f), false, f);
+  const sb = mkSandbox(); t.after(() => sb.cleanup()); withTests(sb);
+  assert.deepEqual((await listTestFiles(sb.repo, 'HEAD')).files, ['test/pricing.test.mjs']);
+});
+
+test('protect: a task that weakens an existing test cannot achieve the goal (the pristine original is re-run); the plan shows a WARNING; unchanged tests pass', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup()); withTests(sb);
+  const weaken = ptask('t1', 'b.txt', 'beta', { scope: ['b.txt', 'a.txt', 'test/pricing.test.mjs'] });
+  sb.scenario({ tasks: { t1: [{ behavior: 'success', edits: [{ path: 'b.txt', content: 'beta\n' }, { path: 'a.txt', content: 'WRONG\n' }, { path: 'test/pricing.test.mjs', content: "import test from 'node:test';test('trivial', () => {});\n" }] }] } });
+  const { dir, goal } = await sb.goal({ success_criteria: [crit('b.txt', 'beta')], plan: onePlan(weaken), ...PROTECT });
+  assert.deepEqual(goal.orch.protected_tests.files, ['test/pricing.test.mjs']);
+  await drive(sb.engine(dir));
+  const g = goalOf(dir); assert.equal(g.status, 'blocked'); assert.match(g.blocked_reason, /ORIGINAL existing tests fail/);
+  assert.equal(g.orch.protected_result.ok, false); assert.ok(readEvents(dir).some((e) => e.type === 'orch.protected_tests.checked'));
+  assert.match(g.orch.plan_warnings.t1[0], /path_scope includes EXISTING test file\(s\) test\/pricing\.test\.mjs/);
+  assert.match(renderReview(reviewView(tasksOf(dir), g)), /!! WARNING \(task t1\).*EXISTING test/);
+
+  const sb2 = mkSandbox(); t.after(() => sb2.cleanup()); withTests(sb2);
+  sb2.scenario({ tasks: { t1: [{ behavior: 'success', edits: [{ path: 'b.txt', content: 'beta\n' }, { path: 'a.txt', content: 'alpha\n' }] }] } });
+  const ok = await sb2.goal({ success_criteria: [crit('b.txt', 'beta')], plan: onePlan(ptask('t1', 'b.txt', 'beta', { scope: ['b.txt', 'a.txt'] })), ...PROTECT });
+  await drive(sb2.engine(ok.dir));
+  assert.equal(goalOf(ok.dir).status, 'achieved'); assert.equal(goalOf(ok.dir).orch.protected_result.ok, true); assert.equal(goalOf(ok.dir).orch.protected_result.files, 1);
+});
+
+test('protect: off unless the rule is on (default false); a goal with it off has no snapshot', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup()); withTests(sb);
+  const { goal } = await sb.goal({ success_criteria: [crit('b.txt', 'beta')], plan: onePlan(ptask('t1', 'b.txt', 'beta')) });
+  assert.equal(goal.orch.protected_tests, undefined);
+});
+
+test('allow_loopback: plan approval warns when a check runs a test that starts a server and the rule is off; no warning when a human turned it on', async (t) => {
+  const SERVER_TEST = "import http from 'node:http';import test from 'node:test';test('s', async () => { const s = http.createServer((q, r) => r.end('x')).listen(0); s.close(); });\n";
+  const mk = async (rules) => {
+    const sb = mkSandbox(); t.after(() => sb.cleanup()); withTests(sb, { 'test/server.test.mjs': SERVER_TEST });
+    if (rules) fs.writeFileSync(path.join(sb.orch, 'rules.json'), JSON.stringify(rules));
+    sb.scenario({ planner: planStep(onePlan(ptask('t1', 'a.txt', 'alpha'))) });
+    const { dir } = await sb.goal({ success_criteria: [{ id: 'c1', text: 'server test passes', check: { argv: ['node', '--test', 'test/server.test.mjs'], timeout_s: 30 } }] });
+    await drive(sb.engine(dir, { humanApproves: false })); return { sb, dir, g: goalOf(dir) };
+  };
+  const off = await mk(null); assert.equal(off.g.orch.plan_state, 'awaiting_approval');
+  assert.match(off.g.orch.plan_warnings.goal[0], /test\/server\.test\.mjs.*checks\.allow_loopback is false/);
+  assert.match(renderReview(reviewView(tasksOf(off.dir), off.g), ''), /!! WARNING: success-criteria check 1 runs test\/server\.test\.mjs/);
+  const on = await mk({ rules_version: 1, checks: { allow_loopback: true } }); assert.deepEqual(on.g.orch.plan_warnings, {}); assert.equal(on.g.orch.allow_loopback, true);
+  const sum = (await import('../lib/rules.mjs')); assert.ok(sum.renderRulesSummary);
 });

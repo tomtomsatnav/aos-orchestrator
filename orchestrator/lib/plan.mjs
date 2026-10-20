@@ -241,8 +241,11 @@ export function beyondPrompt(scope, text) {
 /** What a human reviews, per task, in plain text: tier, path scope, allowed commands and the exact check commands. */
 export function reviewView(tasks, goal = null) {
   const text = goal ? goalPromptText(goal) : null;
-  return tasks.map((t) => { const o = t.orch || t; return { ...(text === null ? {} : beyondPrompt(o.path_scope, text)), id: t.id, title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
+  const W = goal?.orch?.plan_warnings || {};
+  const view = tasks.map((t) => { const o = t.orch || t; return { ...(text === null ? {} : beyondPrompt(o.path_scope, text)), warnings: [...(W[t.id] || [])], id: t.id, title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
     allowed_commands: [...(o.allowed_commands || [])], checks: (o.checks || []).map((c) => ({ command: c.argv.join(' '), argv: c.argv, timeout_s: c.timeout_s })) }; });
+  view.goal_warnings = [...(W.goal || [])]; // not serialised with the array: renderReview prints them
+  return view;
 }
 /** Hash of everything the approval covers in the engine's tasks (tier excluded: the retry ladder escalates it legitimately). */
 export function tasksHash(tasks, v = 1) {
@@ -258,7 +261,9 @@ export const tasksHashFor = (goal, tasks) => tasksHash(tasks, tasksHashV(goal));
 export function renderReview(view, rulesText) {
   const L = [];
   const e = escCtrl; const arg = (a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : e(JSON.stringify(String(a))));
+  for (const w of view.goal_warnings || []) L.push(`!! WARNING: ${e(w)}`);
   for (const t of view) {
+    for (const w of t.warnings || []) L.push(`!! WARNING (task ${e(t.id)}): ${e(w)}`);
     L.push(`task ${e(t.id)}  tier=${e(t.model_tier)}  scope=${t.path_scope.map(e).join(', ')}${t.depends_on.length ? `  after=${t.depends_on.map(e).join(',')}` : ''}`);
     const block = (label, text) => { const ls = String(text ?? '').slice(0, 2000).split('\n'); ls.forEach((ln, i) => L.push(i ? `    ${ln}` : `  ${label}: ${ln}`)); }; // what the worker is told (covered by the tasks hash)
     if (t.beyond_prompt) L.push(`  BEYOND THE PROMPT (heuristic, informational): scope ${t.beyond_paths.map(e).join(', ')} is not mentioned in the goal text; check it is intended`);
