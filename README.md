@@ -15,9 +15,21 @@ An experimental engine that turns one human-written Goal into merge-ready work o
 ## Run
 
 ```sh
-node --test orchestrator/test/*.test.mjs        # or: npm test   (uses the fake claude; no tokens spent)
-node orchestrator/bin/aos-orch.mjs --help
+git clone https://github.com/tomtomsatnav/aos-orchestrator && cd aos-orchestrator
+npm test                                       # ~2 min, 531 tests, macOS only, uses a scripted fake claude: no tokens spent
+node orchestrator/bin/aos-orch.mjs --help      # command list (`aos-orch` in the docs means this script; there is no installed binary)
+node orchestrator/bin/aos-orch.mjs rules show  # what workers may do, and the default budgets
 ```
+
+Try the whole flow with no model calls, in a scratch directory (the "fake claude" is the test double the suite uses; needs a throwaway git repo with a `main` branch):
+
+```sh
+export AOS_ORCH_DIR=/tmp/aos-demo-state AOS_CLAUDE_BIN=$PWD/orchestrator/test/fake-claude.mjs
+export AOS_FAKE_SCENARIO=/tmp/scen.json     # {"default":{"behavior":"success","edits":[{"path":"a.txt","content":"alpha\n"}]}}
+node orchestrator/bin/aos-orch.mjs run goal.json   # goal.json: see "Goal file" in orchestrator/README.md (give it a "plan" and "approval_policy":{"plan":"auto"})
+```
+
+Unset `AOS_CLAUDE_BIN` and the same commands launch the real `claude` (needs it on your PATH and logged in). State is kept in `$AOS_ORCH_DIR`, by default inside the dashboard plugin's data folder under `~/.claude/plugins/data/`. If a worker "crashed", read `workers/<task>.<n>.stderr` in the goal's folder.
 
 Engine design, state layout and CLI details: [orchestrator/README.md](orchestrator/README.md), [docs/orchestrator-design.md](docs/orchestrator-design.md), verified CLI facts in [orchestrator/spike/README.md](orchestrator/spike/README.md). The on-disk layout other tools can rely on: [docs/orch-state-contract.md](docs/orch-state-contract.md).
 

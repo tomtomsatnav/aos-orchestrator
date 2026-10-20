@@ -253,7 +253,17 @@ async function main() {
       break;
     }
     default:
-      die('usage: aos-orch run|serve|login-link|token|goals|status|plan|pause|resume|cancel|kill|approve-plan|reject-plan|approvals|approve|deny|draft|confirm|rules ...', 64);
+      die(`usage: aos-orch <command> ...   (node orchestrator/bin/aos-orch.mjs when not on your PATH)
+  draft "<prompt>" --repo <path>   write a goal.json from a sentence (one small model call; review it)
+  run <goal.json|goal-id>          plan and run a goal; stops for your approval, then run it again (--wait-approval stays attached)
+  status [goal-id] | goals         list goals / show one
+  plan <goal-id>                   read-only plan review; approve-plan | reject-plan <goal-id> decide it
+  pause | resume | cancel | kill <goal-id>
+  approvals <goal-id> | approve | deny <goal-id> <A-n>   answer a worker permission request
+  confirm <goal-id> <criterion-id> sign off a human-verified criterion
+  rules show|check|explain         inspect the rules (what workers may do and the budgets)
+  serve | login-link | token       control server for the dashboard (127.0.0.1:4319)
+State lives in $AOS_ORCH_DIR (default ~/.claude/plugins/data/aos-dashboard-aos-local/orch). Docs: orchestrator/README.md`, 64);
   }
 }
 main().catch((e) => die(e.message));

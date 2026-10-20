@@ -1,4 +1,6 @@
-# AOS orchestrator: engine core (phase 1) + supervisor and control server (phase 3)
+# AOS orchestrator: engine, supervisor and control server
+
+New here? Start with the top-level [README](../README.md): `npm test`, then the fake-claude demo. In this document `aos-orch` means `node orchestrator/bin/aos-orch.mjs`.
 
 A deterministic engine that turns one human-written Goal into merge-ready work on a git branch. Design:
 [docs/orchestrator-design.md](../docs/orchestrator-design.md). Verified CLI facts: [spike/README.md](spike/README.md).
@@ -237,7 +239,7 @@ Worktrees live outside the repo: `<repo>-aos-worktrees/<goal>/{integration,<task
 
 ```sh
 node --test 'orchestrator/test/*.test.mjs'
-make test        # includes the line above; ~35 s, zero model calls
+npm test         # the same, ~2 min on a laptop, zero model calls (there is no Makefile)
 ```
 
 Tests run the engine against `test/fake-claude.mjs` (`AOS_CLAUDE_BIN`, scenario in `AOS_FAKE_SCENARIO`) in throwaway git
@@ -255,7 +257,7 @@ Note: the engine tests use a stand-in for the human (`helpers.humanApproves`) be
 ## Not done yet
 
 - Control UI and monitor integration (goal hub, DAG, meters); the telemetry hook (`aos-hook.mjs` tagging): phases 2 and 4.
-- Real-claude runs: nothing here has ever called the real binary. Unverified: OAuth with the minimal env, the real
+- Real-claude coverage is thin (8 small runs, see the top README). Unverified: OAuth with the minimal env, the real
   plan-limit failure text (the matcher is a configurable guess), `--setting-sources ""`, `--resume` for approval
   continuations, planner `--json-schema`.
 - `aos` CLI integration (`scripts/aos.mjs`), `schemas/orch-task.schema.json` (validation lives in `lib/plan.mjs`).
