@@ -11,11 +11,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]  # macOS only: acceptance checks run under sandbox-exec
+        os: [macos-latest, ubuntu-latest]  # macOS: sandbox-exec; Linux: bubblewrap
         node: [18, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - name: Install bubblewrap (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          # Ubuntu 24.04 blocks unprivileged user namespaces via AppArmor; bwrap needs them
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --unshare-all --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 --proc /proc --dev /dev /usr/bin/true
       - run: npm test

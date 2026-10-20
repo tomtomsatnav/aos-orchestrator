@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { mkSandbox, ptask, crit, edit, fakeCalls, sleep, procsAlive, HERE } from './helpers.mjs';
+import { mkSandbox, ptask, crit, edit, fakeCalls, sleep, procsAlive, HERE, NO_OS_SANDBOX } from './helpers.mjs';
 import { until, request } from './server-helpers.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
 import { validateBudgetPatch, applyBudgetPatch, goalDirOf, readJSON, loadState, loadHeartbeat, paths, enqueueCommand, lockStatus, describeOwner, DEFAULT_BUDGETS } from '../lib/state.mjs';
@@ -12,7 +12,7 @@ import { readCliToken } from '../server/auth.mjs';
 
 const runCli = (args, env) => new Promise((resolve) => { const c = spawn(process.execPath, [CLI, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] }); let out = ''; let err = ''; c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; }); c.on('close', (code) => resolve({ code, out, err })); });
 const mk = (t, scenario) => { const sb = mkSandbox('aos-sup'); sb.scenario(scenario); t.after(async () => { for (const s of sb.sups || []) await s.stop({ workers: 'kill' }).catch(() => {}); sb.cleanup(); }); return sb; };
-const sup = (sb, o = {}) => { const s = new Supervisor({ orchDir: sb.orch, env: sb.env(), pollMs: 40, intervalMs: 200, scanMs: 60000, engineOpts: { killGraceMs: 300, budgetGraceMs: 400 }, ...o }); (sb.sups ||= []).push(s); return s; };
+const sup = (sb, o = {}) => { const s = new Supervisor({ orchDir: sb.orch, env: sb.env(), pollMs: 40, intervalMs: 200, scanMs: 60000, engineOpts: { killGraceMs: 300, budgetGraceMs: 400, ...(NO_OS_SANDBOX ? { testUnsandboxedChecks: true } : {}) }, ...o }); (sb.sups ||= []).push(s); return s; };
 const plan3 = () => ({ tasks: [ptask('t1', 'a.txt', 'alpha'), ptask('t2', 'b.txt', 'beta'), ptask('t3', 'c.txt', 'gamma')], risks: [] });
 const crit3 = { id: 'c1', text: 'all', check: { argv: ['node', '-e', "const f=require('fs');for(const [n,w] of [['a.txt','alpha'],['b.txt','beta'],['c.txt','gamma']])if(f.readFileSync(n,'utf8').trim()!==w)process.exit(1)"], timeout_s: 30 } };
 const approveWhenReady = async (s, id) => { await until(() => s.state(id).S.goal.orch.plan_state === 'awaiting_approval', { what: `${id} plan` }); await s.approvePlan(id, s.reviewHash(id).combined, 'test'); };

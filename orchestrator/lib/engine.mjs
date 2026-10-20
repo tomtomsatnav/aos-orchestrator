@@ -22,7 +22,7 @@ import { Governor, DEFAULTS as GOV_DEFAULTS, detectLimitFailure, checkBudgets, u
 import { listTestFiles, runnerFor, scopeHitsTests, serverWarnings } from './protect.mjs';
 import { startableTiers, buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHashFor, tasksHashV, reviewView, canonical, sha256 } from './plan.mjs';
 import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
-import { sandboxAvailable, wrapWorkerCommand, SANDBOX_EXEC } from './sandbox.mjs';
+import { sandboxAvailable, workerSandboxAvailable, wrapWorkerCommand, DEFAULT_SANDBOX_BIN } from './sandbox.mjs';
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
 import { buildReport } from './report.mjs';
 import { probeClaudeVersion } from './cli-version.mjs';
@@ -56,7 +56,8 @@ export class Engine {
     this.pid = o.pid ?? process.pid;
     this.spawnFn = o.spawnFn;
     this.slotGate = o.slotGate || null; // supervisor: global worker semaphore {acquire(goalId)->token|null, release(token)}
-    this.sandboxBin = o.sandboxBin || SANDBOX_EXEC; // tests may point this at a missing binary
+    this.testUnsandboxed = o.testUnsandboxedChecks === true; // TEST HARNESS ONLY (hosts without a sandbox): a constructor option, not a goal/CLI/env setting
+    this.sandboxBin = o.sandboxBin || DEFAULT_SANDBOX_BIN; // tests may point this at a missing binary
     this.hookScript = o.hookScript || HOOK_SCRIPT; // tests may substitute a stub hook
     this.workerSandbox = o.workerSandbox || null; // tests: overrides for wrapWorkerCommand (e.g. sysTmp)
     this.ownerLabel = o.ownerLabel || 'run';
@@ -987,7 +988,7 @@ export class Engine {
   async _dispatch(S) {
     const goal = S.goal; const o = goal.orch; const B = o.budgets;
     if (!this._gate?.dispatch) return;
-    if (!o.unsandboxed_checks && !sandboxAvailable({ bin: this.sandboxBin }).ok) {
+    if (!o.unsandboxed_checks && !this.testUnsandboxed && !sandboxAvailable({ bin: this.sandboxBin }).ok) {
       o.halt_reason ??= `OS sandbox unavailable (${sandboxAvailable({ bin: this.sandboxBin }).reason}): checks refuse to run; set orch.unsandboxed_checks=true to override`; o.halt_at_ms ??= this.now();
       return;
     }
@@ -1091,7 +1092,7 @@ export class Engine {
   /** {bin, args, sandboxed}: the worker argv, wrapped in sandbox-exec when the goal sets orch.sandbox_workers (throws if unavailable). */
   _workerCommand(goal, args, env, { worktree, tmpDir, policyFile }) {
     if (!goal.orch.sandbox_workers) return { bin: this.bin, args, sandboxed: false };
-    const av = sandboxAvailable({ bin: this.sandboxBin });
+    const av = workerSandboxAvailable({ bin: this.sandboxBin });
     if (!av.ok) throw new Error(`worker OS sandbox unavailable (${av.reason}): orch.sandbox_workers is set, refusing to start the worker unsandboxed`);
     const w = wrapWorkerCommand([W.resolveBin(this.bin, env.PATH), ...args], { worktree, tmpDir, policyFile, approvalsDir: this.P.approvals,
       decisionLog: path.join(this.P.workers, 'decisions.ndjson'), settingsFile: path.join(this.P.workers, 'settings.json'), hookDir: path.dirname(this.hookScript),
@@ -1102,7 +1103,7 @@ export class Engine {
   _sandboxOpts(goal, wt, name) {
     const o = goal.orch;
     return { sandbox: { worktree: wt, tmpDir: this._tmp(name), goalDir: this.dir, orchDir: this.orchDir, home: this.env.HOME, ports: o.check_localhost_ports || [], loopback: o.allow_loopback === true, profileDir: path.join(this.dir, 'sandbox') },
-      sandboxBin: this.sandboxBin, unsandboxed: o.unsandboxed_checks === true };
+      sandboxBin: this.sandboxBin, unsandboxed: o.unsandboxed_checks === true || this.testUnsandboxed };
   }
   async _hashInstructions(ref) {
     const out = {}; const repo = readJSON(this.P.goal).orch.repo;

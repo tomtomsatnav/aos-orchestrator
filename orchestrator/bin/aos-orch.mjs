@@ -23,6 +23,7 @@ import { q, escCtrl, escBeyondC0 } from '../lib/ctrl.mjs';
 import { draftGoal, renderDraft, PROFILES } from '../lib/draft.mjs';
 import { orchLocation, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
+import { workerSandboxAvailable } from '../lib/sandbox.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
 import { createControlServer, parsePort, DEFAULT_PORT } from '../server/index.mjs';
 import { ensureCliToken, readCliToken, createLoginCode } from '../server/auth.mjs';
@@ -120,6 +121,7 @@ async function main() {
         if (spec._partial) die(`${arg1} is an INCOMPLETE draft (_partial): fix its _errors, then delete the keys starting with "_" before running it`, 64);
         if (flags['trust-repo-config']) spec.orch = { ...(spec.orch || {}), trust_repo_config: true };
         if (flags['unsandboxed-checks']) spec.orch = { ...(spec.orch || {}), unsandboxed_checks: true };
+        if (flags['sandbox-workers'] && process.platform !== 'darwin') die(`--sandbox-workers: ${workerSandboxAvailable().reason}`);
         if (flags['sandbox-workers']) spec.orch = { ...(spec.orch || {}), sandbox_workers: true };
         if (typeof flags['accept-repo-loosening'] === 'string') spec.orch = { ...(spec.orch || {}), accept_repo_loosening: flags['accept-repo-loosening'].split(',').map((x) => x.trim()).filter(Boolean) };
         if (flags['auto-approve']) spec.orch = { ...(spec.orch || {}), approval_policy: { ...(spec.orch?.approval_policy || {}), plan: 'auto' } };

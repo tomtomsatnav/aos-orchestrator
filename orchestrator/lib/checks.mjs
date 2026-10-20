@@ -1,6 +1,6 @@
 // Run a task's (or the goal's) acceptance checks: argv only (no shell), cwd = worktree, minimal env, own timeout,
 // output capped. Commands must match the approved allowlist (the planner cannot add new check commands).
-// Checks execute worker-written code, so by default every check runs under sandbox-exec (lib/sandbox.mjs): no network,
+// Checks execute worker-written code, so by default every check runs under sandbox-exec (macOS) or bubblewrap (Linux) (lib/sandbox.mjs): no network,
 // writes only to the worktree and a private TMPDIR, no reads of secrets or engine state. If the sandbox is unavailable the
 // check is REFUSED unless the caller passes unsandboxed:true (the goal field orch.unsandboxed_checks).
 import fs from 'node:fs';
@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { tokenize } from './shell.mjs';
-import { sandboxAvailable, wrapCommand, SANDBOX_EXEC } from './sandbox.mjs';
+import { sandboxAvailable, wrapCommand, DEFAULT_SANDBOX_BIN } from './sandbox.mjs';
 
 export const OUTPUT_CAP = 64 * 1024;
 
@@ -43,7 +43,7 @@ export function runCheck(check, opts) {
     let child; let bin = check.argv[0]; let args = check.argv.slice(1); let env = opts.env; let ownTmp = null;
     const sandboxed = !opts.unsandboxed;
     if (sandboxed) {
-      const av = sandboxAvailable({ bin: opts.sandboxBin || SANDBOX_EXEC });
+      const av = sandboxAvailable({ bin: opts.sandboxBin || DEFAULT_SANDBOX_BIN });
       if (!av.ok) return resolve({ argv: check.argv, ok: false, exit_code: null, timed_out: false, rejected: true, sandboxed: false, duration_ms: 0,
         output: `sandbox unavailable (${av.reason}): refusing to run a check that executes worker-written code unsandboxed; set orch.unsandboxed_checks=true to override` });
       try {
@@ -51,7 +51,7 @@ export function runCheck(check, opts) {
         cfg.worktree ||= cwd;
         if (!cfg.tmpDir) { cfg.tmpDir = ownTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aos-chk-')); }
         cfg.profileDir ||= profileDirDefault();
-        const w = wrapCommand(check.argv, { ...cfg, bin: opts.sandboxBin || SANDBOX_EXEC });
+        const w = wrapCommand(check.argv, { ...cfg, env: { ...opts.env, TMPDIR: cfg.tmpDir }, bin: opts.sandboxBin || DEFAULT_SANDBOX_BIN });
         bin = w.bin; args = w.args; env = { ...opts.env, TMPDIR: cfg.tmpDir };
       } catch (e) { return resolve({ argv: check.argv, ok: false, exit_code: null, timed_out: false, rejected: true, sandboxed: true, output: `sandbox setup failed: ${e.message}`, duration_ms: 0 }); }
     }

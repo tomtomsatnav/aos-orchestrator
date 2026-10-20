@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/tomtomsatnav/aos-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/tomtomsatnav/aos-orchestrator/actions/workflows/ci.yml)
 
-Describe a change in a sentence. An Opus planner splits it into small tasks, you review the plan, and cheap headless Claude Code workers (Haiku first, Sonnet and Opus only on failure) do the work in isolated git worktrees. Every task is verified by real commands, and the results land on a branch for you to review and merge. Zero npm dependencies, Node 18+, macOS only.
+Describe a change in a sentence. An Opus planner splits it into small tasks, you review the plan, and cheap headless Claude Code workers (Haiku first, Sonnet and Opus only on failure) do the work in isolated git worktrees. Every task is verified by real commands, and the results land on a branch for you to review and merge. Zero npm dependencies, Node 18+, macOS and Linux (bubblewrap); the worker sandbox is macOS-only.
 
 ## Quickstart
 
@@ -29,14 +29,14 @@ Without `npm link` use `node orchestrator/bin/aos-orch.mjs ...` (or `npm link` l
 - Guardrails are enforced outside the model: a policy hook (deny rules, default deny), a per-task `path_scope` that fails any attempt touching other files, and token / time / attempt budgets.
 - Workers never commit or merge. The engine commits onto its own `aos/<goal>/integration` branch, never touches your base branch, never pushes.
 - Plans that contain commands always need your approval, and the approval is bound to a hash of exactly what you read.
-- Acceptance checks run in a deny-default macOS sandbox with no network. Repos that bring their own Claude hooks, MCP servers or permissions are refused.
+- Acceptance checks run in a deny-default sandbox (macOS `sandbox-exec`, Linux bubblewrap) with no network. Repos that bring their own Claude hooks, MCP servers or permissions are refused.
 - The worker `claude` process itself is **not** OS-sandboxed by default (opt in with `--sandbox-workers`; it limits writes only). Run it on a throwaway repo or clone first.
 
 Details and residual risks: [docs/security.md](docs/security.md). Reporting a vulnerability: [SECURITY.md](SECURITY.md).
 
 ## Status
 
-Experimental, macOS only (checks use `sandbox-exec`; the test suite does not pass on Linux). 10 real goals so far: 9 achieved, 1 blocked by a test-setup error. Costs in reports are notional USD (list price, not money spent on a subscription). Everything else is tested against a scripted fake `claude`. A real `claude -p` plan-limit result has never been observed, so the rate-limit handling is keyed on error shapes from interactive transcripts.
+Experimental. Platforms: macOS and Linux (bubblewrap); the opt-in worker sandbox (`--sandbox-workers`) is macOS-only and fails closed on Linux; Windows via WSL is untested. The test suite runs on both (sandbox tests skip where no sandbox works). 10 real goals so far: 9 achieved, 1 blocked by a test-setup error. Costs in reports are notional USD (list price, not money spent on a subscription). Everything else is tested against a scripted fake `claude`. A real `claude -p` plan-limit result has never been observed, so the rate-limit handling is keyed on error shapes from interactive transcripts.
 
 ## Try it without spending tokens
 

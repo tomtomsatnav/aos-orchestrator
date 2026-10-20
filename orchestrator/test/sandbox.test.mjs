@@ -132,7 +132,7 @@ test('sandbox: no path from a user-controlled string is interpolated into the pr
   assert.throws(() => wrapCommand(['-p', 'x'], cfg), /must not start/);
 });
 
-test('sandbox: sandbox-exec missing or failing -> checks REFUSE to run; unsandboxed override runs them and says so', async (t) => {
+test('sandbox: sandbox binary missing or failing -> checks REFUSE to run; unsandboxed override runs them and says so', async (t) => {
   const w = world(); t.after(w.cleanup);
   const marker = path.join(w.wt, 'ran.txt');
   const check = js("require('fs').writeFileSync('ran.txt','1')");
@@ -140,7 +140,8 @@ test('sandbox: sandbox-exec missing or failing -> checks REFUSE to run; unsandbo
   assert.equal(refused.ok, false); assert.equal(refused.rejected, true); assert.match(refused.output, /sandbox unavailable.*refusing to run/); assert.equal(fs.existsSync(marker), false);
   const viaRunChecks = await runChecks([check], w.opts({ sandboxBin: '/nonexistent/sandbox-exec' }));
   assert.equal(viaRunChecks.ok, false); assert.equal(fs.existsSync(marker), false);
-  assert.equal(sandboxAvailable({ platform: 'linux', fresh: true }).ok, false); assert.match(sandboxAvailable({ platform: 'linux' }).reason, /macOS only/);
+  assert.equal(sandboxAvailable({ platform: 'win32', fresh: true }).ok, false); assert.match(sandboxAvailable({ platform: 'win32' }).reason, /no OS sandbox for platform win32/);
+  assert.equal(sandboxAvailable({ platform: 'linux', bin: '/nonexistent/bwrap', fresh: true }).ok, false); assert.match(sandboxAvailable({ platform: 'linux', bin: '/nonexistent/bwrap' }).reason, /bwrap/);
   const open = await runCheck(check, w.opts({ sandboxBin: '/nonexistent/sandbox-exec', unsandboxed: true }));
   assert.equal(open.ok, true, open.output); assert.equal(open.sandboxed, false); assert.equal(fs.existsSync(marker), true);
 });

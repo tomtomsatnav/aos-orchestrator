@@ -2,7 +2,7 @@
 
 What the orchestrator enforces, what it does not, and the residual risks. The short version is in the [README](../README.md#safety); how to report a vulnerability is in [SECURITY.md](../SECURITY.md).
 
-**Run it on throwaway repos or clones first.** The orchestrator launches real `claude` workers that can edit files in your repo, and its guardrails are defense in depth, not a proof. All of this applies to macOS only (checks run under `sandbox-exec`).
+**Run it on throwaway repos or clones first.** The orchestrator launches real `claude` workers that can edit files in your repo, and its guardrails are defense in depth, not a proof. Platforms: macOS (`sandbox-exec`) and Linux (bubblewrap) for acceptance checks; the opt-in worker sandbox is macOS-only. See "Platform sandbox notes" at the end.
 
 ## The five protections in one paragraph
 
@@ -39,14 +39,16 @@ Enforced by code and covered by tests:
 4. **Checks are sandboxed** (`lib/sandbox.mjs`, macOS `sandbox-exec`, deny-default profile written to `<goal>/sandbox/`). A check may read
    system and toolchain locations (`/usr /bin /sbin /System /Library /opt/homebrew`, the node install prefix, `~/.npm`), its worktree and its
    private TMPDIR (`<goal>/tmp/<task>/check-N`, removed afterwards); it may write only the worktree, that TMPDIR and `/dev/null`; all
-   network is denied (loopback only for `orch.check_localhost_ports`); reads of `~/.ssh ~/.aws ~/.config ~/.claude ~/.gnupg`, keychains,
+   network is denied (loopback only for `orch.check_localhost_ports`, or any loopback port with `checks.allow_loopback`); reads of `~/.ssh ~/.aws ~/.config ~/.claude ~/.gnupg`, keychains,
    shell history, other worktrees and the engine's goal/approvals/policy directories are denied. Paths reach the profile only as `-D`
    parameters through `execFile` (the profile text is static). If `sandbox-exec` is missing or fails its probe, checks are refused and
-   the goal blocks before dispatch unless `orch.unsandboxed_checks` is set (recorded, warned, event-logged).
+   the goal blocks before dispatch unless `orch.unsandboxed_checks` is set (recorded, warned, event-logged). Linux uses bubblewrap instead
+   (see "Platform sandbox notes").
 5. **Opt-in worker sandbox** (`orch.sandbox_workers: true` or `aos-orch run goal.json --sandbox-workers`; default OFF, behaviour
    unchanged). The planner and every task worker are launched as `sandbox-exec -f <goal>/sandbox/worker-<hash>.sb -D ... claude -p ...`
    (`wrapWorkerCommand` in `lib/sandbox.mjs`; static deny-default profile, paths only as `-D` parameters). If `sandbox-exec` is missing
    or fails its probe, no worker starts (the dispatch fails and the goal halts); it never falls back to unsandboxed.
+   **Linux: not supported.** `--sandbox-workers` / `orch.sandbox_workers` FAIL CLOSED there (the CLI exits with an error, no worker starts).
    `orch.worker.started` events and `<task>.<n>.pid.json` carry `sandboxed: true|false`.
    - **Writes allowed only to:** the task worktree; `<goal>/tmp/<task>` (the worker's TMPDIR); `<goal>/approvals/` and
      `<goal>/workers/decisions.ndjson` (the policy hook runs inside the sandbox and writes them); the Claude files a `claude -p` run
@@ -102,3 +104,23 @@ Residual risks (honest list):
 - macOS-version quirks seen on macOS 27 (Darwin 27.0.0): the profile needs `process-exec*`, `process-fork` and read access to the node
   prefix; node aborts at startup if its current directory is not readable (cwd must be inside the allowed worktree); the symlinked
   `/tmp` and `/var` must be passed as real paths (the builder resolves them).
+
+## Platform sandbox notes
+
+- **macOS:** acceptance checks run under `sandbox-exec` (deny-default profile); `--sandbox-workers` can also sandbox workers.
+- **Linux:** acceptance checks run under bubblewrap (`bwrap`, install `bubblewrap`). Instead of a deny-default profile it builds a fresh mount
+  namespace containing only read-only `/usr /bin /sbin /lib*` and a short `/etc` allow-list, the node prefix, `~/.npm` (read-only), the
+  worktree and the private TMPDIR (read-write) and a tmpfs `/tmp`; the root is remounted read-only. HOME, secrets, other worktrees and engine
+  state do not exist inside it. `--unshare-all` (including network), `--die-with-parent`, `--new-session`, `--clearenv` plus the caller's
+  minimal env.
+  - **Loopback:** the check gets a private network namespace with only its own loopback up. `checks.allow_loopback` is therefore satisfied by
+    construction (a check can start a server and talk to it), with no access to the host's loopback or anything else. Unlike macOS,
+    `orch.check_localhost_ports` cannot open specific HOST ports (bwrap shares the whole host network or none; we choose none), so named ports are ignored.
+  - Writes to `/tmp` and to parent directories of the binds succeed but land in a private tmpfs and vanish.
+  - The startup probe runs the real flags once, so hosts that forbid unprivileged user namespaces (some containers, Ubuntu 24.04 with
+    `kernel.apparmor_restrict_unprivileged_userns=1`) count as "sandbox unavailable".
+  - `--sandbox-workers` is **not supported on Linux and fails closed** (a bwrap equivalent was not validated against a real `claude`).
+  - Verified with the full test suite in Docker (Node 18 and 22, privileged container because bwrap needs user namespaces); CI runs it on ubuntu-latest.
+- **No sandbox available** (neither tool works): checks are refused and the goal blocks. Only an explicit `--unsandboxed-checks` /
+  `orch.unsandboxed_checks` runs worker-written code unsandboxed, with a loud warning and an `orch.sandbox.disabled` event.
+- Windows is untested (WSL2 with bubblewrap should behave like Linux, unverified).

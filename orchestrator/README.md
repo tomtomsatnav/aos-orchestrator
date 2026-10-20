@@ -5,7 +5,7 @@ New here? Start with the top-level [README](../README.md): the three-command qui
 A deterministic engine that turns one human-written Goal into merge-ready work on a git branch. Design:
 [docs/orchestrator-design.md](../docs/orchestrator-design.md). Verified CLI facts: [spike/README.md](spike/README.md).
 The engine is tested against a scripted fake `claude`, which uses zero plan tokens; it has zero npm dependencies
-(Node 18+, macOS first).
+(Node 18+; macOS and Linux).
 
 ## How it works
 
@@ -173,7 +173,7 @@ idempotent ticks, rate-limit pause/resume and the utilisation reserve (injected 
 after grace), wall-clock kill with SIGKILL escalation, parallelism cap and scope overlap, crash/resume (re-adopt, lost
 worker), cancel/kill switch, pause/resume, locking, policy hook (table-driven plus real runs), approvals (granted, timeout
 = deny, expiry), scope violation, merge conflict, worker command line and env, event-log validity; `hardening.test.mjs` (no code execution via the allowlist, hostile repo configs,
-CLAUDE.md hash, plan approval gate and hash binding) and `sandbox.test.mjs` (macOS only, skipped elsewhere: write/read/network
+CLAUDE.md hash, plan approval gate and hash binding) and `sandbox-linux.test.mjs` (bubblewrap checks, fail-closed worker sandbox off macOS; skips where bwrap cannot run) and `sandbox.test.mjs` (macOS only, skipped elsewhere: write/read/network
 denials with canary files, private TMPDIR, timeouts, output cap, static profile with hostile worktree paths, refusal without the sandbox) and `worker-sandbox.test.mjs` (macOS only: worker
 profile write allow/deny matrix with `/bin/sh` probes, engine and CLI `--sandbox-workers` with the fake claude and an allow-all hook
 proving a shell write to the main repo fails, refusal without `sandbox-exec`).

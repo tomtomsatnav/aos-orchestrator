@@ -12,7 +12,7 @@ import { buildWorkerPrompt, WORKER_RULES, buildArgs, buildEnv, StreamTail, build
 import { runCheck, runChecks, commandAllowed } from '../lib/checks.mjs';
 import { appendEvent, readEvents, atomicWrite, readJSON, normalizeGoalSpec, orchRoot, orchLocation, enqueueCommand, drainCommands } from '../lib/state.mjs';
 import { validateEvent, validateGoal } from '../lib/schema.mjs';
-import { mkSandbox, ptask } from './helpers.mjs';
+import { mkSandbox, ptask, NO_OS_SANDBOX } from './helpers.mjs';
 import { spawn } from 'node:child_process';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'aos-unit-'));
@@ -212,20 +212,20 @@ test('worker: killGroup terminates a detached process group, escalating to SIGKI
 test('checks: argv only, timeout kills the group, output capped, allowlist by argv prefix', async () => {
   const dir = tmp(); const env = { PATH: process.env.PATH };
   try {
-    assert.equal((await runCheck({ argv: ['node', '-e', 'console.log("hi")'], timeout_s: 10 }, { cwd: dir, env })).ok, true);
-    const bad = await runCheck({ argv: ['node', '-e', 'console.error("boom");process.exit(3)'], timeout_s: 10 }, { cwd: dir, env });
+    assert.equal((await runCheck({ argv: ['node', '-e', 'console.log("hi")'], timeout_s: 10 }, { cwd: dir, env, unsandboxed: NO_OS_SANDBOX })).ok, true);
+    const bad = await runCheck({ argv: ['node', '-e', 'console.error("boom");process.exit(3)'], timeout_s: 10 }, { cwd: dir, env, unsandboxed: NO_OS_SANDBOX });
     assert.equal(bad.ok, false); assert.equal(bad.exit_code, 3); assert.match(bad.output, /boom/);
-    const slow = await runCheck({ argv: ['node', '-e', "require('child_process').spawn('sleep',['30']);setInterval(()=>{},1000)"], timeout_s: 0.5 }, { cwd: dir, env });
+    const slow = await runCheck({ argv: ['node', '-e', "require('child_process').spawn('sleep',['30']);setInterval(()=>{},1000)"], timeout_s: 0.5 }, { cwd: dir, env, unsandboxed: NO_OS_SANDBOX });
     assert.equal(slow.timed_out, true); assert.equal(slow.ok, false);
-    const big = await runCheck({ argv: ['node', '-e', 'process.stdout.write("x".repeat(300000))'], timeout_s: 10 }, { cwd: dir, env });
+    const big = await runCheck({ argv: ['node', '-e', 'process.stdout.write("x".repeat(300000))'], timeout_s: 10 }, { cwd: dir, env, unsandboxed: NO_OS_SANDBOX });
     assert.ok(big.output.length < 70000 && /truncated/.test(big.output));
-    assert.equal((await runCheck({ argv: ['/nonexistent/bin'], timeout_s: 5 }, { cwd: dir, env })).ok, false);
-    const shellish = await runCheck({ argv: ['echo', 'a;touch pwned'], timeout_s: 5 }, { cwd: dir, env });
+    assert.equal((await runCheck({ argv: ['/nonexistent/bin'], timeout_s: 5 }, { cwd: dir, env, unsandboxed: NO_OS_SANDBOX })).ok, false);
+    const shellish = await runCheck({ argv: ['echo', 'a;touch pwned'], timeout_s: 5 }, { cwd: dir, env, unsandboxed: NO_OS_SANDBOX });
     assert.equal(fs.existsSync(path.join(dir, 'pwned')), false); assert.match(shellish.output, /a;touch pwned/);
     const r = await runChecks([{ argv: ['rm', '-rf', 'x'], timeout_s: 5 }], { cwd: dir, env, allowlist: ['node'] }); assert.equal(r.ok, false); assert.equal(r.results[0].rejected, true);
     assert.equal(commandAllowed(['make', 'test', '-j2'], ['make test']), true); assert.equal(commandAllowed(['make', 'install'], ['make test']), false);
     assert.equal(commandAllowed(['/usr/bin/make', 'test'], ['make test']), true); assert.equal(commandAllowed(['x'], null), false); assert.equal(commandAllowed([], ['x']), false);
-    assert.equal((await runChecks([{ argv: ['node', '-e', '0'], timeout_s: 5 }, { argv: ['node', '-e', 'process.exit(1)'], timeout_s: 5 }, { argv: ['node', '-e', '0'], timeout_s: 5 }], { cwd: dir, env })).results.length, 2, 'stops at the first failure');
+    assert.equal((await runChecks([{ argv: ['node', '-e', '0'], timeout_s: 5 }, { argv: ['node', '-e', 'process.exit(1)'], timeout_s: 5 }, { argv: ['node', '-e', '0'], timeout_s: 5 }], { cwd: dir, env, unsandboxed: NO_OS_SANDBOX })).results.length, 2, 'stops at the first failure');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

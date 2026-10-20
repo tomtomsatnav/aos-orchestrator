@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { mkSandbox, ptask, crit, edit, HERE } from './helpers.mjs';
+import { mkSandbox, ptask, crit, edit, HERE, NO_OS_SANDBOX } from './helpers.mjs';
 import { paths, readJSON } from '../lib/state.mjs';
 
 const CLI = path.join(HERE, '..', 'bin', 'aos-orch.mjs');
@@ -18,7 +18,7 @@ test('cli: run <goal.json> to completion, then status / queued commands operate 
   const sb = mkSandbox(); t.after(() => sb.cleanup());
   sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [edit('a.txt', 'alpha')] } });
   const spec = { id: 'g-cli', title: 'CLI goal', success_criteria: [crit('a.txt', 'alpha')], budget: { max_ticks: 1000, max_usd: 5, max_wall_clock_s: 600 },
-    orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
+    orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'], ...(NO_OS_SANDBOX ? { unsandboxed_checks: true } : {}) } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec));
   const env = sb.env();
 
@@ -43,7 +43,7 @@ test('cli: --auto-approve runs plan-to-report without a gate; cancel from anothe
   // --auto-approve only applies to plans without commands: a read-only grep check is on the engine's vetted list (node/make are not)
   const safe = { ...ptask('t1', 'a.txt', 'alpha'), checks: [{ argv: ['grep', '-qx', 'alpha', 'a.txt'], timeout_s: 30 }] };
   sb.scenario({ planner: { behavior: 'success', plan: { tasks: [safe] } }, tasks: { t1: [{ behavior: 'hang' }] } });
-  const spec = { id: 'g-cli2', title: 'CLI goal 2', success_criteria: [crit('a.txt', 'alpha')], orch: { repo: sb.repo, check_allowlist: ['grep'] } };
+  const spec = { id: 'g-cli2', title: 'CLI goal 2', success_criteria: [crit('a.txt', 'alpha')], orch: { ...(NO_OS_SANDBOX ? { unsandboxed_checks: true } : {}), repo: sb.repo, check_allowlist: ['grep'] } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec));
   const env = sb.env();
   const running = run(['run', gf, '--auto-approve', '--poll-ms', '50', '--interval-s', '0.2'], env);
