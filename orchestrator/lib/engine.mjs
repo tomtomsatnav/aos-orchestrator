@@ -27,6 +27,7 @@ import { listApprovals, expireDue, readApproval } from './approvals.mjs';
 import { buildReport } from './report.mjs';
 import { probeClaudeVersion } from './cli-version.mjs';
 import { runAdvisoryReview } from './review.mjs';
+import * as HG from './harness-guard.mjs';
 import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath } from './anticheat.mjs';
 import { isTestPath } from './protect.mjs';
 
@@ -708,8 +709,11 @@ export class Engine {
       this.ev('orch.policy.denied', 'orchestrator', task.id, { attempt: entry.n, denials: task.orch.last_denials });
       return this._failAttempt(S, task, entry, 'denied', { escalate: true, note: `denied tool calls: ${task.orch.last_denials.join(', ')}` });
     }
+    const tam = checks.results.find((r) => r.harness_tamper);
+    if (tam) { this.ev('orch.anticheat.failed', 'orchestrator', task.id, { kind: 'harness_tamper', attempt: entry.n, reason: tam.harness_problems.slice(0, 3).join(' | ').slice(0, 200) }); entry.anticheat = attemptRecord({ findings: entry.anticheat?.findings || [], failed: 'harness_tamper' }); return this._failAttempt(S, task, entry, 'harness_tamper', { escalate: true, note: `anti-cheat harness_tamper: ${tam.harness_problems.slice(0, 3).join(' | ')}`.slice(0, 300) }); }
+    for (const r of checks.results) if (r.harness_problems && !r.harness_tamper) this.ev('orch.anticheat.warning', 'orchestrator', task.id, { attempt: entry.n, kinds: ['harness_tamper'], detail: r.harness_problems.slice(0, 2).join(' | ').slice(0, 200) });
     if (!checks.ok) return this._failAttempt(S, task, entry, 'check_failed', { escalate: true, check_output: tail(last?.output || '', 4096) });
-    const vac = this._judgeChecks(S.goal, checks.results, entry);
+    const vac = this._judgeChecks(S.goal, checks.results, entry, task);
     if (vac) return this._failAttempt(S, task, entry, vac.kind, { escalate: true, note: `anti-cheat ${vac.kind}: ${vac.reason}`.slice(0, 300) });
 
     task.orch.phase = 'integrating'; saveState(this.dir, S);
@@ -732,7 +736,7 @@ export class Engine {
     this.ev('orch.integrate.merged', 'orchestrator', task.id, { sha: m.sha, branch: task.orch.branch });
     if (task.orch.role === 'acceptance') { // these test files are now read-only for every other task and re-run from this commit at verify
       const A = this._anti(goal); A.acceptance ||= { items: [] };
-      A.acceptance.items = A.acceptance.items.filter((i) => i.task !== task.id); A.acceptance.items.push({ task: task.id, files: ac.acceptFiles, commit: m.sha });
+      A.acceptance.items = A.acceptance.items.filter((i) => i.task !== task.id); A.acceptance.items.push({ task: task.id, files: ac.acceptFiles, commit: m.sha, counts: await this._acceptanceCounts(goal, wt, ac.acceptFiles) });
       this.ev('orch.anticheat.acceptance', 'orchestrator', task.id, { files: ac.acceptFiles.slice(0, 20), commit: m.sha.slice(0, 12) });
     }
     this.ev('task.completed', task.assignee, task.id, { result: task.orch.result_summary.slice(0, 200), tier: entry.tier, attempts: task.attempts });
@@ -753,11 +757,13 @@ export class Engine {
       else if (c.check) {
         const r = await runCheck({ ...c.check, argv: forceTapArgv(c.check.argv) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('criteria') }), ...this._sandboxOpts(goal, wt, 'criteria') });
         r.argv = c.check.argv;
+        if (r.harness_tamper) { r.output = `ANTI-CHEAT harness_tamper: ${r.harness_problems.slice(0, 3).join(' | ')}\n${r.output}`; (this._anti(goal).criteria ||= {})[c.id] = { kind: 'harness_tamper', reason: r.harness_problems.slice(0, 3).join(' | ').slice(0, 300) }; this.ev('orch.anticheat.failed', 'orchestrator', null, { kind: 'harness_tamper', criterion: c.id, reason: r.harness_problems.slice(0, 2).join(' | ').slice(0, 200) }); }
         if (r.ok) { // a criterion that "passes" by running no / only skipped tests, or fewer tests than the base commit, is not met
-          const v = judgeRun(r.argv, parseTestSummary(r.summary_text ?? r.output), this._anti(goal).baselines?.[checkKey(r.argv)]);
+          const bl = this._anti(goal).baselines?.[checkKey(r.argv)]; let v = judgeRun(r.argv, parseTestSummary(r.summary_text ?? r.output), bl);
+          if (v.ok) v = HG.judgePerFile(bl?.files, r.test_files);
           if (!v.ok) { r.ok = false; r.output = `ANTI-CHEAT ${v.kind}: ${v.reason}\n${r.output}`; (this._anti(goal).criteria ||= {})[c.id] = { kind: v.kind, reason: v.reason }; this.ev('orch.anticheat.failed', 'orchestrator', null, { kind: v.kind, reason: v.reason.slice(0, 200), criterion: c.id }); }
         }
-        delete r.summary_text; results[c.id] = r; met = r.ok;
+        delete r.summary_text; delete r.test_files; results[c.id] = r; met = r.ok;
       }
       else if (Array.isArray(c.requires) && c.requires.length) met = c.requires.every((id) => S.tasks.find((t) => t.id === id)?.status === 'done');
       else met = allDone;
@@ -915,6 +921,7 @@ export class Engine {
   async _planWarnings(goal, tasks) {
     const o = goal.orch; const w = {}; const add = (k, m) => { (w[k] ||= []).push(m); };
     const prot = o.protected_tests?.files || [];
+    if (o.acceptance_first === true && !goal.success_criteria.some((c) => c.check)) add('goal', 'checks.acceptance_first is on but NO success criterion has a check, so no acceptance tests are required for this goal (the rule applies only to goals with a code criterion). Add a criterion with a check, or accept that nothing is written test-first.');
     for (const t of tasks) {
       const hit = scopeHitsTests(t.path_scope, prot);
       if (hit.length) add(t.id, `path_scope includes EXISTING test file(s) ${hit.slice(0, 5).join(', ')}${hit.length > 5 ? ` (+${hit.length - 5})` : ''}. Existing tests must stay unchanged: the originals from the base commit are re-run at verify and the goal cannot be achieved if one fails. Approve only if modifying them is really intended.`);
@@ -948,7 +955,9 @@ export class Engine {
         const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('protected') }), ...this._sandboxOpts(goal, wt, 'protected') });
         res.ok = r.ok; if (!r.ok) res.output = tail(r.output || '', 2000);
         const sm = parseTestSummary(r.summary_text ?? r.output);
-        if (r.ok && !(sm && sm.tests > 0 && sm.pass > 0)) { res.ok = false; res.output = `anti-cheat: the original tests ran ${sm ? `${sm.tests} test(s) of which ${sm.pass} passed` : 'with no countable test summary'}`; }
+        if (r.harness_tamper) { res.ok = false; res.kind = 'harness_tamper'; res.output = `anti-cheat harness_tamper: ${r.harness_problems.slice(0, 3).join(' | ')}`.slice(0, 600); }
+        else if (r.ok && !(sm && sm.tests > 0 && sm.pass > 0)) { res.ok = false; res.output = `anti-cheat: the original tests ran ${sm ? `${sm.tests} test(s) of which ${sm.pass} passed` : 'with no countable test summary'}`; }
+        else if (r.ok) { const v = HG.judgePerFile(this._anti(goal).protected_counts?.files, r.test_files); if (!v.ok) { res.ok = false; res.kind = v.kind; res.output = `anti-cheat ${v.kind}: ${v.reason}`; } }
       } catch (e) { res.ok = false; res.output = `could not run the original tests: ${String(e.message).slice(0, 300)}`; } finally { await G.discardChanges(wt).catch(() => {}); }
     }
     o.protected_result = res;
@@ -981,13 +990,35 @@ export class Engine {
       try {
         const r = await runCheck({ argv: forceTapArgv(c.argv), timeout_s: Math.min(c.timeout_s || 300, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('baseline') }), ...this._sandboxOpts(goal, wt, 'baseline') });
         const sm = r.rejected ? null : parseTestSummary(r.summary_text ?? r.output);
-        if (sm) b = { tests: sm.tests, pass: sm.pass, source: 'run' };
+        if (sm) b = { tests: sm.tests, pass: sm.pass, skipped: sm.skipped, todo: sm.todo, source: 'run', ...(r.test_files ? { files: HG.compactFiles(r.test_files) } : {}) };
       } catch { /* static fallback */ } finally { await G.discardChanges(wt).catch(() => {}); }
       if (!b) { files ||= await this._readTestFiles(wt); b = { tests: staticTestCount(c.argv, files), source: 'static' }; }
       A.baselines[key] = { ...b, at: iso(this.now()) };
     }
+    await this._ensureProtectedCounts(S, wt);
     this.ev('orch.anticheat.baseline', 'orchestrator', null, { checks: Object.entries(A.baselines).slice(0, 20).map(([k, b]) => ({ check: k.slice(0, 120), tests: b.tests, source: b.source })) });
     saveState(this.dir, S);
+  }
+
+  /** Per-file test counts of the protected (existing) test files on the base commit: the integration branch IS the base commit here. */
+  async _ensureProtectedCounts(S, wt) {
+    const goal = S.goal; const o = goal.orch; const A = this._anti(goal);
+    const { js } = runnerFor(o.protected_tests?.files || []);
+    if (!js.length || A.protected_counts) return;
+    try {
+      const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('baseline') }), ...this._sandboxOpts(goal, wt, 'baseline') });
+      if (r.test_files) A.protected_counts = { files: HG.compactFiles(r.test_files), at: iso(this.now()) };
+    } catch { /* no per-file counts: the total-count rules still apply */ } finally { await G.discardChanges(wt).catch(() => {}); }
+  }
+
+  /** Per-file test counts of an acceptance task's files, from the attempt worktree (== the committed version). null when they cannot be counted. */
+  async _acceptanceCounts(goal, wt, files) {
+    const { js } = runnerFor(files || []);
+    if (!js.length) return null;
+    try {
+      const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('acceptance') }), ...this._sandboxOpts(goal, wt, 'acceptance') });
+      return r.test_files ? HG.compactFiles(r.test_files) : null;
+    } catch { return null; }
   }
 
   /** Diff-based rules for one attempt. Sets entry.anticheat. -> {fail?: finding, note?, acceptFiles[]}. */
@@ -999,7 +1030,7 @@ export class Engine {
       const accTasks = S.tasks.filter((t) => t.orch.role === 'acceptance');
       const items = o.anticheat?.acceptance?.items || [];
       const ctx = { path_scope: task.orch.path_scope, allow_skip: task.orch.allow_skip || [], checks: [...task.orch.checks.map((c) => c.argv), ...goal.success_criteria.filter((c) => c.check).map((c) => c.check.argv)],
-        acceptance: accTasks.length ? { files: items.flatMap((i) => i.files), scopes: accTasks.flatMap((t) => t.orch.path_scope) } : null, is_acceptance: task.orch.role === 'acceptance', literal_copy: o.literal_copy === 'fail' ? 'fail' : 'warn' };
+        acceptance: accTasks.length ? { files: items.flatMap((i) => i.files), scopes: accTasks.flatMap((t) => t.orch.path_scope) } : null, is_acceptance: task.orch.role === 'acceptance', literal_copy: o.literal_copy === 'fail' ? 'fail' : 'warn', harness_tamper: o.harness_tamper === 'warn' ? 'warn' : 'fail' };
       const io = { before: async (p) => { if (!base) return null; const b = await G.showBlob(o.repo, base, p).catch(() => null); return b ? b.toString('utf8') : null; },
         after: async (p) => { try { return fs.readFileSync(path.join(wt, p), 'utf8'); } catch { return null; } }, tests: () => this._readTestFiles(wt) };
       const { findings } = await analyzeDiff(files, ctx, io);
@@ -1025,11 +1056,12 @@ export class Engine {
   }
 
   /** Judge the (passing) check results of an attempt: 0 tests, only skipped tests, fewer tests than the base commit. -> {kind, reason} for the first bad result, else null. */
-  _judgeChecks(goal, results, entry) {
+  _judgeChecks(goal, results, entry, task) {
     const A = this._anti(goal); const tests = []; let bad = null;
     for (const r of results) {
       const sm = parseTestSummary(r.summary_text ?? r.output); const b = A.baselines?.[checkKey(r.argv)];
-      const v = judgeRun(r.argv, sm, b);
+      let v = judgeRun(r.argv, sm, b, { allowSkip: !!task?.orch.allow_skip?.length });
+      if (v.ok) v = HG.judgePerFile(b?.files, r.test_files);
       if (sm) tests.push({ check: checkKey(r.argv).slice(0, 120), tests: sm.tests, pass: sm.pass, skipped: sm.skipped, todo: sm.todo, baseline: b ? b.tests : null });
       if (!v.ok && !bad) bad = { kind: v.kind, reason: v.reason };
     }
@@ -1046,16 +1078,19 @@ export class Engine {
     const wt = this._integrationWt(goal);
     const files = []; for (const i of A.acceptance.items) for (const f of i.files) files.push({ f, commit: i.commit });
     const js = files.filter((x) => /\.(m?js|cjs)$/.test(x.f));
+    let lastFiles = null;
     const res = { ok: true, files: js.length, not_executed: files.filter((x) => !js.includes(x)).map((x) => x.f).slice(0, 20), at: iso(this.now()) };
     try {
       for (const { f, commit } of js) { const b = await G.showBlob(o.repo, commit, f); if (b) { fs.mkdirSync(path.dirname(path.join(wt, f)), { recursive: true }); fs.writeFileSync(path.join(wt, f), b); } }
       if (js.length) {
         const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js.map((x) => x.f)]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('acceptance') }), ...this._sandboxOpts(goal, wt, 'acceptance') });
-        const sm = parseTestSummary(r.summary_text ?? r.output); res.tests = sm ? sm.tests : null;
+        const sm = parseTestSummary(r.summary_text ?? r.output); res.tests = sm ? sm.tests : null; lastFiles = r.test_files || null;
         res.ok = r.ok; if (!r.ok) res.output = tail(r.output || '', 2000);
+        else if (r.harness_tamper) { res.ok = false; res.kind = 'harness_tamper'; res.output = `anti-cheat harness_tamper: ${r.harness_problems.slice(0, 3).join(' | ')}`.slice(0, 600); }
         else if (!(sm && sm.tests > 0 && sm.pass > 0)) { res.ok = false; res.output = `anti-cheat: the acceptance tests ran ${sm ? `${sm.tests} test(s) of which ${sm.pass} passed` : 'with no countable test summary'}`; }
       }
     } catch (e) { res.ok = false; res.output = `could not run the acceptance tests: ${String(e.message).slice(0, 300)}`; } finally { await G.discardChanges(wt).catch(() => {}); }
+    if (res.ok && lastFiles) for (const i of A.acceptance.items) { const v = HG.judgePerFile(i.counts, lastFiles); if (!v.ok) { res.ok = false; res.kind = v.kind; res.output = `anti-cheat ${v.kind}: ${v.reason}`; break; } }
     A.acceptance_result = res;
     this.ev('orch.anticheat.acceptance', 'orchestrator', null, { ok: res.ok, files: res.files, tests: res.tests ?? null, rerun: true });
     saveState(this.dir, S);
@@ -1244,7 +1279,7 @@ export class Engine {
   _sandboxOpts(goal, wt, name) {
     const o = goal.orch;
     return { sandbox: { worktree: wt, tmpDir: this._tmp(name), goalDir: this.dir, orchDir: this.orchDir, home: this.env.HOME, ports: o.check_localhost_ports || [], loopback: o.allow_loopback === true, profileDir: path.join(this.dir, 'sandbox') },
-      sandboxBin: this.sandboxBin, unsandboxed: o.unsandboxed_checks === true || this.testUnsandboxed };
+      sandboxBin: this.sandboxBin, unsandboxed: o.unsandboxed_checks === true || this.testUnsandboxed, harnessMode: o.harness_tamper === 'warn' ? 'warn' : 'fail' };
   }
   async _hashInstructions(ref) {
     const out = {}; const repo = readJSON(this.P.goal).orch.repo;

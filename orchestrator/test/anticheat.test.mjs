@@ -123,7 +123,7 @@ test('a) vacuous: every test skipped is a failed check even when the plan approv
 
 test('a) vacuous: fewer tests than the base commit (3 -> 1, no skip, no delete) is tests_reduced; the baseline was recorded by RUNNING the check on the base commit', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup()); commit(sb, { 'test/base.test.mjs': THREE });
-  sb.scenario({ tasks: { t1: [step([B(), ['test/base.test.mjs', REAL_TEST]]), step([B(), ['test/base.test.mjs', THREE], ['test/more.test.mjs', REAL_TEST]])] } });
+  sb.scenario({ tasks: { t1: [step([B(), ['test/base.test.mjs', `${HEAD}test('merged', () => { assert.ok(true); assert.ok(true); assert.ok(true); });\n`]]), step([B(), ['test/base.test.mjs', THREE], ['test/more.test.mjs', REAL_TEST]])] } });
   const { dir } = await sb.goal({ success_criteria: [crit('b.txt', 'beta')], plan: onePlan(T('t1', { scope: ['b.txt', 'test/*.test.mjs'], checks: [NT('test/*.test.mjs')] })) });
   await drive(sb.engine(dir));
   const g = goalOf(dir); assert.equal(g.status, 'achieved');
@@ -135,7 +135,7 @@ test('a) vacuous: fewer tests than the base commit (3 -> 1, no skip, no delete) 
 test('a) vacuous: a success criterion that passes by running no test is not met (blocked, recorded under anticheat.criteria)', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup()); commit(sb, { 'test/empty.test.mjs': HEAD });
   sb.scenario({ tasks: { t1: [step([B()])] } });
-  const { dir } = await sb.goal({ success_criteria: [{ id: 'c1', text: 'tests pass', check: NT('test/empty.test.mjs') }], plan: onePlan(T('t1', { scope: ['b.txt'], checks: [{ argv: ['grep', '-qx', 'beta', 'b.txt'], timeout_s: 30 }] })) });
+  const { dir } = await sb.goal({ ...rules({ protect_existing_tests: false }), success_criteria: [{ id: 'c1', text: 'tests pass', check: NT('test/empty.test.mjs') }], plan: onePlan(T('t1', { scope: ['b.txt'], checks: [{ argv: ['grep', '-qx', 'beta', 'b.txt'], timeout_s: 30 }] })) });
   await drive(sb.engine(dir));
   const g = goalOf(dir); assert.equal(g.status, 'blocked'); assert.match(g.blocked_reason, /criteria not met: c1/);
   assert.equal(g.orch.anticheat.criteria.c1.kind, 'vacuous_pass');
