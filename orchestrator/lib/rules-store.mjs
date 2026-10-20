@@ -2,9 +2,13 @@
 // and builds the summary the approval screens show. rules.mjs stays pure.
 import fs from 'node:fs';
 import path from 'node:path';
+import { evaluate } from './policy.mjs';
+import { escCtrl } from './ctrl.mjs';
 import { DEFAULT_RULES, valueAt, validateRules, policyToRules, goalLegacyRules, compileRules, buildRulesSnapshot, snapshotHash, summarizeRules, renderRulesSummary } from './rules.mjs';
 import { sha256, canonical } from './plan.mjs';
 import { readJSON, paths } from './state.mjs';
+import { worktreeRootFor } from './git.mjs';
+import { realpathDeepest } from './policy-hook.mjs';
 
 export const MAX_RULES_FILE = 64 * 1024;
 export const REPO_RULES_PATH = '.aos/rules.json';
@@ -130,4 +134,46 @@ export function renderRulesFor(dir, goal) {
   const sm = readRulesSummary(dir, goal);
   if (!sm) return 'rules: not snapshotted yet (the engine compiles them when it first loads the goal)';
   return sm.tampered ? `RULES TAMPERED: the rules snapshot no longer matches goal.json (${sm.rules_hash}); do not approve` : renderRulesSummary(sm);
+}
+
+// ---------------------------------------------------------------- R10: `aos-orch rules ...`
+/** `rules show` without a goal: the default rules overlaid with the user layer ($AOS_ORCH_DIR/rules.json or the legacy policy file), as the approval screens print them. */
+export function renderUserRules(orchDir) {
+  const u = readUserLayer(orchDir);
+  if (u.errors.length) return { ok: false, text: `user rules are INVALID: ${u.errors.slice(0, 5).map(escCtrl).join('; ')}` };
+  const layers = u.layer ? [u.layer] : [];
+  const comp = compileRules(layers);
+  if (!comp.ok) return { ok: false, text: `user rules are INVALID: ${comp.errors.slice(0, 5).map(escCtrl).join('; ')}` };
+  return { ok: true, text: renderRulesSummary(summarizeRules(buildRulesSnapshot(comp, layers))) };
+}
+
+/** `rules check <file>`: validate a rules file as a layer and show what it would change. {ok, errors[], text} */
+export function checkRulesFile(file, layer = 'user') {
+  if (!['user', 'repo', 'goal'].includes(layer)) return { ok: false, errors: [`--layer must be user, repo or goal`], text: '' };
+  let text; try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return { ok: false, errors: [`cannot read ${escCtrl(file)}: ${e.code || e.message}`], text: '' }; }
+  const p = parseRulesText(text, 'file'); if (p.error) return { ok: false, errors: [p.error], text: '' };
+  const v = validateRules(p.value, { layer }); if (!v.ok) return { ok: false, errors: v.errors, text: '' };
+  const comp = compileRules([{ layer, rules: p.value, source: 'file' }]);
+  if (!comp.ok) return { ok: false, errors: comp.errors, text: '' };
+  const sm = summarizeRules(buildRulesSnapshot(comp, [{ layer, rules: p.value, source: 'file' }]));
+  return { ok: true, errors: [], text: `OK as a ${layer} layer (${sm.rules_hash} when applied alone over the defaults)\n${renderRulesSummary(sm)}` };
+}
+
+/**
+ * `rules explain <goal> <task> '<tool json>'`: a dry run of the policy hook's evaluate() against the goal's snapshot and the task's scope and grants.
+ * Pure: nothing is written, no approval is created. {ok:false, error} or {ok:true, decision, reason, rule, rule_id, layer, rules_hash}.
+ */
+export function explainCall(dir, goal, taskId, callText) {
+  const o = goal.orch;
+  const snap = readJSON(paths(dir).rules, null);
+  if (!o.rules || !snap || snapshotHash(snap) !== o.rules.sha256 || !snap.policy) return { ok: false, error: 'the goal has no intact rules snapshot (not started yet, or tampered)' };
+  const task = readJSON(paths(dir).tasks, []).find((t) => t.id === taskId);
+  if (!task) return { ok: false, error: `no such task: ${escCtrl(String(taskId)).slice(0, 60)}` };
+  let call; try { call = JSON.parse(callText); } catch (e) { return { ok: false, error: `tool json does not parse: ${e.message.slice(0, 80)}` }; }
+  if (!call || typeof call !== 'object' || typeof call.tool_name !== 'string' || (call.tool_input !== undefined && (typeof call.tool_input !== 'object' || !call.tool_input))) return { ok: false, error: 'expected {"tool_name": "...", "tool_input": {...}, "cwd"?: "..."}' };
+  const wt = path.join(o.worktree_root || worktreeRootFor(o.repo, goal.id), task.id); // where the engine will (or did) put the task's worktree
+  const worktree = realpathDeepest(wt);
+  const ctx = { worktree, path_scope: task.orch.path_scope, allowed_tools: task.orch.allowed_tools, allowed_commands: task.orch.allowed_commands, grants: task.orch.grants || [], home: process.env.HOME, base_branch: o.base_branch };
+  const r = evaluate(snap.policy, { tool_name: call.tool_name, tool_input: call.tool_input || {}, cwd: typeof call.cwd === 'string' ? call.cwd : worktree }, ctx);
+  return { ok: true, decision: r.decision, reason: r.reason, rule: r.rule, rule_id: r.rule_id, layer: r.layer, rules_hash: snapshotHash(snap).slice(0, 12), worktree };
 }

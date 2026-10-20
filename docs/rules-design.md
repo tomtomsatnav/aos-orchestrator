@@ -665,3 +665,7 @@ R8 (verification findings N1, N2, S3a, S3b, S4):
 - `outside_allowlist: "deny"` maps to `worker.bash.ask_on` minus `unknown_command` (computed against the layers below, so it never adds an entry back). The design also named `on_outside_scope`; that setting is about paths outside `path_scope`, not commands outside the allowlist, so it is NOT touched (the user can set it in `rules.json`).
 - Dead values (`outside_allowlist` other than ask/deny, `dangerous` other than deny, unknown `approval_policy` keys, a non-default `policy.paths.write`, `policy.approval.on_timeout`) become snapshot notes starting `deprecated: `; the engine emits one `orch.rules.deprecated {notes}` event at snapshot time. `task.orch.read_scope` is still written (constant `["**"]`): removing it would change the task shape the dashboard reads.
 
+### R10 (CLI)
+
+- `rules show` without a goal prints the default rules overlaid with the user layer (an invalid user file exits 2). `rules check` validates as the `user` layer unless `--layer` says otherwise, and prints the summary of that layer applied alone over the defaults (a repo file therefore shows its loosenings under NOT APPLIED). `rules explain` evaluates against the snapshot's policy and the task's `path_scope`, `allowed_commands` and grants; the worktree path is the engine's computed path even if the worktree does not exist yet. The rules code lives in `rules-store.mjs` (`renderUserRules`, `checkRulesFile`, `explainCall`); all printed rule text goes through `q()`.
+

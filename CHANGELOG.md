@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Rules R10: `aos-orch rules show [goal]`, `rules check <file> [--layer]` and `rules explain <goal> <task> '<tool json>'` (a pure dry run of the policy evaluate: decision, reason and rule id; writes nothing, creates no approval).
 - Rules R9: `approval_policy.outside_allowlist: "deny"` now maps onto `worker.bash.ask_on` (unknown commands are denied, not asked); `approval_policy.dangerous`, unknown `approval_policy` keys, `policy.paths.write` and `policy.approval.on_timeout` are reported once in an `orch.rules.deprecated` event and otherwise ignored. Old goals still load.
 - Rules R8: the retry ladder, `retry.same_tier_retries`, `retry.no_escalate`, `retry.uncertain_limit_max`, `budgets.soft_frac`, `budgets.hard_grace_s`, `parallel.soft_budget_blocks_tier`, `plan.planner_tier` and `plan.planner_timeout_s` now come from the compiled rules (defaults reproduce the old constants). The governor thresholds come from the user layer only (a goal's `orch.governor` is ignored; legacy goals keep it). Engine events `task.retried`, `task.failed` (final), `budget.exceeded`, `orch.governor.paused`, `orch.integrate.conflict` and `orch.plan.approval_required` carry `data.rule`.
 - Opt-in macOS OS sandbox for worker `claude` processes: `aos-orch run goal.json --sandbox-workers` / `orch.sandbox_workers`. Limits writes (worktree, goal tmp, approvals, its own session-env and scratchpad); network and keychain reads stay open. Default unchanged. Guards against accidents; not a boundary against a determined malicious worker.

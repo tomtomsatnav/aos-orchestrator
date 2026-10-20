@@ -5,6 +5,7 @@
 //   aos-orch pause|resume|cancel|kill|approve-plan|reject-plan <goal-id>
 //   aos-orch serve [--port 4319] [--max-workers N] [--dashboard-url URL] [--origins a,b] [--leave-workers|--kill-workers] [--drain-s N]
 //   aos-orch login-link [--port N] | token [--show] | goals [--json]
+//   aos-orch rules show [goal-id] | rules check <file> [--layer user|repo|goal] | rules explain <goal-id> <task-id> '<tool json>'
 //   aos-orch approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
 // State lives under AOS_ORCH_DIR (default ${CLAUDE_PLUGIN_DATA or ~/.claude/plugins/data/aos-dashboard-aos-local}/orch).
 // The real `claude` binary is used only when AOS_CLAUDE_BIN is unset.
@@ -13,7 +14,8 @@ import path from 'node:path';
 import { Engine, createGoal, summarize, assertRepoTrusted } from '../lib/engine.mjs';
 import { reviewView, renderReview, planHash, tasksHash } from '../lib/plan.mjs';
 import { rulesFingerprint } from '../lib/rules.mjs';
-import { renderRulesFor } from '../lib/rules-store.mjs';
+import { renderRulesFor, renderUserRules, checkRulesFile, explainCall } from '../lib/rules-store.mjs';
+import { q } from '../lib/ctrl.mjs';
 import { orchRoot, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
@@ -24,7 +26,7 @@ const argv = process.argv.slice(2);
 const flags = {}; const pos = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s', 'accept-repo-loosening'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
+  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s', 'accept-repo-loosening', 'layer'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
 }
 const [cmd, arg1, arg2] = pos;
 const orch = flags['orch-dir'] ? path.resolve(flags['orch-dir']) : orchRoot();
@@ -123,6 +125,24 @@ async function main() {
       out(decide(paths(d).approvals, arg2, { decision: cmd, scope: flags['for-task'] ? 'task' : 'once', by: 'cli' }));
       break;
     }
+    case 'rules': {
+      const sub = arg1; const [, , , a3, a4] = pos;
+      if (sub === 'show') {
+        if (arg2) { const d = resolveGoalDir(arg2); out(renderRulesFor(d, loadState(d).goal)); }
+        else { const r = renderUserRules(orch); out(r.text); if (!r.ok) process.exit(2); }
+      } else if (sub === 'check') {
+        if (!arg2) die('usage: aos-orch rules check <file> [--layer user|repo|goal]');
+        const r = checkRulesFile(path.resolve(arg2), typeof flags.layer === 'string' ? flags.layer : 'user');
+        if (!r.ok) { console.error(`aos-orch: INVALID:\n  ${r.errors.slice(0, 20).join('\n  ')}`); process.exit(2); }
+        out(r.text);
+      } else if (sub === 'explain') {
+        if (!arg2 || !a3 || !a4) die(`usage: aos-orch rules explain <goal-id> <task-id> '{"tool_name":"Bash","tool_input":{"command":"ls"}}'`);
+        const d = resolveGoalDir(arg2); const r = explainCall(d, loadState(d).goal, a3, a4);
+        if (!r.ok) die(r.error, 2);
+        out(`${r.decision.toUpperCase()}  rule ${q(r.rule_id)}  (layer ${q(r.layer)}, rules ${r.rules_hash})\n  ${q(r.reason)}\n  dry run: nothing was written, no approval was created`);
+      } else die('usage: aos-orch rules show [goal-id] | check <file> [--layer L] | explain <goal-id> <task-id> <tool json>', 64);
+      break;
+    }
     case 'serve': {
       const port = parsePort(flags.port ?? process.env.AOS_ORCH_PORT ?? DEFAULT_PORT);
       const sup = new Supervisor({ orchDir: orch, ...(flags['max-workers'] ? { maxWorkers: Number(flags['max-workers']) } : {}),
@@ -164,7 +184,7 @@ async function main() {
       break;
     }
     default:
-      die('usage: aos-orch run|serve|login-link|token|goals|status|pause|resume|cancel|kill|approve-plan|reject-plan|approvals|approve|deny ...', 64);
+      die('usage: aos-orch run|serve|login-link|token|goals|status|pause|resume|cancel|kill|approve-plan|reject-plan|approvals|approve|deny|rules ...', 64);
   }
 }
 main().catch((e) => die(e.message));

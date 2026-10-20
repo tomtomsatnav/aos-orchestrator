@@ -74,6 +74,21 @@ and `auto` only applies to plans without commands (see Security model). Other go
 `orch.check_allowlist` (argv prefix) or a criterion check; unsafe plans (cycles, bad tiers, path scopes outside the repo,
 `.git`/`.claude`, dangerous `allowed_commands`, shell/curl-style checks, missing timeouts) are rejected, never repaired.
 
+## Rules
+
+Everything a worker may do and how the engine retries, budgets and stops is one versioned rule set (`docs/rules-design.md`). The
+default rules reproduce the engine's original behaviour. Layers, most trusted first: code floor (never overridable), engine defaults,
+user `$AOS_ORCH_DIR/rules.json`, the repo's `.aos/rules.json` (read from the base commit, tighten-only unless a human accepts each
+loosening), the goal (`orch.rules` plus the legacy goal fields). A lower layer can only tighten; loosenings are listed on the plan
+approval screen and the rules hash is bound into the plan approval. Rules are snapshotted per goal (`rules.snapshot.json`) and
+re-verified at every dispatch.
+
+```
+aos-orch rules show [goal-id]          # defaults + user layer, or the goal's snapshot (what the approval screen prints)
+aos-orch rules check <file> [--layer user|repo|goal]   # validate a rules file and show what it would change
+aos-orch rules explain <goal-id> <task-id> '{"tool_name":"Bash","tool_input":{"command":"ls"}}'   # dry-run the policy: decision + rule id
+```
+
 ## Security model (what is enforced now, what is not)
 
 Enforced by code and covered by tests:
