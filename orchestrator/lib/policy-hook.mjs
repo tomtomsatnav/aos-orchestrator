@@ -32,6 +32,8 @@ export function realpathDeepest(abs, depth = 0) {
 
 /** The hook is registered with a 30 s timeout (worker.buildSettings); waiting longer gets it killed mid-wait. */
 export const MAX_HOOK_WAIT_S = 25;
+/** The wait left once `elapsedMs` of the hook's 30 s have been used (evaluation, regexes): never negative. */
+export const remainingWaitMs = (policy, elapsedMs) => Math.max(0, hookWaitMs(policy) - Math.max(0, elapsedMs));
 export const hookWaitMs = (policy) => Math.max(0, Math.min(Number(policy?.approval?.wait_in_hook_s ?? 20) || 0, MAX_HOOK_WAIT_S)) * 1000;
 
 export function shapeOutput(event, decision, reason) {
@@ -52,6 +54,7 @@ function logDecision(env, rec) {
 /** Core: returns {decision, reason, ...}. Exported for the unit tests (no stdin/stdout). */
 export async function decideForPayload(payload, env = process.env) {
   const event = payload.hook_event_name || 'PreToolUse';
+  const started = Date.now();
   let cfg;
   try { cfg = JSON.parse(fs.readFileSync(env.AOS_POLICY_FILE, 'utf8')); } catch { return { event, decision: 'deny', reason: 'AOS policy: policy file unreadable (fail closed)', rule: 'policy_error', rule_id: 'floor:policy_error' }; }
   if (cfg?.rules_invalid) { // the engine found the goal's rules snapshot tampered or missing: nothing is allowed, and the log says why
@@ -72,7 +75,7 @@ export async function decideForPayload(payload, env = process.env) {
   const rec = createApproval(dir, { goal_id: env.AOS_GOAL_ID || null, task_id: env.AOS_TASK_ID || null, attempt: Number(env.AOS_ATTEMPT) || 0,
     tool: call.tool_name, input: call.tool_input, cwd: call.cwd || null, reason: v.reason, rule: v.rule, rule_id: v.rule_id }, { ttl_s: ap.ttl_s || 86400 });
   const pollMs = Number(env.AOS_APPROVAL_POLL_MS) || 100;
-  const done = rec.status !== 'pending' ? rec : await waitForDecision(dir, rec.id, { timeoutMs: hookWaitMs(cfg.policy), pollMs });
+  const done = rec.status !== 'pending' ? rec : await waitForDecision(dir, rec.id, { timeoutMs: remainingWaitMs(cfg.policy, Date.now() - started), pollMs });
   if (done && done.status === 'approved') {
     logDecision(env, { event, decision: 'allow', rule: 'approved', rule_id: 'grant:approved', rule_layer: 'grant', rules_hash: ids(v, cfg).rules_hash, asked_by: v.rule_id, approval: rec.id, label: safeLabel(call) });
     return { event, decision: 'allow', reason: `AOS policy: approved (${rec.id})`, rule: 'approved', rule_id: 'grant:approved', approval: rec.id };

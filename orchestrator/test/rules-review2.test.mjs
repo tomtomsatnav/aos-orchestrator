@@ -191,3 +191,22 @@ test('S7: an applied repo loosening forces human plan review even when plan.appr
   const b = await run(false);
   assert.notEqual(goalOf(b).orch.plan_state, 'awaiting_approval', 'nothing applied from the repo: auto still works');
 });
+
+test('S8: one evaluate() call has a total regex time budget (deny floor:regex_budget); the hook wait shrinks by the time already used', async () => {
+  const { evaluate, DEFAULT_POLICY, REGEX_BUDGET_MS } = await import('../lib/policy.mjs');
+  const { remainingWaitMs } = await import('../lib/policy-hook.mjs');
+  assert.equal(REGEX_BUDGET_MS, 1000);
+  const many = Array.from({ length: 40 }, (_, i) => `zzz${i}qqq`); // 40 cheap, valid user patterns that never match
+  const pol = { ...DEFAULT_POLICY, bash: { ...DEFAULT_POLICY.bash, deny_patterns: [...DEFAULT_POLICY.bash.deny_patterns, ...many] } };
+  const call = { tool_name: 'Bash', tool_input: { command: 'ls' }, cwd: '/w' };
+  const ctx = { worktree: '/w', path_scope: [], allowed_tools: ['Bash'], grants: [] };
+  assert.equal(evaluate(pol, call, ctx).decision, 'allow', 'with the real clock the cheap patterns are well inside the budget');
+  // a clock in which every pattern "takes" 300 ms: the fourth pattern exhausts the budget
+  let t = 0; const slow = { ...ctx, now: () => (t += 150) };
+  const v = evaluate(pol, call, slow);
+  assert.equal(v.decision, 'deny'); assert.equal(v.rule, 'regex_budget'); assert.equal(v.rule_id, 'floor:regex_budget');
+  // the hook: 20 s wait, 4 s already spent -> 16 s; more than the wait spent -> 0, never negative
+  assert.equal(remainingWaitMs({ approval: { wait_in_hook_s: 20 } }, 4000), 16000);
+  assert.equal(remainingWaitMs({ approval: { wait_in_hook_s: 20 } }, 60000), 0);
+  assert.equal(remainingWaitMs({ approval: { wait_in_hook_s: 20 } }, -5), 20000);
+});

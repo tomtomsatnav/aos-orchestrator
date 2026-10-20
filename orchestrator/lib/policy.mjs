@@ -72,11 +72,16 @@ const MAX_COMMAND = 16384;
 export const MAX_REGEX_INPUT = 4096;
 const BUILTIN_PATTERNS = new Set(DEFAULT_POLICY.bash.deny_patterns);
 const reCtx = vm.createContext({});
-/** true / false, or 'error' (does not compile, or ran longer than 100 ms: fail closed). Non-built-in patterns run under a vm timeout (ReDoS backstop). */
-function regexTest(src, s) {
+/** All non-built-in deny patterns of ONE evaluate() call share this much time; past it the call is denied (`floor:regex_budget`). */
+export const REGEX_BUDGET_MS = 1000;
+const makeBudget = (ctx) => ({ now: typeof ctx?.now === 'function' ? ctx.now : () => performance.now(), limit: Number(ctx?.regex_budget_ms) || REGEX_BUDGET_MS, spent: 0 });
+/** true / false, 'error' (does not compile, or ran longer than 100 ms: fail closed) or 'budget' (the call's total regex time is used up). Non-built-in patterns run under a vm timeout (ReDoS backstop). */
+function regexTest(src, s, B) {
   let re; try { re = new RegExp(src); } catch { return 'error'; }
   if (BUILTIN_PATTERNS.has(src)) return re.test(s);
-  try { reCtx.re = re; reCtx.s = s; return vm.runInContext('re.test(s)', reCtx, { timeout: 100 }); } catch { return 'error'; }
+  if (B.spent >= B.limit) return 'budget';
+  const t0 = B.now();
+  try { reCtx.re = re; reCtx.s = s; return vm.runInContext('re.test(s)', reCtx, { timeout: Math.max(1, Math.min(100, Math.ceil(B.limit - B.spent))) }); } catch { return 'error'; } finally { B.spent += B.now() - t0; }
 }
 /** Deny globs match case- and compatibility-insensitively: APFS (macOS default) treats .CLAUDE, .Git or .ſsh as the protected name. */
 const fold = (s) => String(s).normalize('NFKC').toLowerCase();
@@ -238,6 +243,7 @@ function dangerous(policy, ctx, argv) {
 }
 
 function evaluateBash(policy, command, ctx) {
+  const budget = makeBudget(ctx);
   const R = makeResolver(ctx);
   const cwd = ctx.cwd || ctx.worktree;
   if (command.length > MAX_COMMAND) return res('deny', `command longer than ${MAX_COMMAND} characters`, 'unparsed');
@@ -250,7 +256,8 @@ function evaluateBash(policy, command, ctx) {
   if (p.raw.length > MAX_REGEX_INPUT) note(res('ask', `command longer than ${MAX_REGEX_INPUT} characters (deny patterns are not run on it)`, 'command_too_long', 'floor'));
   else {
     for (const rx of policy.bash?.deny_patterns || []) {
-      const m = regexTest(rx, p.raw);
+      const m = regexTest(rx, p.raw, budget);
+      if (m === 'budget') return res('deny', 'total deny-pattern time budget exhausted', 'regex_budget');
       if (m === 'error') return res('deny', 'invalid or too slow deny pattern in policy', 'policy_error');
       if (m) return res('deny', 'command matches a dangerous pattern', 'dangerous_pattern');
     }
