@@ -176,4 +176,8 @@ test('lockStatus: an alive owner with an unconsumed command older than N ticks (
   const r = await runCli(['pause', 'g-a'], sb.env()); assert.match(r.out, /WEDGED/); assert.match(r.err, /wedged/i);
   fs.writeFileSync(P.lock, JSON.stringify({ pid: 2147480001, ts: now, token: 'x', label: 'serve' }));
   assert.match(describeOwner(lockStatus(dir)), /no longer running/);
+  // S3: a live pid on a lock older than its ttl is treated as dead (acquireLock would take it over), never reported as WEDGED
+  fs.writeFileSync(P.lock, JSON.stringify({ pid: process.pid, ts: now - 61e3, token: 'x', label: 'serve' }));
+  st = lockStatus(dir, { nowMs: now }); assert.equal(st.owner_alive, false); assert.equal(st.wedged, false); assert.doesNotMatch(describeOwner(st), /WEDGED/);
+  assert.equal(lockStatus(dir, { nowMs: now, ttlMs: 120e3 }).owner_alive, true);
 });

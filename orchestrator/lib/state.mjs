@@ -155,10 +155,10 @@ export function pendingCommands(dir, nowMs = Date.now()) {
  * `staleTicks` heartbeat intervals, or (when the goal is not parked on purpose) the heartbeat is older than that. A goal parked at
  * plan approval / blocked / terminal legitimately has an old heartbeat, so only unconsumed commands count there.
  */
-export function lockStatus(dir, { staleTicks = 5, nowMs = Date.now() } = {}) {
+export function lockStatus(dir, { staleTicks = 5, nowMs = Date.now(), ttlMs = 60000 } = {}) {
   const l = readJSON(paths(dir).lock, null);
   const hb = loadHeartbeat(dir); const g = readJSON(paths(dir).goal, null);
-  const owner_alive = !!l && pidAlive(l.pid);
+  const owner_alive = !!l && pidAlive(l.pid) && !(nowMs - l.ts > ttlMs); // a lock older than its ttl is dead, exactly as acquireLock treats it (the pid may have been reused)
   const interval_ms = Math.max(1, hb.interval_s || 10) * 1000;
   const hb_age_ms = hb.ts ? nowMs - Date.parse(hb.ts) : null;
   const parked = !g || TERMINAL.has(g.status) || g.status === 'blocked' || (g.status === 'draft' && g.orch?.plan_state === 'awaiting_approval') || hb.status === 'paused';
