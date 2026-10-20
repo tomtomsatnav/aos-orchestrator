@@ -150,3 +150,34 @@ test('schema.mjs: additionalProperties:false, maxItems, maxLength and maximum ar
   const e = validateSchema({ a: [1, 2], b: 'abc', c: 4, d: 1 }, s);
   assert.equal(e.length, 4); assert.ok(e.some((x) => /unknown key "d"/.test(x)));
 });
+
+// ---------------------------------------------------------------- R2: the floor (fixes G1)
+import { evaluate, isProtectedRel, mergePolicy, FLOOR_DENY_GLOBS } from '../lib/policy.mjs';
+import { validateScope } from '../lib/plan.mjs';
+
+test('floor (G1): an override that empties paths.deny still denies .git, .claude/settings and .aos', () => {
+  const ctx = { worktree: '/w/t1', path_scope: ['**/*.x', 'src/**', '.aos/**', '.git/**'], allowed_tools: ['Read', 'Write', 'Edit', 'Bash'], allowed_commands: [], grants: [], home: '/home/u', base_branch: 'main' };
+  for (const pol of [mergePolicy({ paths: { deny: [] } }), { paths: { deny: [] } }, { paths: {} }, mergePolicy({ paths: { deny: [], read_extra: ['/w/t1/.git'] } })]) {
+    for (const f of ['/w/t1/.git/config', '/w/t1/.git', '/w/t1/.claude/settings.json', '/w/t1/x/.claude/settings.local.json', '/w/t1/.aos/rules.json', '/w/t1/.AOS/rules.json', '/w/t1/sub/.aos/x', '/home/u/.ssh/id_rsa', '/home/u/.claude/CLAUDE.md']) {
+      for (const tool of ['Write', 'Edit', 'Read']) {
+        const r = evaluate(pol, { tool_name: tool, tool_input: { file_path: f }, cwd: '/w/t1' }, ctx);
+        assert.equal(r.decision, 'deny', `${tool} ${f}`); assert.equal(r.rule, 'path_denied');
+      }
+    }
+    assert.equal(evaluate(pol, { tool_name: 'Bash', tool_input: { command: 'ls > .aos/rules.json' }, cwd: '/w/t1' }, ctx).rule, 'path_denied');
+    assert.equal(evaluate(pol, { tool_name: 'Write', tool_input: { file_path: '/w/t1/src/a.x' }, cwd: '/w/t1' }, ctx).decision, 'allow', 'ordinary writes are unaffected');
+  }
+});
+
+test('floor (G1): the engine snapshot check treats .git, .claude/settings and .aos as protected whatever the policy says', () => {
+  for (const pol of [mergePolicy({ paths: { deny: [] } }), {}, undefined]) {
+    for (const rel of ['.git/config', 'a/.git/x', '.claude/settings.json', 'a/.claude/settings.local.json', '.aos/rules.json', 'x/.aos/y', '.AOS/z']) assert.equal(isProtectedRel(pol, rel), true, rel);
+    for (const rel of ['src/a.js', '.claude/commands/x.md', '.gitignore', 'aos/rules.json']) assert.equal(isProtectedRel(pol, rel), false, rel);
+  }
+  assert.ok(FLOOR_DENY_GLOBS.includes('**/.aos/**'));
+});
+
+test('floor: plan path_scope may not target .aos (nor .git / .claude)', () => {
+  for (const g of ['.aos/**', '.aos/rules.json', './.aos', '.aos', '.git/hooks/*', '.claude/**']) assert.match(validateScope(g) || '', /targets protected files/, g);
+  assert.equal(validateScope('src/.aos-notes/**'), null); assert.equal(validateScope('docs/**'), null);
+});

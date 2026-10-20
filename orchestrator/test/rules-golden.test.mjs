@@ -22,7 +22,7 @@ const GOLDEN = [
   ["Write",{"file_path":"/w/t1/.git"},"deny","path_denied"],
   ["Write",{"file_path":"/w/t1/.claude/settings.json"},"deny","path_denied"],
   ["Write",{"file_path":"/w/t1/sub/.claude/settings.local.json"},"deny","path_denied"],
-  ["Write",{"file_path":"/w/t1/.aos/rules.json"},"ask","outside_scope"],
+  ["Write",{"file_path":"/w/t1/.aos/rules.json"},"deny","path_denied"],
   ["Write",{"file_path":"/home/u/.claude/settings.json"},"deny","path_denied"],
   ["Write",{"file_path":"/home/u/.zshrc"},"deny","path_denied"],
   ["Write",{"file_path":"/home/u/.config/x"},"deny","path_denied"],
@@ -161,7 +161,7 @@ test('golden: plan and tasks hashes are stable', () => {
 
 test('golden: isProtectedRel (snapshot check) and allowlistEntryProblem', () => {
   const prot = { '.git': true, '.git/config': true, 'src/.git/x': true, '.GIT/x': true, '.claude/settings.json': true, 'a/.claude/settings.local.json': true,
-    '.claude/commands/x.md': false, '.aos/rules.json': false, 'src/a.js': false, 'README.md': false, '.gitignore': false };
+    '.claude/commands/x.md': false, '.aos/rules.json': true, 'src/a.js': false, 'README.md': false, '.gitignore': false };
   for (const [rel, want] of Object.entries(prot)) assert.equal(isProtectedRel(DEFAULT_POLICY, rel), want, rel);
   const ent = JSON.parse(String.raw`[["ls",null],["cat",null],["git status",null],["git push","git push is not a read-only git command (allowed: status, diff, log, show, ls-files, ls-tree, rev-parse, rev-list, cat-file, blame, shortlog, describe)"],["node --test","node executes code and is never allowed for a worker (verification belongs in the plan's checks)"],["npm test","npm executes code and is never allowed for a worker (verification belongs in the plan's checks)"],["sort -u",null],["git log",null],["find -name",null],["./x.sh","runs a file by path (code the worker can write)"],["sudo ls","sudo is never allowed"],["ls; ls","must be exactly one simple command"],["ls > x","must be a plain command without redirects"],["FOO=1 ls","starts with a variable assignment"],["","empty entry"],["awk 1","awk executes code and is never allowed for a worker (verification belongs in the plan's checks)"],["git commit","git commit can run hooks, filters or aliases and is not allowed"],["make","make executes code and is never allowed for a worker (verification belongs in the plan's checks)"]]`);
   for (const [e, why] of ent) assert.equal(allowlistEntryProblem(e), why, e);

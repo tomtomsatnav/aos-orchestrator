@@ -44,7 +44,10 @@ const EXEC_PATTERNS = [/^python[\d.]*$/, /^pypy[\d.]*$/, /^ruby[\d.]*$/, /^perl[
 const GIT_EXEC_SUB = new Set(['add', 'commit', 'checkout', 'switch', 'merge', 'rebase', 'cherry-pick', 'revert', 'am', 'apply', 'stash', 'restore', 'archive', 'difftool', 'mergetool',
   'bisect', 'maintenance', 'daemon', 'instaweb', 'send-email', 'hook', 'lfs', 'annex', 'clean', 'rm', 'mv', 'tag', 'bundle', 'fast-import', 'init']);
 export const GIT_READONLY_SUB = new Set(['status', 'diff', 'log', 'show', 'ls-files', 'ls-tree', 'rev-parse', 'rev-list', 'cat-file', 'blame', 'shortlog', 'describe']);
-const BUILTIN_DENY_GLOBS = ['~/.zshrc', '~/.bashrc', '~/.bash_profile', '~/.profile', '~/.zprofile', '~/.zshenv'];
+// The FLOOR (docs/rules-design.md 2.2, R2): protected paths that no policy file, goal override or rule layer can remove.
+// DEFAULT_POLICY.paths.deny lists the same entries for display; mergePolicy can empty that list but never this one.
+export const FLOOR_DENY_GLOBS = ['~/.claude/**', '~/.ssh/**', '~/.config/**', '**/.git/**', '**/.git', '**/.claude/settings*.json', '**/.aos/**', '**/.aos'];
+const BUILTIN_DENY_GLOBS = ['~/.zshrc', '~/.bashrc', '~/.bash_profile', '~/.profile', '~/.zprofile', '~/.zshenv', ...FLOOR_DENY_GLOBS];
 const GIT_DENY_SUB = new Set(['push', 'remote', 'config', 'filter-branch', 'update-ref', 'worktree', 'clone', 'fetch', 'pull', 'submodule', 'gc', 'prune', 'reflog']);
 const WRITE_CMDS = new Set(['mkdir', 'touch', 'mv', 'cp', 'rm', 'rmdir', 'tee', 'ln', 'truncate', 'chmod', 'install', 'dd']);
 // commands that run another command given as arguments: the policy cannot see what they run
@@ -329,7 +332,7 @@ export function evaluate(policy, toolCall, ctx) {
 export function isProtectedRel(policy, rel) {
   const pol = mergePolicy(policy);
   const p = fold(`/${rel}`);
-  return (pol.paths?.deny || []).filter((g) => g.startsWith('**/')).map(fold).some((g) => globToRegex(g).test(p));
+  return [...(pol.paths?.deny || []), ...FLOOR_DENY_GLOBS].filter((g) => g.startsWith('**/')).map(fold).some((g) => globToRegex(g).test(p));
 }
 
 /** Stable short key identifying a tool call (used to de-duplicate approval requests). */

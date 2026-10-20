@@ -73,7 +73,7 @@ export function extractJson(text) {
   return { error: 'no JSON object found in planner output' };
 }
 
-const BAD_SCOPE_ROOTS = /^(\.git|\.claude)(\/|$)/;
+const BAD_SCOPE_ROOTS = /^(\.git|\.claude|\.aos)(\/|$)/;
 const BROAD = new Set(['**', '**/*', '*', '.', './', '/']);
 
 export function validateScope(g) {

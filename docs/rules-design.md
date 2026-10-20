@@ -528,3 +528,20 @@ allow. Everything still passes plan validation and human plan approval, and the 
 6. **Are budgets rules (part of the hash), or operational limits outside it?** Recommended: they are in the rule set, so
    they are reviewed and hashed. The existing `budgets` command stays a human-only fast path that re-snapshots and logs
    `orch.rules.changed {direction:"loosen", keys}` without forcing a re-approval, because a budget never widens what a worker can touch.
+
+---
+
+## Implementation notes
+
+Deviations and choices made while implementing R0-R4 (smallest sensible choice each time; none weakens security).
+
+- **R1 list semantics.** A layer that names an allow list (`worker.bash.allow`, `checks.allowlist`, `worker.tools.allow`, ...) *replaces* it: entries
+  not listed are removed (a tightening), entries not in the merged set so far are loosenings. There is no "add one entry" syntax. Deny lists are
+  union-only, so an empty deny list is a no-op. Compiled list entries carry a `layer` tag (part of the hash); `toPolicy` drops it.
+  Ordered kinds: `retry.ladder` may only become a subsequence of the current ladder; `plan.max_start_tier` is ordered `opus > sonnet > haiku` (lower is
+  stricter); `parallel`, `merge`, `done`, `ask_human` values are "pinned" (any change is a loosening). `governor.*` is a free, user-layer-only value.
+  A repo can never loosen `worker.sandbox`, `checks.sandbox`, `plan.approval` or `repo_config.trust`, even with `accept`.
+- **R2 floor.** `FLOOR_DENY_GLOBS` in `policy.mjs` holds the six home/`.git`/`.claude/settings` globs plus `**/.aos/**` and `**/.aos`; it is applied in
+  `denyGlobs` and `isProtectedRel` independently of `policy.paths.deny` (which still lists the first six for display, so `toPolicy(DEFAULT_RULES)` still
+  equals `DEFAULT_POLICY`). Golden diff caused by R2 (tightening only): a worker `Write` to `.aos/rules.json` is now `deny/path_denied` (was
+  `ask/outside_scope`), and `isProtectedRel('.aos/rules.json')` is `true` (was `false`). Side effect: a worker can no longer *read* `.aos/**` either.
