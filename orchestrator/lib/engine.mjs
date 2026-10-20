@@ -777,9 +777,11 @@ export class Engine {
     for (const t of S.tasks) this.ev('task.created', 'orchestrator', t.id, { depends_on: t.depends_on, tier: t.orch.model_tier });
     this.ev('orch.plan.created', 'orchestrator', null, { tasks: S.tasks.length, source, risks: Array.isArray(plan.risks) ? plan.risks.slice(0, 10) : [] });
     o.plan_fingerprint = this._fingerprint(S);
-    const review = humanReviewReason(S.tasks);
+    let review = humanReviewReason(S.tasks);
+    const repoLoose = (readJSON(this.P.rules, null)?.loosenings || []).filter((l) => l.layer === 'repo');
+    if (!review && repoLoose.length) review = `${repoLoose.length} repo rule loosening(s) are applied (${repoLoose.slice(0, 3).map((l) => l.rule_id.split('@')[0]).join(', ')}): a human must review them`;
     if (o.approval_policy.plan === 'auto' && !review && this._activate(S, 'auto')) { /* only plans without commands may auto-approve */ } else {
-      if (o.approval_policy.plan === 'auto' && review) this.ev('orch.plan.approval_required', 'orchestrator', null, { reason: review, note: 'plan_approval "auto" does not apply to plans with commands' });
+      if (o.approval_policy.plan === 'auto' && review) this.ev('orch.plan.approval_required', 'orchestrator', null, { reason: review, note: 'plan_approval "auto" does not apply to plans with commands or applied repo loosenings' });
       o.plan_state = 'awaiting_approval'; o.plan_awaiting_since_ms = this.now(); this.ev('goal.updated', 'orchestrator', null, { status: 'draft', plan_state: 'awaiting_approval' });
     }
     saveState(this.dir, S);

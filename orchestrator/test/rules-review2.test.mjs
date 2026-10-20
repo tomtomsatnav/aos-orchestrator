@@ -175,3 +175,19 @@ test('S6b: accepting a repo loosening does not undo a human budget patch made be
   const sm = (await import('../lib/rules-store.mjs')).readRulesSummary(dir, g);
   assert.equal(sm.limits.max_usd, 1, 'the summary shows what is enforced, not the pre-patch snapshot value'); assert.equal(sm.limits.max_parallel, 1);
 });
+
+test('S7: an applied repo loosening forces human plan review even when plan.approval is auto', async (t) => {
+  const run = async (loosening) => {
+    const sb = mkSandbox(); t.after(() => sb.cleanup());
+    commitRules(sb, R({ checks: { localhost_ports: [8080] } }));
+    const id = `repo:checks.localhost_ports.8080@${bindHash(8080)}`;
+    const grepTask = { ...ptask('t1', 'a.txt', 'alpha'), checks: [{ argv: ['grep', '-qx', 'alpha', 'a.txt'], timeout_s: 30 }] }; // a plan that auto-approval would accept
+    const { dir } = await parked(sb, { plan: onePlan(grepTask), orch: { approval_policy: { plan: 'auto' }, ...(loosening ? { accept_repo_loosening: [id] } : {}) } });
+    return dir;
+  };
+  const a = await run(true);
+  assert.equal(goalOf(a).orch.plan_state, 'awaiting_approval', 'accepted loosening: parked for a human');
+  assert.ok(readEvents(a).some((e) => e.type === 'orch.plan.approval_required' && /repo rule loosening/.test(e.data.reason)));
+  const b = await run(false);
+  assert.notEqual(goalOf(b).orch.plan_state, 'awaiting_approval', 'nothing applied from the repo: auto still works');
+});
