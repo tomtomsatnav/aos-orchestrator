@@ -234,6 +234,7 @@ async function main() {
       await new Promise(() => {});
       break;
     }
+    case 'doctor': { const D = await import('../lib/doctor.mjs'); const rep = await D.runDoctor({ orch, port: parsePort(flags.port ?? process.env.AOS_ORCH_PORT ?? DEFAULT_PORT), live: !!flags.live }); console.log(D.renderDoctor(rep)); process.exit(rep.exitCode); }
     case 'login-link': {
       const port = parsePort(flags.port ?? process.env.AOS_ORCH_PORT ?? DEFAULT_PORT);
       ensureCliToken(orch);
@@ -262,6 +263,7 @@ async function main() {
   approvals <goal-id> | approve | deny <goal-id> <A-n>   answer a worker permission request
   confirm <goal-id> <criterion-id> sign off a human-verified criterion
   rules show|check|explain         inspect the rules (what workers may do and the budgets)
+  doctor [--live]                  preflight: node, git, claude, flags, login, sandbox, state dir, port
   serve | login-link | token       control server for the dashboard (127.0.0.1:4319)
 State lives in $AOS_ORCH_DIR (default ~/.claude/plugins/data/aos-dashboard-aos-local/orch). Docs: orchestrator/README.md`, 64);
   }
