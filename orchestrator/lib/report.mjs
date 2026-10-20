@@ -31,6 +31,11 @@ export function buildReport({ goal, tasks, approvals = [], denials = [], diffSta
   L.push('', '## Policy denials', '');
   if (!denials.length) L.push('none');
   for (const d of denials) L.push(`- ${d.task_id} attempt ${d.attempt}: ${d.label} (${d.rule})`);
+  if (o.review) {
+    L.push('', '## Reviewer notes (advisory, written by a model, not verified)', '',
+      o.review.error ? `The advisory review did not complete: ${o.review.error}` : fence(o.review.text || '(empty)').trim(),
+      '', `(tier ${o.review.tier}; these notes never affect the goal status)`);
+  }
   if (governor?.pause) L.push('', '## Governor', '', `paused: ${governor.pause.reason}`);
   L.push('', '## Diff (base..integration)', fence(diffStat || '(no changes)'));
   L.push('## Review and merge (the engine never merges to your base branch)', '',

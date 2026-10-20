@@ -174,7 +174,7 @@ export function buildDraftPrompt({ request, facts, scripts = [], compiled, error
 }
 
 /** One no-tools model call in an empty temp directory (so no repo configuration is loaded). {text?, error?, usage}. */
-async function callModel({ orchDir, env, bin, tier, prompt, usdCap, timeoutMs, killGraceMs, spawnFn }) {
+export async function callModel({ orchDir, env, bin, tier, prompt, usdCap, timeoutMs, killGraceMs, spawnFn, system = DRAFT_SYSTEM }) {
   // a fresh directory OUTSIDE the home directory and the orchestrator dir: Claude Code walks parent directories for CLAUDE.md, so nothing of ours or the user's may sit above it
   const home = path.resolve(env.HOME || os.homedir());
   const under = (d) => { const r = path.relative(home, fs.realpathSync(d)); return r === '' || (!r.startsWith('..') && !path.isAbsolute(r)); };
@@ -182,7 +182,7 @@ async function callModel({ orchDir, env, bin, tier, prompt, usdCap, timeoutMs, k
   const tmp = fs.mkdtempSync(path.join(root, 'aos-draft-'));
   try {
     const settings = path.join(tmp, 'settings.json'); atomicWrite(settings, {});
-    const args = W.buildArgs({ prompt, tier, sessionId: crypto.randomUUID(), maxTurns: 1, maxBudgetUsd: usdCap, tools: '', allowedTools: '', appendSystemPrompt: DRAFT_SYSTEM, settingsFile: settings });
+    const args = W.buildArgs({ prompt, tier, sessionId: crypto.randomUUID(), maxTurns: 1, maxBudgetUsd: usdCap, tools: '', allowedTools: '', appendSystemPrompt: system, settingsFile: settings });
     const i = args.indexOf('--allowedTools'); if (i >= 0) args.splice(i, 2); // no tools: nothing to allow
     args.push('--no-session-persistence'); // nothing of the draft is kept in Claude Code's session store
     const cenv = W.buildEnv({ base: env, goalId: 'draft', taskId: 'draft', attempt: 1, worktree: tmp, policyFile: path.join(tmp, 'none'), approvalsDir: tmp, tmpDir: tmp, bin });

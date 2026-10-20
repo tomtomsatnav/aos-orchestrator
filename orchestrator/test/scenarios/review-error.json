@@ -1,0 +1,148 @@
+{
+  "_comment": "Happy path: t1 and t2 are independent, t3 edits after them. Each attempt succeeds and writes one file.",
+  "planner": {
+    "behavior": "success",
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 1800,
+      "cache_read_input_tokens": 20000,
+      "cache_creation_input_tokens": 6000
+    },
+    "plan": {
+      "tasks": [
+        {
+          "id": "t1",
+          "title": "Write a.txt",
+          "description": "Create a.txt",
+          "depends_on": [],
+          "model_tier": "haiku",
+          "path_scope": [
+            "a.txt"
+          ],
+          "allowed_commands": [
+            "cat a.txt"
+          ],
+          "checks": [
+            {
+              "argv": [
+                "grep",
+                "-qx",
+                "alpha",
+                "a.txt"
+              ],
+              "timeout_s": 30
+            }
+          ],
+          "output_contract": "a.txt contains alpha",
+          "acceptance": [
+            "a.txt contains alpha"
+          ]
+        },
+        {
+          "id": "t2",
+          "title": "Write b.txt",
+          "description": "Create b.txt",
+          "depends_on": [],
+          "model_tier": "haiku",
+          "path_scope": [
+            "b.txt"
+          ],
+          "allowed_commands": [
+            "cat b.txt"
+          ],
+          "checks": [
+            {
+              "argv": [
+                "grep",
+                "-qx",
+                "beta",
+                "b.txt"
+              ],
+              "timeout_s": 30
+            }
+          ],
+          "output_contract": "b.txt contains beta",
+          "acceptance": [
+            "b.txt contains beta"
+          ]
+        },
+        {
+          "id": "t3",
+          "title": "Write c.txt",
+          "description": "Create c.txt",
+          "depends_on": [
+            "t1",
+            "t2"
+          ],
+          "model_tier": "haiku",
+          "path_scope": [
+            "c.txt"
+          ],
+          "allowed_commands": [
+            "cat c.txt"
+          ],
+          "checks": [
+            {
+              "argv": [
+                "grep",
+                "-qx",
+                "gamma",
+                "c.txt"
+              ],
+              "timeout_s": 30
+            }
+          ],
+          "output_contract": "c.txt contains gamma",
+          "acceptance": [
+            "c.txt contains gamma"
+          ]
+        }
+      ],
+      "risks": []
+    }
+  },
+  "default": {
+    "behavior": "success"
+  },
+  "tasks": {
+    "t1": [
+      {
+        "behavior": "success",
+        "edits": [
+          {
+            "path": "a.txt",
+            "content": "alpha\n"
+          }
+        ],
+        "message": "Created a.txt."
+      }
+    ],
+    "t2": [
+      {
+        "behavior": "success",
+        "edits": [
+          {
+            "path": "b.txt",
+            "content": "beta\n"
+          }
+        ],
+        "message": "Created b.txt."
+      }
+    ],
+    "t3": [
+      {
+        "behavior": "success",
+        "edits": [
+          {
+            "path": "c.txt",
+            "content": "gamma\n"
+          }
+        ],
+        "message": "Created c.txt."
+      }
+    ]
+  },
+  "review": {
+    "behavior": "error"
+  }
+}

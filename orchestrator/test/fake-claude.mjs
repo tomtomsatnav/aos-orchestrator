@@ -188,9 +188,10 @@ async function main() {
   const stateDir = process.env.AOS_FAKE_STATE || null;
   const taskId = process.env.AOS_TASK_ID || '';
   const isPlanner = prompt.includes('AOS_PLANNER');
-  const isDraft = !isPlanner && prompt.includes('AOS_DRAFT'); // `aos-orch draft`: one no-tools call; scenario.draft is a Step or a list of Steps (one per call)
-  const counterKey = isPlanner ? '_planner' : isDraft ? '_draft' : (taskId || '_none');
-  const { step, source, attempt } = pickStep(scenario, taskId, prompt, isPlanner, counterKey, stateDir, isDraft);
+  const isReview = !isPlanner && prompt.includes('AOS_REVIEW'); // advisory reviewer: scenario.review is a Step; `review: <string>` is the returned text
+  const isDraft = !isPlanner && !isReview && prompt.includes('AOS_DRAFT'); // `aos-orch draft`: one no-tools call; scenario.draft is a Step or a list of Steps (one per call)
+  const counterKey = isPlanner ? '_planner' : isReview ? '_review' : isDraft ? '_draft' : (taskId || '_none');
+  const { step, source, attempt } = pickStep(scenario, taskId, prompt, isPlanner, counterKey, stateDir, isDraft, isReview);
   const BEHAVIORS = ['success', 'fail_checks', 'error', 'rate_limit', 'budget_exceeded', 'denied_tool', 'crash', 'hang', 'slow'];
   const behavior = step.behavior || 'success';
   if (!BEHAVIORS.includes(behavior)) return fail2(`fake-claude: unknown behavior '${behavior}' in scenario ${scenPath} (${source}); expected one of ${BEHAVIORS.join(', ')}`);
@@ -320,7 +321,7 @@ async function main() {
 
   startTurn(turns - 1);
   const finalText = step.message || (denials.length ? 'Some tool calls were denied, so I stopped and report what I needed.\n\nPINEAPPLE' : 'Task completed as scripted.');
-  const planText = isPlanner && step.plan !== undefined ? formatPlan(step) : isDraft && step.draft !== undefined ? formatPlan({ plan: step.draft, plan_format: step.plan_format }) : null;
+  const planText = isReview && step.review !== undefined ? String(step.review) : isPlanner && step.plan !== undefined ? formatPlan(step) : isDraft && step.draft !== undefined ? formatPlan({ plan: step.draft, plan_format: step.plan_format }) : null;
   assistant(turns - 1, [{ type: 'text', text: planText ?? finalText }]);
   emitRateLimit(false);
 
@@ -434,9 +435,9 @@ function ruleMatches(rule, c) {
   return subject === m[2];
 }
 
-function pickStep(scenario, taskId, prompt, isPlanner, counterKey, stateDir, isDraft = false) {
+function pickStep(scenario, taskId, prompt, isPlanner, counterKey, stateDir, isDraft = false, isReview = false) {
   let list; let source;
-  if (isPlanner && scenario.planner) { list = [scenario.planner]; source = 'planner'; }
+  if (isReview) { list = scenario.review || [{}]; source = 'review'; } else if (isPlanner && scenario.planner) { list = [scenario.planner]; source = 'planner'; }
   else if (isDraft && scenario.draft) { list = scenario.draft; source = 'draft'; }
   else {
     const tasks = scenario.tasks || {};

@@ -107,6 +107,20 @@ One invalid output is retried once on sonnet. A `verify: "human"` criterion keep
 until `aos-orch confirm <goal> c2` (or `POST /api/goals/:id/criteria/:cid/confirm`) once every task is done. A goal made from a draft records
 `drafted: true` and `draft_tier` on `goal.created`. On the plan approval screens a profile's own additions to the check allowlist are shown in a separate, labelled block (they are expected, and still listed and hashed); every other loosening stays under `LOOSENINGS YOU ARE APPROVING`. Tasks whose `path_scope` mentions nothing in the goal text are marked `BEYOND THE PROMPT` (a heuristic, informational; `GET /api/goals/:id/plan` tasks carry `beyond_prompt` and `beyond_paths`).
 
+### Advisory review and untrusted prompt blocks
+
+`review.advisory: true` (rules key; default off; a user or goal rules layer can set it, a repo layer cannot without an acceptance) adds ONE read-only
+reviewer call after every task passed and the goal criteria are met, before the goal is marked achieved. It has no tools, runs in an empty
+directory on `review.tier` (`haiku` default, or `sonnet`), is capped at $0.25 and 120 s, and reads `git diff base..integration` as an UNTRUSTED block.
+Its answer (at most 12 short bullets, control characters escaped) appears as "Reviewer notes" in `report.md`. It is advisory only: it never blocks,
+retries or changes a task or the goal status, a failed review is just reported as "did not complete", and its tokens count toward the goal usage.
+
+Every prompt that carries text a model or a repo wrote (check output, dependency summaries, the planner-written task description, repo file
+names and Makefile targets, the diff) wraps it in `<<<UNTRUSTED-<random> label ... UNTRUSTED-<random>>>` blocks (`lib/untrusted.mjs`): a fresh
+nonce per prompt, control and bidi characters escaped, any occurrence of the nonce removed, plus one line telling the model the content is
+data, never instructions. This labels injected text and removes the cheap ways to forge the label; it does not make injection impossible.
+Each attempt in `attempt_log` also records the `claude --version` (probed once per engine start) and `report.md` warns if it changed during a goal.
+
 ## Security model (what is enforced now, what is not)
 
 Enforced by code and covered by tests:
@@ -233,6 +247,7 @@ Worktrees live outside the repo: `<repo>-aos-worktrees/<goal>/{integration,<task
 | `git.mjs`, `checks.mjs` | execFile-only git helpers; check runner (sandboxed by default) |
 | `sandbox.mjs` | `sandbox-exec` probe, static deny-default profiles (checks; opt-in workers), `-D` parameter builder |
 | `repo-config.mjs` | scan for hostile repo Claude Code config; CLAUDE.md hashing |
+| `untrusted.mjs`, `review.mjs`, `cli-version.mjs` | UNTRUSTED prompt blocks; the opt-in advisory reviewer; `claude --version` probe and drift check |
 | `engine.mjs`, `report.mjs` | the tick, lifecycle, recovery, cancel, final report |
 
 ## Tests

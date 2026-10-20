@@ -24,6 +24,7 @@ import { sandboxAvailable, wrapWorkerCommand, SANDBOX_EXEC } from './sandbox.mjs
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
 import { buildReport } from './report.mjs';
 import { probeClaudeVersion } from './cli-version.mjs';
+import { runAdvisoryReview } from './review.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_SCRIPT = path.join(HERE, 'policy-hook.mjs');
@@ -781,6 +782,7 @@ export class Engine {
     if (crit.length && crit.every((c) => c.met) && allDone) {
       await Promise.all([...this.workers.values()].map((r) => W.killGroup(r.pgid, { graceMs: this.killGraceMs })));
       this.workers.clear();
+      if (this._R(goal).review?.advisory === true && !o.review) await this._advisoryReview(S); // opt-in, advisory only: results go to report.md, never to task or goal state
       for (const t of S.tasks) if (['pending', 'ready', 'running', 'needs_review'].includes(t.status)) { t.status = 'cancelled'; t.updated_at = iso(this.now()); }
       goal.status = 'achieved'; goal.updated_at = iso(this.now());
       this.ev('goal.achieved', 'orchestrator', null, { criteria: crit.length });
@@ -790,6 +792,16 @@ export class Engine {
       goal.blocked_reason = unmet.every((c) => c.verify === 'human') ? `awaiting human confirmation: ${unmet.map((c) => c.id).join(', ')}` : `all tasks done but criteria not met: ${unmet.map((c) => c.id).join(', ')}`;
       this.ev('goal.blocked', 'orchestrator', null, { reason: goal.blocked_reason });
     }
+  }
+
+  async _advisoryReview(S) {
+    const goal = S.goal; const o = goal.orch;
+    const tier = this._R(goal).review.tier || 'haiku';
+    const r = await runAdvisoryReview({ goal, orchDir: this.orchDir, env: this.env, bin: this.bin, tier, spawnFn: this.spawnFn, killGraceMs: this.killGraceMs });
+    o.review = { tier, text: r.text ?? null, error: r.error ?? null, new_tokens: r.usage?.new_tokens ?? 0, notional_usd: r.usage?.notional_usd ?? 0, at: iso(this.now()) };
+    o.usage.new_tokens += o.review.new_tokens; o.usage.notional_usd = (o.usage.notional_usd || 0) + o.review.notional_usd;
+    this.ev('orch.review.advisory', 'orchestrator', null, { tier, ok: !r.error, error: r.error ?? null, new_tokens: o.review.new_tokens });
+    saveState(this.dir, S);
   }
 
   _stuckCheck(S) {

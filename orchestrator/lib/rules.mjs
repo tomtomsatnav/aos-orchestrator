@@ -85,6 +85,7 @@ export const RULES_SCHEMA = obj({
   done: obj({ criteria_when: enums('all_tasks_done'), on_unmet: enums('block') }),
   ask_human: obj({ on_pending_approval: enums('needs_review'), on_7d_hold: enums('manual_resume'), on_budget_hard: enums('block'), on_plan_with_commands: enums('required'), on_human_criterion: enums('wait') }),
   repo_config: obj({ trust: { type: 'boolean' } }),
+  review: obj({ advisory: { type: 'boolean' }, tier: enums('haiku', 'sonnet') }), // opt-in advisory reviewer (lib/review.mjs); absent from DEFAULT_RULES so the default rules hash is unchanged
 }, { required: ['rules_version'] });
 
 export const MAX_REGEX_LEN = 200;
@@ -219,6 +220,7 @@ const SPEC = [
   ['parallel.overlapping_scopes', 'pinned'], ['merge.strategy', 'pinned'], ['merge.on_conflict', 'pinned'], ['done.criteria_when', 'pinned'], ['done.on_unmet', 'pinned'],
   ['ask_human.on_pending_approval', 'pinned'], ['ask_human.on_7d_hold', 'pinned'], ['ask_human.on_budget_hard', 'pinned'], ['ask_human.on_plan_with_commands', 'pinned'], ['ask_human.on_human_criterion', 'pinned'],
   ['repo_config.trust', 'safe', false],
+  ['review.advisory', 'safe', false], ['review.tier', 'safe', 'haiku'],
   ...Object.keys(DEFAULT_RULES.governor).map((k) => [`governor.${k}`, 'free']),
 ];
 // a repo may never loosen these, not even with human acceptance (design 3.3)
@@ -265,7 +267,7 @@ function applyOne(base, val, [p, kind, arg], L) {
     case 'rank': { const r = (x) => arg.indexOf(x); return r(val) >= r(base) || loose('', base, val) ? val : base; }
     case 'subseq': return isSubseq(val, base) || loose('', base, val) ? val : base;
     case 'pinned': return same(val, base) || loose('', base, val) ? val : base;
-    case 'safe': return val === arg || val === base || loose('', base, val) ? val : base;
+    case 'safe': return val === arg || val === base || loose('', base ?? arg, val) ? val : base; // base is undefined for keys absent from DEFAULT_RULES (review.*): `from` must survive a JSON round trip
     case 'free': return val;
     default: throw new Error(`unknown rule kind ${kind}`);
   }
