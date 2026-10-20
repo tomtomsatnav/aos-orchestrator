@@ -197,6 +197,34 @@ test('overloaded (529): short backoff (30 s), attempt not counted, retried -- no
   assert.equal(goalOf(dir).status, 'achieved'); assert.equal(tasksOf(dir)[0].attempts, 1);
 });
 
+test('S2: two consecutive UNCERTAIN (text-only) limit matches for one task count the attempt instead of pausing forever', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  const clock = fakeClock();
+  const unc = { behavior: 'rate_limit', no_event: true, api_error_status: null, message: "You've hit your session limit \u00b7 resets 4:50pm" };
+  sb.scenario({ tasks: { t1: [unc, unc, edit('a.txt', 'alpha')] } });
+  const { dir } = await sb.goal({ success_criteria: [crit('a.txt', 'alpha')], plan: onePlan(ptask('t1', 'a.txt', 'alpha')) });
+  const eng = sb.engine(dir, { clock }); await eng.start();
+  await drive(eng, { until: () => goalOf(dir).orch.paused_reason && !eng.workers.size });
+  assert.equal(tasksOf(dir)[0].orch.attempt_log[0].outcome, 'rate_limited'); assert.equal(tasksOf(dir)[0].attempts, 0);
+  clock.advance(16 * 60000); await drive(eng);
+  const log = tasksOf(dir)[0].orch.attempt_log;
+  assert.deepEqual(log.map((a) => [a.outcome, a.counted]), [['rate_limited', false], ['error', true], ['success', true]]);
+  assert.equal(goalOf(dir).status, 'achieved');
+});
+
+test('S2: a real (certain) limit arriving during a shorter overload pause extends it; the longer pause wins', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  const clock = fakeClock();
+  const reset = Math.floor((clock.t + 30 * 60000) / 1000);
+  sb.scenario({ tasks: { t1: [{ behavior: 'rate_limit', no_event: true, api_error_status: 529, message: 'API Error: 529 overloaded_error' }, edit('a.txt', 'alpha')],
+    t2: [{ behavior: 'rate_limit', message: 'x', rate_limit: { five_hour_utilization: 1.0, seven_day_utilization: 0.5, five_hour_resets_at: reset } }, edit('b.txt', 'beta')] } });
+  const { dir } = await sb.goal({ success_criteria: [crit('a.txt', 'alpha'), crit('b.txt', 'beta')], plan: onePlan(ptask('t1', 'a.txt', 'alpha'), ptask('t2', 'b.txt', 'beta')) });
+  const eng = sb.engine(dir, { clock }); await eng.start();
+  await drive(eng, { until: () => !eng.workers.size && tasksOf(dir).every((x) => x.orch.attempt_log.length > 0) });
+  const gov = readJSON(path.join(sb.orch, 'governor.json'));
+  assert.equal(gov.pause.until_ms, reset * 1000 + 60000, JSON.stringify(gov.pause));
+});
+
 test('utilisation reserve: >= 80% of the 5h window stops new dispatch (running work continues); 7d >= 90% needs a manual resume', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup());
   const clock = fakeClock();

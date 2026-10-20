@@ -24,6 +24,7 @@ import { buildReport } from './report.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_SCRIPT = path.join(HERE, 'policy-hook.mjs');
+const UNCERTAIN_LIMIT_MAX = 2; // consecutive text-only limit matches for one task before the attempt counts
 const backoffS = (interval, errors) => Math.min(interval * 2 ** Math.min(errors || 0, 20), 900);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -459,13 +460,20 @@ export class Engine {
     }
     // plan-limit rejection: governor pauses, attempt not counted
     const lim = detectLimitFailure(c.result, c.stderr_tail, this.gov.cfg, { rateLimit: c.rate_limit, apiError: c.api_error });
+    // an UNCERTAIN (text-only) match twice in a row for the same task is probably not a limit: count the attempt instead of pausing forever
+    const uncertain = (lim.limited || lim.overloaded) && !lim.certain;
+    task.orch.uncertain_limit = uncertain ? (task.orch.uncertain_limit || 0) + 1 : 0;
+    if (uncertain && task.orch.uncertain_limit >= UNCERTAIN_LIMIT_MAX) {
+      task.orch.uncertain_limit = 0;
+      return this._failAttempt(S, task, entry, 'error', { escalate: true, note: `${lim.why} matched ${UNCERTAIN_LIMIT_MAX} times in a row without a structured rate-limit signal: counted as a failed attempt`.slice(0, 300) });
+    }
     if (lim.overloaded) { // 529: short backoff, attempt not counted (never an hours-long plan pause)
       if (!this.gov.load().pause) this.gov.noteOverloaded(this.now(), `API overloaded: ${lim.why}`);
       this._governorStep(S);
       return requeueUncounted('overloaded');
     }
     if (lim.limited) {
-      if (!this.gov.load().pause) this.gov.noteLimitFailure(this.now(), `plan limit${lim.kind && lim.kind !== 'limit' ? ` (${lim.kind})` : ''}: ${lim.why}`, c.rate_limit?.resets_at_ms ?? c.resets_at_ms);
+      this.gov.noteLimitFailure(this.now(), `plan limit${lim.kind && lim.kind !== 'limit' ? ` (${lim.kind})` : ''}: ${lim.why}`, c.rate_limit?.resets_at_ms ?? c.resets_at_ms);
       this._governorStep(S);
       return requeueUncounted('rate_limited');
     }
@@ -854,7 +862,7 @@ export class Engine {
     if (!av.ok) throw new Error(`worker OS sandbox unavailable (${av.reason}): orch.sandbox_workers is set, refusing to start the worker unsandboxed`);
     const w = wrapWorkerCommand([W.resolveBin(this.bin, env.PATH), ...args], { worktree, tmpDir, policyFile, approvalsDir: this.P.approvals,
       decisionLog: path.join(this.P.workers, 'decisions.ndjson'), settingsFile: path.join(this.P.workers, 'settings.json'), hookDir: path.dirname(this.hookScript),
-      gitCommon: path.join(goal.orch.repo, '.git'), claudeBin: W.resolveBin(this.bin, env.PATH), home: this.env.HOME, profileDir: path.join(this.dir, 'sandbox'),
+      gitCommon: path.join(goal.orch.repo, '.git'), claudeBin: W.resolveBin(this.bin, env.PATH), sessionId: args[args.indexOf('--session-id') + 1], sysTmp: env.AOS_FAKE_STATE ? path.dirname(env.AOS_FAKE_STATE) : undefined /* test mode only: the scripted fake's scenario + state */, home: this.env.HOME, profileDir: path.join(this.dir, 'sandbox'),
       bin: this.sandboxBin, ...(this.workerSandbox || {}) });
     return { bin: w.bin, args: w.args, sandboxed: true };
   }

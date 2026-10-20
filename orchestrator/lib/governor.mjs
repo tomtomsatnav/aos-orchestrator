@@ -79,7 +79,7 @@ export class Governor {
       untilMs = nowMs + mins * 60000;
       reason += ` (no resetsAt: backoff ${mins} min)`;
     }
-    if (!st.pause || st.pause.manual || untilMs > (st.pause.until_ms || 0)) st.pause = { manual: false, until_ms: untilMs, reason, set_at: nowMs };
+    if (!st.pause || (!st.pause.manual && untilMs > (st.pause.until_ms || 0))) st.pause = { manual: false, until_ms: untilMs, reason, set_at: nowMs };
   }
 
   /** Human `resume`: clears any pause and silences the seven-day hold until that window resets. */
@@ -127,7 +127,14 @@ export function detectLimitFailure(result, stderrText = '', cfg = {}, extra = {}
   const c = { ...DEFAULTS, ...cfg };
   const no = (why) => ({ limited: false, overloaded: false, auth: false, certain: false, kind: null, why });
   const rl = extra.rateLimit; const ae = extra.apiError;
-  const text = `${result?.result || ''} ${(result?.errors || []).join(' ')} ${stderrText} ${ae?.text || ''}`;
+  // Text is a fallback ONLY for results shaped like an API error (no usage, synthetic model, zero output tokens, or api_error fields).
+  // A result that did real work (tokens produced, max_turns stop) carries worker-authored text ("Implemented the rate limit middleware")
+  // and its errors[] hold tool/file errors (ENOENT: rate_limit.json): neither is ever matched.
+  const u = result?.usage; const outTok = Number(u?.output_tokens);
+  const apiShaped = !!ae || (!!result && (result.api_error_status != null || result.apiError != null || result.model === '<synthetic>'
+    || (result.modelUsage && Object.keys(result.modelUsage).length > 0 && Object.keys(result.modelUsage).every((m) => m === '<synthetic>'))
+    || !u || (Number.isFinite(outTok) && outTok === 0)) && result.subtype !== 'error_max_turns');
+  const text = apiShaped ? `${result?.result || ''} ${stderrText} ${ae?.text || ''}` : '';
   const status = result?.api_error_status ?? ae?.apiErrorStatus ?? null;
   const rejected = rl && typeof rl.status === 'string' && !/^allowed/.test(rl.status);
   const hit = (kind, certain, why) => ({ limited: true, overloaded: false, auth: false, certain, kind, why });
@@ -142,6 +149,7 @@ export function detectLimitFailure(result, stderrText = '', cfg = {}, extra = {}
   if (rejected) return hit(kindOf(rl.type, text) || 'limit', true, `rate_limit_event status ${rl.status}`);
   if (status === 429) return hit(kindOf(rl?.type, text) || 'limit', true, 'api_error_status 429');
   // fallback: text (uncertain)
+  if (!apiShaped) return no('not an API-error-shaped result: text fallback not applied');
   if (new RegExp(c.overload_text, 'i').test(text)) return { limited: false, overloaded: true, auth: false, certain: false, kind: 'overloaded', why: 'overloaded text matched' };
   if (new RegExp(c.auth_text, 'i').test(text)) return { limited: false, overloaded: false, auth: true, certain: false, kind: 'auth', why: 'auth text matched' };
   if (new RegExp(c.limit_text, 'i').test(text)) return hit(kindOf(rl?.type, text) || 'limit', false, 'limit text matched (fallback)');

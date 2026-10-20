@@ -325,6 +325,21 @@ test('detection: 529 is overloaded (not a plan limit), 401 is auth, text fallbac
   d = detectLimitFailure(null, "You've hit your session limit", {}); assert.deepEqual([d.limited, d.certain], [true, false]);
 });
 
+test('detection: text fallback never matches worker-authored text or errors[] (S2 false positives); API-error-shaped results still match', () => {
+  const fp = [
+    { is_error: true, subtype: 'error_max_turns', result: 'Implemented the rate limit middleware', usage: { output_tokens: 900 }, num_turns: 30 },
+    { is_error: true, subtype: 'error_max_turns', result: 'Implemented the rate limit middleware' },
+    { is_error: true, subtype: 'error_during_execution', result: '', errors: ['ENOENT: rate_limit.json'], usage: { output_tokens: 40 } },
+    { is_error: true, subtype: 'error_during_execution', result: '', errors: ['ENOENT: rate_limit.json'] },
+    { is_error: true, result: 'Too many requests handled; usage limit reached in the docs', usage: { input_tokens: 5, output_tokens: 77 } },
+  ];
+  for (const r of fp) { const d = detectLimitFailure(r, '', {}); assert.deepEqual([d.limited, d.overloaded, d.auth], [false, false, false], JSON.stringify(r)); }
+  // shaped like an API error: still detected (uncertain)
+  for (const r of [{ is_error: true, result: "You've hit your session limit · resets 4:50pm" }, { is_error: true, result: "You've hit your weekly limit", usage: { output_tokens: 0 } },
+    { is_error: true, result: "You've hit your session limit", model: '<synthetic>', usage: { output_tokens: 12 } }]) { const d = detectLimitFailure(r); assert.deepEqual([d.limited, d.certain], [true, false], JSON.stringify(r)); }
+  assert.equal(detectLimitFailure({ is_error: true, result: 'x', usage: { output_tokens: 9 } }, '', {}, { apiError: { text: "You've hit your session limit" } }).limited, true, 'an api-error message makes it shaped');
+});
+
 test('governor: overloaded backs off 30 s -> 60 -> 120 -> 300 s and never shortens or replaces a longer plan pause; healthy event resets the ladder', () => {
   const dir = tmp();
   try {
