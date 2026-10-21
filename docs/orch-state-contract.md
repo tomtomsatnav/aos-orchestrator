@@ -74,6 +74,19 @@ Status output `task_list[].last_stderr` and `last_stderr_outcome`: computed on r
 `goal.json` `orch.protected_result`: `{ ok, files, not_executed[], at, output?, kind? }`. `files` = number of JS protected test files run; `not_executed` = up to 20 protected paths with no runner (non-JS). `ok: false` blocks the goal with the original-tests reason (`goal.status` `blocked`). `output` (max 600 chars) is present on failure; `kind` only for `harness_tamper` or an anti-cheat per-file kind. Written at verify whenever `orch.protected_tests.files` is non-empty, and overwritten on each run; absent when protection is off or it has not run yet.
 `goal.json` `orch.review`: `{ tier, text, error, new_tokens, notional_usd, at }`. Advisory only (rules `review.advisory: true`), written once when the goal reaches `achieved`. `text` = sanitized reviewer notes (max 3000 chars), `null` on error; `error` = string, `null` on success. Never changes task or goal status; its tokens and cost are added to `orch.usage`. Event `orch.review.advisory` `{tier, ok, error, new_tokens}`. Shown in `report.md` only.
 
+## Verdicts
+
+`aos-orch verify` writes one record per run (skip with `--no-record`) to `<orchDir>/verdicts/<id>.json`; `orchDir` is resolved exactly as for goals. `id` = `v-YYYYMMDD-HHMMSS-<6 hex>` (UTC), matching `/^v-\d{8}-\d{6}-[0-9a-f]{6}$/`, so ids sort by time. Files are written atomically (temp + rename), mode 0600 in a 0700 directory, at most 64 KB, and the 500 newest are kept (oldest by id pruned after each write). Nothing is ever written into the verified repo. A failed write prints a notice on stderr and does not change the exit code.
+
+```
+{ "schema": "aos.verdict/1", "id", "created_at" (ISO UTC), "repo" (absolute), "repo_name" (basename), "base" (full sha), "base_ref" ("main" or null when --base was a sha),
+  "tree" ("working" | full commit sha), "accepted": bool, "integrity": bool (any rejection is an integrity kind: tests_edited|weakened|skipped|deleted|reduced, check_config_changed, harness_tamper, acceptance_modified, vacuous_pass, literal_copy, worktree_mutated_during_checks),
+  "rejections": [{kind, detail (<= 300 chars, control chars stripped)}], "warnings": [string] (<= 20, each <= 200), "failing_tests": [string] (<= 20),
+  "checks": [{argv (joined, <= 200), ok, exit_code (number|null), duration_ms}] (<= 20), "duration_ms", "source": "cli"|"hook"|"eval", "session_id": string|null, "tool_version" }
+```
+
+Flags: `--source cli|hook|eval` (default `cli`), `--session <id>` (`[A-Za-z0-9_-]{1,64}`, else exit 2). `--json` output gains `record: {id, path}` (`null` with `--no-record` or a failed write). Exit codes are unchanged (0 accepted, 1 rejected, 2 usage).
+
 ## Tests
 
 `tests-monitor/` runs against golden goal dirs in `tests-monitor/fixtures/` and has no orchestrator import. To regenerate them
