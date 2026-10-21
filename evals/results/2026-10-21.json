@@ -1,0 +1,180 @@
+{
+  "generated_at": "2026-10-21T04:16:18.928Z",
+  "mode": "real",
+  "tier": "haiku",
+  "summary": {
+    "k": 3,
+    "tasks": [
+      {
+        "task": "readme-usage",
+        "trials": 3,
+        "passes": 0,
+        "pass_all_k": false,
+        "mean_new_tokens": 0,
+        "mean_wall_s": 900
+      },
+      {
+        "task": "changelog-entry",
+        "trials": 3,
+        "passes": 0,
+        "pass_all_k": false,
+        "mean_new_tokens": 11915,
+        "mean_wall_s": 326.5
+      },
+      {
+        "task": "fix-add",
+        "trials": 3,
+        "passes": 0,
+        "pass_all_k": false,
+        "mean_new_tokens": 0,
+        "mean_wall_s": 900
+      },
+      {
+        "task": "add-slugify",
+        "trials": 3,
+        "passes": 0,
+        "pass_all_k": false,
+        "mean_new_tokens": 0,
+        "mean_wall_s": 900
+      }
+    ],
+    "pass_hat_k": 0,
+    "pass_rate": 0,
+    "mean_new_tokens": 2979,
+    "mean_wall_s": 756.6
+  },
+  "results": [
+    {
+      "task": "readme-usage",
+      "trial": 1,
+      "pass": false,
+      "why": "trial timed out",
+      "status": "timeout",
+      "new_tokens": 0,
+      "notional_usd": 0,
+      "wall_s": 900,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "readme-usage",
+      "trial": 2,
+      "pass": false,
+      "why": "trial timed out",
+      "status": "timeout",
+      "new_tokens": 0,
+      "notional_usd": 0,
+      "wall_s": 900,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "readme-usage",
+      "trial": 3,
+      "pass": false,
+      "why": "trial timed out",
+      "status": "timeout",
+      "new_tokens": 0,
+      "notional_usd": 0,
+      "wall_s": 900,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 1,
+      "pass": false,
+      "why": "missing 1.1.0 entry above 1.0.0 with the retry bullet, or 1.0.0 changed",
+      "status": "blocked",
+      "new_tokens": 18288,
+      "notional_usd": 0.091982,
+      "wall_s": 42.4,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 2,
+      "pass": false,
+      "why": "missing 1.1.0 entry above 1.0.0 with the retry bullet, or 1.0.0 changed",
+      "status": "blocked",
+      "new_tokens": 17456,
+      "notional_usd": 0.093266,
+      "wall_s": 37.2,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 3,
+      "pass": false,
+      "why": "trial timed out",
+      "status": "timeout",
+      "new_tokens": 0,
+      "notional_usd": 0,
+      "wall_s": 900,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "fix-add",
+      "trial": 1,
+      "pass": false,
+      "why": "trial timed out",
+      "status": "timeout",
+      "new_tokens": 0,
+      "notional_usd": 0,
+      "wall_s": 900,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "fix-add",
+      "trial": 2,
+      "pass": false,
+      "why": "trial timed out",
+      "status": "timeout",
+      "new_tokens": 0,
+      "notional_usd": 0,
+      "wall_s": 900,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "fix-add",
+      "trial": 3,
+      "pass": false,
+      "why": "trial timed out",
+      "status": "timeout",
+      "new_tokens": 0,
+      "notional_usd": 0,
+      "wall_s": 900,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "add-slugify",
+      "trial": 1,
+      "pass": false,
+      "why": "trial timed out",
+      "status": "timeout",
+      "new_tokens": 0,
+      "notional_usd": 0,
+      "wall_s": 900,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "add-slugify",
+      "trial": 2,
+      "pass": false,
+      "why": "trial timed out",
+      "status": "timeout",
+      "new_tokens": 0,
+      "notional_usd": 0,
+      "wall_s": 900,
+      "plan_needed_approval": false
+    },
+    {
+      "task": "add-slugify",
+      "trial": 3,
+      "pass": false,
+      "why": "trial timed out",
+      "status": "timeout",
+      "new_tokens": 0,
+      "notional_usd": 0,
+      "wall_s": 900,
+      "plan_needed_approval": false
+    }
+  ]
+}
