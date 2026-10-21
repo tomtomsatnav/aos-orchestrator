@@ -8,7 +8,7 @@ const IDENT = ['-c', 'user.name=aos-engine', '-c', 'user.email=aos-engine@localh
   '-c', 'core.hooksPath=/dev/null', '-c', 'merge.ff=false'];
 
 export function gitEnv(base = process.env) {
-  const env = { PATH: base.PATH || '/usr/bin:/bin', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', LANG: base.LANG || 'C' };
+  const env = { PATH: base.PATH || '/usr/bin:/bin', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', LANG: base.LANG || 'C' };
   if (base.HOME) env.HOME = base.HOME;
   return env;
 }
