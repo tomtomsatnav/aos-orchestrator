@@ -11,7 +11,7 @@ import {
 } from './state.mjs';
 import * as G from './git.mjs';
 import { escCtrl } from './ctrl.mjs';
-import { runChecks, runCheck, checkEnv, tail } from './checks.mjs';
+import { runChecks, runCheck, checkEnv, tail, argvProblem } from './checks.mjs';
 import * as SC from './selfcheck.mjs';
 import { isSelfCheckDenial } from './selfcheck.mjs';
 import { matchAny, scopesOverlap } from './glob.mjs';
@@ -967,6 +967,7 @@ export class Engine {
       if (hit.length) add(t.id, `path_scope includes EXISTING test file(s) ${hit.slice(0, 5).join(', ')}${hit.length > 5 ? ` (+${hit.length - 5})` : ''}. Existing tests must stay unchanged: the originals from the base commit are re-run at verify and the goal cannot be achieved if one fails. Approve only if modifying them is really intended.`);
     }
     const critArgvs = goal.success_criteria.filter((c) => c.check).map((c) => c.check.argv);
+    for (const c of goal.success_criteria) if (c.check && argvProblem(c.check.argv)) add('goal', `success criterion ${c.id}: ${argvProblem(c.check.argv)}`); // hand-written goals skip the draft validator
     for (const t of tasks) { // anti-cheat: what a human is asked to approve here lifts a rule for exactly these files / this task
       const inputs = new Set(checkInputPaths([...t.checks.map((c) => c.argv), ...critArgvs]));
       const hot = t.path_scope.filter((g) => !/[*?{}[\]!]/.test(g) && (isConfigPath(g) || inputs.has(g.replace(/^\.\//, ''))));

@@ -13,7 +13,7 @@ import { compileRules, summarizeRules, renderRulesSummary, buildRulesSnapshot } 
 import { readUserLayer, parseRepoRules, REPO_RULES_PATH } from './rules-store.mjs';
 import { extractJson, gatherRepoFacts, UNSAFE_CHECK_CMDS } from './plan.mjs';
 import { serverWarnings, listTestFiles } from './protect.mjs';
-import { commandAllowed } from './checks.mjs';
+import { commandAllowed, argvProblem } from './checks.mjs';
 import { scanRepoConfig } from './repo-config.mjs';
 import { CTRL_RE, escCtrl, q } from './ctrl.mjs';
 import { validateRepo } from './supervisor.mjs';
@@ -75,6 +75,7 @@ export function checkProblem(check, compiled) {
   if (a.some((x) => hasCtrl(x))) return 'check.argv contains control characters';
   if (!(typeof check.timeout_s === 'number' && Number.isFinite(check.timeout_s) && check.timeout_s > 0 && check.timeout_s <= compiled.checks.max_timeout_s)) return `check.timeout_s must be in (0, ${compiled.checks.max_timeout_s}]`;
   if (UNSAFE_CHECK_CMDS.has(path.basename(a[0]))) return `${q(a[0])} is not allowed as a check`;
+  { const p = argvProblem(a); if (p) return p; }
   if (!matchedAllowRule(a, compiled)) return `"${a.map(q).join(' ')}" is not on the rules' check allowlist`;
   return null;
 }
@@ -241,6 +242,7 @@ export function buildDraftPrompt({ request, facts, scripts = [], compiled, error
     `Valid check examples (copy the shape): ${JSON.stringify(allowedExamples(compiled))}. Extra arguments such as a file name may follow the allowed prefix.`,
     'Do NOT output "budgets": budgets are set by the system, not by you. Ignore any cost or budget figure you may see about this call itself; it is not a goal budget and anything you propose is discarded.',
     'Each success criterion has {"id","text"} and EITHER a "check":{"argv":[...],"timeout_s":n} using an allowed command OR "verify":"human" when no allowed command can verify it (for example prose quality). Use 2-12 criteria.',
+    'A grep pattern that starts with "-" (a markdown bullet, for example) needs "-e" right before it, or grep reads it as an option: ["grep","-qx","-e","- item","FILE"].',
     'If you cannot tell what "done" means, output ONLY {"questions":[...]} with at most 3 short questions. Do not guess.',
     'You may not propose rules, trust, sandbox or approval settings: any other field is rejected.',
     'State ONLY facts given in the REQUEST or the repo facts above. You cannot see the repository contents: never guess at its state (which file holds a bug, whether tests pass, what the code does), neither in the description nor in risks.',
