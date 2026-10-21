@@ -7,7 +7,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { mkSandbox, drive, goalOf, tasksOf, fakeCalls, ptask, crit, edit, HERE, git, NO_OS_SANDBOX } from './helpers.mjs';
 import { startStack, until, createAndPlan, approve, detail, waitStatus } from './server-helpers.mjs';
-import { validateDraft, draftGoal, draftRules, matchedAllowRule, buildDraftPrompt, PROFILES, MAX_PROMPT, draftToSpec, retryTier } from '../lib/draft.mjs';
+import { validateDraft, draftGoal, draftRules, matchedAllowRule, buildDraftPrompt, PROFILES, MAX_PROMPT, draftToSpec, retryTier, tokenFloor } from '../lib/draft.mjs';
 import { compileRules } from '../lib/rules.mjs';
 import { readEvents, readJSON, paths } from '../lib/state.mjs';
 import { createGoal } from '../lib/engine.mjs';
@@ -314,4 +314,42 @@ test('draft prompt carries an engine-computed REPO FACTS block (git repo, base, 
   assert.equal(v.ok, true); assert.match(v.warnings.join(), /protected test file "test\/strings\.test\.mjs"|protected test file .*strings\.test\.mjs/);
   d.success_criteria[1].text = 'Add three tests for words() in a new file words.test.mjs';
   assert.deepEqual(validateDraft(d, { compiled: compiled(), protectedTests: ['test/strings.test.mjs'] }).warnings, []);
+});
+
+// ---- the drafted token budget scales with the job (a fixed 150k cap stopped real 42-file / 70-case runs before anything merged)
+const bigRepo = (sb, n = 400, kb = 8) => { for (let i = 0; i < n; i++) fs.writeFileSync(path.join(sb.repo, `m${i}.txt`), 'x'.repeat(kb * 1024)); git(sb.repo, 'add', '-A'); git(sb.repo, 'commit', '-q', '-m', 'big'); };
+const draftWith = async (t, { setup, rules = ALLOW, overrides, prompt = 'add alpha' } = {}) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup()); userRules(sb, rules); sb.scenario(SC('draft-ok.json')); if (setup) setup(sb);
+  return draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt, env: sb.env(), overrides });
+};
+test('tokenFloor: the 300k floor for a small job, more for files, bytes and a named spec', () => {
+  assert.equal(tokenFloor({}), 300000); assert.equal(tokenFloor({ files: 3, bytes: 2000 }), 300000);
+  assert.ok(tokenFloor({ files: 400, bytes: 3e6 }) >= 1000000); assert.ok(tokenFloor({ files: 3, bytes: 2000, specBytes: 400000 }) > 300000);
+});
+test('draft budget: a small repo gets the 300k floor and the output says how it was chosen', async (t) => {
+  const r = await draftWith(t); assert.equal(r.ok, true, r.errors.join('; '));
+  assert.equal(r.draft.budgets.max_new_tokens, 300000); assert.equal(r.spec.orch.drafted.elastic_tokens, 2000000, 'elastic up to the rules limit'); assert.equal(r.budget_notes.max_new_tokens.source, 'scaled'); assert.match(r.budget_notes.max_new_tokens.detail, /1 files/);
+});
+test('draft budget: a large repo gets a larger budget; the model proposal (500000 in the fixture) is ignored, never lowering it', async (t) => {
+  const r = await draftWith(t, { setup: (sb) => bigRepo(sb) }); assert.equal(r.ok, true, r.errors.join('; '));
+  assert.ok(r.draft.budgets.max_new_tokens > 300000, String(r.draft.budgets.max_new_tokens)); assert.equal(r.spec.orch.budgets.max_new_tokens, r.draft.budgets.max_new_tokens);
+  assert.match(r.budget_notes.max_new_tokens.detail, /^401 files/);
+});
+test('draft budget: a model proposal below the floor is raised to it', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup()); userRules(sb); const s = SC('draft-ok.json'); s.draft.draft.budgets = { max_new_tokens: 20000 }; sb.scenario(s);
+  const r = await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'add alpha', env: sb.env() });
+  assert.equal(r.ok, true, r.errors.join('; ')); assert.equal(r.draft.budgets.max_new_tokens, 300000);
+});
+test('draft budget: a spec file named in the request adds to it', async (t) => {
+  const setup = (sb) => { fs.writeFileSync(path.join(sb.repo, 'SPEC.md'), 'y'.repeat(2e6)); git(sb.repo, 'add', '-A'); git(sb.repo, 'commit', '-q', '-m', 'spec'); };
+  const r = await draftWith(t, { setup, prompt: 'implement everything in SPEC.md' }); assert.equal(r.ok, true, r.errors.join('; '));
+  assert.ok(r.draft.budgets.max_new_tokens >= 1300000); assert.match(r.budget_notes.max_new_tokens.detail, /spec/);
+});
+test('draft budget: an explicit --max-tokens flag wins, even below the floor', async (t) => {
+  const r = await draftWith(t, { setup: (sb) => bigRepo(sb), overrides: { max_new_tokens: 50000 } }); assert.equal(r.ok, true, r.errors.join('; '));
+  assert.equal(r.draft.budgets.max_new_tokens, 50000); assert.equal(r.budget_notes.max_new_tokens.source, 'flag'); assert.equal(r.spec.orch.drafted.elastic_tokens, undefined, 'an explicit flag is never grown');
+});
+test('draft budget: never above the rules limit', async (t) => {
+  const r = await draftWith(t, { setup: (sb) => bigRepo(sb), rules: { ...ALLOW, budgets: { max_new_tokens: 600000 } } }); assert.equal(r.ok, true, r.errors.join('; '));
+  assert.equal(r.draft.budgets.max_new_tokens, 600000); assert.equal(r.budget_notes.max_new_tokens.limit, 600000);
 });

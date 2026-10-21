@@ -20,7 +20,7 @@ import { DEFAULT_RULES, q, buildSnapshot, snapshotHash, rulesFingerprint, applyC
 import { compileGoal, recompileSnapshot, previewGoal, parseRepoRules, REPO_RULES_PATH, REPO_RULES_FILE } from './rules-store.mjs';
 import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
-import { Governor, DEFAULTS as GOV_DEFAULTS, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
+import { Governor, DEFAULTS as GOV_DEFAULTS, detectLimitFailure, checkBudgets, usageOf, planTokenBudget, grownTokenBudget } from './governor.mjs';
 import { listTestFiles, runnerFor, scopeHitsTests, serverWarnings } from './protect.mjs';
 import { startableTiers, buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHashFor, tasksHashV, reviewView, canonical, sha256 } from './plan.mjs';
 import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
@@ -953,6 +953,12 @@ export class Engine {
     atomicWrite(this.P.plan, { source, plan });
     for (const t of S.tasks) this.ev('task.created', 'orchestrator', t.id, { depends_on: t.depends_on, tier: t.orch.model_tier });
     this.ev('orch.plan.created', 'orchestrator', null, { tasks: S.tasks.length, source, risks: Array.isArray(plan.risks) ? plan.risks.slice(0, 10) : [] });
+    if (o.drafted?.elastic_tokens) { // provisional draft budget -> sized from the plan, shown in the plan review so the human approves it with the plan
+      const hard = o.drafted.elastic_tokens; const from = o.budgets.max_new_tokens;
+      o.budgets.max_new_tokens = planTokenBudget(S.tasks, { used: o.usage.new_tokens, hard }); o.budget_progress = 0;
+      o.token_budget_note = `${o.budgets.max_new_tokens} new tokens, sized from this plan (${S.tasks.length} tasks; draft estimate ${from}); grows by 25% while tasks merge, never above the rules limit ${hard}`;
+      this.ev('orch.budget.sized', 'orchestrator', null, { from, to: o.budgets.max_new_tokens, tasks: S.tasks.length, hard });
+    }
     o.plan_fingerprint = this._fingerprint(S);
     let review = humanReviewReason(S.tasks);
     const repoLoose = (readJSON(this.P.rules, null)?.loosenings || []).filter((l) => l.layer === 'repo');
@@ -1214,6 +1220,16 @@ export class Engine {
     let inflight = 0; for (const r of this.workers.values()) { r.tail.update(); inflight += r.tail.usage().new_tokens; }
     const b = checkBudgets(goal, { nowMs: this.now(), seq, inflightTokens: inflight, softFrac: this._R(goal).budgets.soft_frac });
     o.soft = b.soft;
+    if (o.drafted?.elastic_tokens && !o.halt_reason) { // run-time growth: only while the goal makes progress (a merged task or a met criterion since the last extension); no progress = the cap stops it as before
+      const progress = S.tasks.filter((t) => t.status === 'done').length + goal.success_criteria.filter((c) => c.met).length;
+      const cap = o.budgets.max_new_tokens; const used = o.usage.new_tokens + inflight;
+      const next = grownTokenBudget({ used, cap, progress, mark: o.budget_progress ?? 0, hard: o.drafted.elastic_tokens, softFrac: this._R(goal).budgets.soft_frac });
+      if (next) {
+        o.budgets.max_new_tokens = next; o.budget_progress = progress; (o.budget_extensions ||= []).push({ from: cap, to: next, used, progress });
+        this.ev('orch.budget.extended', 'orchestrator', null, { from: cap, to: next, new_tokens: used, reason: `${progress} task(s)/criteria done since start and usage at ${Math.round(100 * used / cap)}% of the working budget` });
+        saveState(this.dir, S); return this._budgets(S, seq); // re-evaluate against the new cap
+      }
+    }
     if (b.hard.length && !o.halt_reason) {
       o.halt_reason = `budget: ${b.hard.join('; ')}`; o.halt_at_ms = this.now();
       this.ev('budget.exceeded', 'orchestrator', null, { ticks: seq, new_tokens: o.usage.new_tokens + inflight, notional_usd: o.usage.notional_usd, reasons: b.hard, rule: budgetRule(b.hard[0]) });

@@ -58,7 +58,16 @@ const hasCtrl = (s, allowNl) => (allowNl ? CTRL_RE.test(String(s).replace(/[\n\t
 const ID_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 const KEYS = ['title', 'description', 'success_criteria', 'budgets', 'questions', 'risks'];
 // Drafted goals are small: unless the model or a flag says otherwise they get these (never above the rules' limits), not the rules' generous maximums.
-export const DRAFT_DEFAULTS = Object.freeze({ max_new_tokens: 150000, max_wall_s: 1200, max_attempts: 2 });
+export const DRAFT_DEFAULTS = Object.freeze({ max_new_tokens: 300000, max_wall_s: 1200, max_attempts: 2 });
+/** Token floor that scales with the job (a fixed cap stopped real 42-file / 70-case runs before anything merged; max_usd and wall clock still bound cost): 300k + 1500 per tracked file + 1 per 10 repo bytes
+ *  (+1 per 2 bytes of a spec .md the request names), rounded to 50k, so a small repo gets exactly the 300k floor. The caller caps it at the rules limit. */
+export const tokenFloor = ({ files = 0, bytes = 0, specBytes = 0 }) => Math.max(DRAFT_DEFAULTS.max_new_tokens, Math.round((DRAFT_DEFAULTS.max_new_tokens + 1500 * files + bytes / 10 + specBytes / 2) / 50000) * 50000);
+/** Tracked file count and bytes at the base commit (git sizes, nothing is read), and the bytes of any `*.md` file the request names by its path or basename (e.g. SPEC.md). */
+export async function repoSize(root, baseCommit, request = '') {
+  let files = 0; let bytes = 0; let specBytes = 0; const named = new Set(String(request).match(/[\w./-]+\.md\b/gi) || []);
+  try { for (const l of (await G.git(root, ['ls-tree', '-r', '-l', baseCommit])).stdout.split('\n')) { const m = /^\S+ blob \S+\s+(\d+)\t(.+)$/.exec(l); if (!m) continue; files++; bytes += +m[1]; if (named.has(m[2]) || named.has(path.posix.basename(m[2]))) specBytes += +m[1]; } } catch { /* unknown: the floor */ }
+  return { files, bytes, specBytes };
+}
 const BUDGET_CAPS = (c) => ({ max_new_tokens: c.budgets.max_new_tokens, max_wall_s: c.budgets.max_wall_clock_s, max_parallel: c.parallel.max_parallel, max_attempts: c.retry.max_attempts, max_usd: c.budgets.max_usd });
 
 /** The first allowlist entry of the COMPILED rules that covers this argv: `<layer>:checks.allow.<id>`, or null. Criterion argv are never added to the list. */
@@ -186,13 +195,13 @@ export function validateDraft(raw, { compiled, protectedTests = [] }) {
 }
 
 /** The goal.json for a validated draft: the human edits it, then `aos-orch run` (createGoal re-validates everything). */
-export function draftToSpec(draft, { root, branch = 'main', tier, profile, profileRules, maxUsdCap = 5, startTier = null }) {
+export function draftToSpec(draft, { root, branch = 'main', tier, profile, profileRules, maxUsdCap = 5, startTier = null, elastic = 0 }) {
   const B = draft.budgets; const ob = {};
   for (const k of ['max_new_tokens', 'max_parallel', 'max_attempts']) if (B[k] !== undefined) ob[k] = B[k];
   return { title: draft.title, description: draft.description,
     success_criteria: draft.success_criteria.map((c) => ({ id: c.id, text: c.text, ...(c.check ? { check: c.check } : {}), ...(c.verify ? { verify: 'human' } : {}) })),
     budget: { max_ticks: 500, max_usd: B.max_usd ?? Math.min(5, maxUsdCap), max_wall_clock_s: B.max_wall_s ?? 7200 },
-    orch: { repo: root, base_branch: branch, drafted: { tier }, profile_name: profile, ...(Object.keys(ob).length ? { budgets: ob } : {}), ...(profileRules || startTier ? { rules: { ...(profileRules || { rules_version: 1 }), ...(startTier ? { plan: { ...(profileRules?.plan || {}), max_start_tier: startTier } } : {}) } } : {}) } };
+    orch: { repo: root, base_branch: branch, drafted: { tier, ...(elastic ? { elastic_tokens: elastic } : {}) }, profile_name: profile, ...(Object.keys(ob).length ? { budgets: ob } : {}), ...(profileRules || startTier ? { rules: { ...(profileRules || { rules_version: 1 }), ...(startTier ? { plan: { ...(profileRules?.plan || {}), max_start_tier: startTier } } : {}) } } : {}) } };
 }
 
 // ---------------------------------------------------------------- the model call
@@ -342,6 +351,8 @@ export async function draftGoal({ orchDir, repo, prompt, profile = 'strict', bra
   // final budgets: draft default (capped by the rules), then what the model proposed, then the human's flags; remember where each came from and the rules' limit
   const budgets = {}; const budget_notes = {};
   for (const [k, v] of Object.entries(DRAFT_DEFAULTS)) { budgets[k] = Math.min(v, caps[k]); budget_notes[k] = { source: 'default', limit: caps[k] }; }
+  const size = await repoSize(root, dr.info.base_commit, prompt); budgets.max_new_tokens = Math.min(tokenFloor(size), caps.max_new_tokens); // scaled to the job, never above the rules
+  budget_notes.max_new_tokens = { source: 'scaled', limit: caps.max_new_tokens, detail: `${size.files} files, ${Math.round(size.bytes / 1024)} KB${size.specBytes ? `, ${Math.round(size.specBytes / 1024)} KB spec` : ''}` };
   // model-proposed budgets are IGNORED: a model infers them from its environment (e.g. a "remaining budget" it sees) and gets them wrong; budgets come from the draft defaults, the flags and the rules only
   const ignored = Object.keys(last.draft.budgets); if (ignored.length) notes.push(`ignored model-proposed budgets (${ignored.join(', ')}): budgets come from the draft defaults, your flags and the rules`);
   for (const [k, v] of Object.entries(flagBudgets)) { budgets[k] = v; budget_notes[k] = { source: 'flag', limit: caps[k] }; }
@@ -352,7 +363,7 @@ export async function draftGoal({ orchDir, repo, prompt, profile = 'strict', bra
     for (const m of await serverWarnings(withCheck.map((c) => c.check.argv), rd, { label: (i) => `criterion ${withCheck[i].id}` })) notes.push(`WARNING: ${m}`);
   }
   const limits = { max_new_tokens: budgets.max_new_tokens, max_wall_clock_s: budgets.max_wall_s, max_attempts: budgets.max_attempts, ...(budgets.max_parallel ? { max_parallel: budgets.max_parallel } : {}), ...(budgets.max_usd ? { max_usd: budgets.max_usd } : {}) };
-  return { ok: true, draft, additions: draftAdditions(prompt, draft.description), budget_notes, start_tier: startTier, notes, spec: draftToSpec(draft, { root, branch, tier: base.tier, profile, profileRules: dr.profileRules, maxUsdCap: compiled.budgets.max_usd, startTier }), errors: [], questions: [], ...base, rules_text: textFor(limits) };
+  return { ok: true, draft, additions: draftAdditions(prompt, draft.description), budget_notes, start_tier: startTier, notes, spec: draftToSpec(draft, { root, branch, tier: base.tier, profile, profileRules: dr.profileRules, maxUsdCap: compiled.budgets.max_usd, startTier, elastic: flagBudgets.max_new_tokens === undefined ? caps.max_new_tokens : 0 }), errors: [], questions: [], ...base, rules_text: textFor(limits) };
 }
 
 const STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'are', 'was', 'its', 'their', 'them', 'they', 'then', 'than', 'also', 'each', 'both', 'all', 'any', 'can', 'has', 'have', 'will', 'should', 'would', 'which', 'when', 'where', 'there', 'these', 'those', 'such', 'via', 'per']);
@@ -388,8 +399,8 @@ export function renderDraft(r) {
         : `      check (sandboxed, ${c.check.timeout_s}s): ${c.check.argv.map(q).join(' ')}   [allowed by ${q(c.matched_rule)}]`);
     }
     const caps = { max_new_tokens: 'tokens', max_wall_s: 'wall seconds', max_parallel: 'parallel', max_attempts: 'attempts', max_usd: 'USD' };
-    const how = { default: 'draft default for a small goal', model: 'proposed by the model', flag: 'set by your flag' };
-    for (const [k, v] of Object.entries(d.budgets)) { const n = r.budget_notes?.[k]; L.push(`  budget ${caps[k]}: ${v}${n ? ` (${how[n.source]}; rules limit ${n.limit})` : ''}`); }
+    const how = { default: 'draft default for a small goal', model: 'proposed by the model', scaled: 'scaled to the job', flag: 'set by your flag' };
+    for (const [k, v] of Object.entries(d.budgets)) { const n = r.budget_notes?.[k]; L.push(`  budget ${caps[k]}: ${v}${n ? ` (${how[n.source]}${n.detail ? `: ${n.detail}, floor 300000` : ''}; rules limit ${n.limit})` : ''}`); }
     if (r.start_tier) L.push(`  tasks may start at most at tier ${q(r.start_tier)} (set by your flag; tighter than the rules)`);
     for (const x of d.risks) L.push(`  risk: ${q(x)}`);
   }

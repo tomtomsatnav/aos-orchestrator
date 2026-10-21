@@ -181,3 +181,17 @@ export function checkBudgets(goal, { nowMs, seq, inflightTokens = 0, softFrac = 
   if (Number.isFinite(b.max_usd) && ((o.usage.notional_usd || 0) >= b.max_usd || b.max_usd <= 0)) out.hard.push(`notional USD cap reached ($${(o.usage.notional_usd).toFixed(4)} >= $${b.max_usd})`);
   return out;
 }
+
+// ---- elastic token budget (drafted goals only, unless the human passed --max-tokens): sized from the plan, grown only while the goal makes progress; never above `hard` (the rules limit)
+const TIER_TOKENS = { haiku: 60000, sonnet: 120000, opus: 200000 }; const RETRY_HEADROOM = 1.5; const GROW_STEP = 0.25; const MIN_PLAN_BUDGET = 150000;
+const round10k = (n) => Math.ceil(n / 10000) * 10000;
+/** Working token budget from a plan: per task an allowance by tier, +10% per path_scope entry (max 10), summed, x1.5 for retries, plus what the planner already used; capped at `hard`. */
+export function planTokenBudget(tasks, { used = 0, hard = Infinity } = {}) {
+  const sum = tasks.reduce((s, t) => s + (TIER_TOKENS[t.model_tier ?? t.orch?.model_tier] || TIER_TOKENS.sonnet) * (1 + Math.min((t.path_scope ?? t.orch?.path_scope ?? []).length, 10) / 10), 0);
+  return Math.min(hard, Math.max(MIN_PLAN_BUDGET, round10k(sum * RETRY_HEADROOM + used)));
+}
+/** The new working budget when usage is at `softFrac` of it AND progress (merged tasks + met criteria) rose since the last extension; else null. Bounded step, never above `hard`. */
+export function grownTokenBudget({ used, cap, progress, mark, hard, softFrac = 0.8 }) {
+  if (!(cap > 0) || cap >= hard || used < softFrac * cap || !(progress > mark)) return null;
+  const next = Math.min(hard, round10k(cap * (1 + GROW_STEP))); return next > cap ? next : null;
+}

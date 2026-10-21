@@ -26,7 +26,7 @@ task t3-isoweek-impl  tier=haiku  scope=isoweek.mjs
 task t4-integration-check  tier=haiku  scope=slugify.mjs, slugify.test.mjs  after=t1-slugify,t2-readme,t3-isoweek-impl
   check (sandboxed, 120s): node --test
 rules 062b4179b3d0  profile=node-library
-  limits: $1, 150000 tokens, 1200s, 3 attempts/task, 1 parallel
+  limits: $1, 300000 tokens, 1200s, 3 attempts/task, 1 parallel
 ```
 
 The planner also listed its own risks. The important one: `isoweek.test.mjs` already existed in the repo but `isoweek.mjs` did not, so the "existing tests still pass" criterion could never pass without a task the prompt had not asked for. It added t3 for that, the review screen flagged it as beyond the prompt, and the human approved the plan knowing why. That is the point of the gate: nothing ran until a person had read it.
@@ -57,7 +57,7 @@ Timeline from `events.ndjson` (UTC, one session):
 
 The engine ran one worker at a time here (`max_parallel` 1). After the plan was approved the four tasks took 43 seconds of wall clock. The goal waited a further 75 seconds for the human to confirm the README criterion.
 
-Totals: 39,306 new tokens (10,349 planner plus 28,957 workers), 145,367 cache-read tokens, 5 workers started, notional cost $0.1455 against a $1 limit and a 150,000-token cap. No approvals were requested and no policy denials occurred.
+Totals: 39,306 new tokens (10,349 planner plus 28,957 workers), 145,367 cache-read tokens, 5 workers started, notional cost $0.1455 against a $1 limit and a 300,000-token cap. No approvals were requested and no policy denials occurred.
 
 ### The result
 
