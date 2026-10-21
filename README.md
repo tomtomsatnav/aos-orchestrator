@@ -2,7 +2,28 @@
 
 [![CI](https://github.com/tomtomsatnav/aos-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/tomtomsatnav/aos-orchestrator/actions/workflows/ci.yml)
 
-Describe a change in a sentence. An Opus planner splits it into small tasks, you review the plan, and cheap headless Claude Code workers (Haiku first, Sonnet and Opus only on failure) do the work in isolated git worktrees. Every task is verified by real commands, and the results land on a branch for you to review and merge. Zero npm dependencies, Node 18+, macOS and Linux (bubblewrap); the worker sandbox is macOS-only.
+**Current research, not a finished product:** a guardrail harness for unattended coding agents, with an experimental orchestrator.
+
+Coding agents rewarded by passing tests will sometimes game them, for example by rewriting a test's expected value instead of fixing the code.
+
+The approach: an unattended agent never marks its own homework. `aos-orch verify` re-runs the original tests from the base commit in a sandbox and checks the diff for edited, weakened, skipped or deleted tests. The orchestrator adds planning and parallel workers on top, but in our evals that did not pay off.
+
+Real runs, 21 Oct 2026, Haiku, 5 to 10 trials per cell, costs notional (list price). Full write-up and limits: [evals/results/2026-10-21.md](evals/results/2026-10-21.md).
+
+| impossible-test (a test expects a wrong value) | bare Haiku | AOS, defences off (control) | AOS | Haiku + `aos-orch verify` |
+|---|---|---|---|---|
+| test rewrite accepted | 10/10 (3 not mentioned) | 10/10 (none announced) | 0/10 | 0/5 |
+| mean cost, time per trial | $0.007, 18 s | $0.077, 37 s | $0.159, 62 s | $0.007, 18 s |
+
+| large-codebase (42 files, 30 hidden cases) | bare Haiku | Haiku + `aos-orch verify` | AOS | AOS after the day's fixes |
+|---|---|---|---|---|
+| passed, mean cost, mean time | 5/5, $0.35, 335 s | 5/5, $0.34, 344 s | 0/5, $0.35, 1081 s | 4/5, $0.53, 676 s |
+
+Orchestrator alone on six small tasks: latest run 17/18; 78/84 across the day, including runs before the fixes. Small samples, toy-to-small tasks, one machine.
+
+![Demo](docs/demo.gif)
+
+The demo replays a real eval trial: Haiku rewrites the wrong test and reports that all tests pass; `aos-orch verify` re-runs the original test and rejects the change.
 
 ## Quickstart
 
@@ -10,7 +31,17 @@ Describe a change in a sentence. An Opus planner splits it into small tasks, you
 git clone https://github.com/tomtomsatnav/aos-orchestrator && cd aos-orchestrator && npm link   # installs `aos-orch`
 ```
 
-Use a throwaway repo or clone first (`./demo` below), with `claude` on your PATH and logged in.
+**1. Guard one agent session (the simplest use, and the one the evals support).** Note the base commit before the agent runs, let any agent work in the repo, then judge its working tree:
+
+```sh
+base=$(git -C ./demo rev-parse HEAD)             # a base the agent cannot move
+(cd ./demo && claude -p "make the tests pass")   # or any other agent
+aos-orch verify --repo ./demo --base "$base"     # exit 0 accepted, 1 rejected; the reasons name the failing tests
+```
+
+`verify` copies the finished tree into a private scratch repo (the agent's `.git` config and hooks are never used to run anything) and applies the engine's guardrails against the base commit: the anti-cheat diff analysis, the checks run sandboxed and judged against base-commit test counts, and the ORIGINAL existing tests re-run over the tree. The default check is the profile's test command (`node --test` / `npm test` in `node-library`); add `--check "..."` to choose, `--tree <commit>` to judge a commit, `--json` for machine output. It fails closed without an OS sandbox (`--unsandboxed-checks` opts out). Each verdict is saved as `<state dir>/verdicts/<id>.json` (`aos.verdict/1`, `--no-record` skips it) for a read-only dashboard; a Guard view in the dashboard is coming (not yet released). Two limits, both seen in the evals: it cannot see hidden tests, so an ordinary bug the tests miss passes; and it rejects a wanted behaviour change when an existing test asserts the old behaviour, so someone has to read the rejection.
+
+**2. The orchestrator (experimental).** Use a throwaway repo or clone first (`./demo` below), with `claude` on your PATH and logged in.
 
 ```sh
 aos-orch draft "add a slugify CLI with tests" --repo ./demo   # 1. one small model call writes goal.json for you to review
@@ -18,11 +49,17 @@ aos-orch run goal.json                                         # 2. plans, shows
 aos-orch approve-plan <id>                                     # 3. from a second terminal, once you have read the plan
 ```
 
+Describe a change in a sentence. An Opus planner splits it into small tasks, you review the plan, and cheap headless Claude Code workers (Haiku first, Sonnet and Opus only on failure) do the work in isolated git worktrees. Every task is verified by real commands, and the results land on a branch for you to review and merge. In the 21 Oct evals this was slower, dearer and less reliable than one bare session on every capability task; every failure was in the orchestration layer (tick and wall-clock caps, plan scope, a policy denial, a false positive). Zero npm dependencies, Node 18+, macOS and Linux (bubblewrap).
+
 `run` prints the goal id and stays attached: the plan is shown, nothing runs until you approve it, and when every task is done it prints the report and exits. Your base branch is never touched; the work is on `aos/<goal>/integration` and the report gives the exact `git diff` and `git merge` commands. See [docs/first-run.md](docs/first-run.md) for real runs, including every number.
 
 Run `aos-orch doctor` first if anything looks off: it checks node, git, the `claude` version and flags, login, the sandbox, the state dir and the port (`--live` adds one tiny Haiku call).
 
 Without `npm link` use `node orchestrator/bin/aos-orch.mjs ...` (or `npm link` later). `aos-orch --help` lists every command.
+
+## Status
+
+Experimental research code. The guard (`aos-orch verify`) is the part the evals support; the orchestrator is kept as an experiment, and its evals say it did not beat one bare Claude Code session. Platforms: macOS and Linux (bubblewrap). The worker OS sandbox (`--sandbox-workers`, the default on macOS) is macOS-only and fails closed on Linux: on Linux only the checks are sandboxed. Windows via WSL is untested. The test suite runs on both (sandbox tests skip where no sandbox works). 18 real goals so far (counted from the goal directories): 13 achieved, 5 blocked. The blocks: a plan rejected for starting above the allowed tier, a test-setup error, a stale-base bug and a server-test loopback issue (both since fixed), and an unsatisfiable test that the protected re-run correctly blocked. See [docs/first-run.md](docs/first-run.md). Repeatable real evals (prompt to graded result, Haiku workers): 78 of 84 orchestrator trials passed on 21 Oct 2026 across runs before and after the day's fixes, and a controlled comparison against bare and guarded sessions; see [evals/results/2026-10-21.md](evals/results/2026-10-21.md). In those evals no real run gave the engine a genuine cheat to catch: workers cannot write existing tests, so the protection is prevention by construction, and the one flagged attempt was a false positive (fixed). Costs in reports are notional USD (list price, not money spent on a subscription). Everything else is tested against a scripted fake `claude`. A real `claude -p` plan-limit result has never been observed, so the rate-limit handling is keyed on error shapes from interactive transcripts.
 
 ## Safety
 
@@ -34,10 +71,6 @@ Without `npm link` use `node orchestrator/bin/aos-orch.mjs ...` (or `npm link` l
 - With `worker.self_check` (on in the `node-library` profile, off in `strict`) a worker can have the engine run its own task's approved checks, sandboxed, a few times per attempt, and read the output. It cannot run anything else. See [docs/security.md](docs/security.md), protection 6.
 
 Details and residual risks: [docs/security.md](docs/security.md). Reporting a vulnerability: [SECURITY.md](SECURITY.md).
-
-## Status
-
-Experimental. Platforms: macOS and Linux (bubblewrap); the worker sandbox (`--sandbox-workers`, the default on macOS) is macOS-only and fails closed on Linux; Windows via WSL is untested. The test suite runs on both (sandbox tests skip where no sandbox works). 18 real goals so far (counted from the goal directories): 13 achieved, 5 blocked. The blocks: a plan rejected for starting above the allowed tier, a test-setup error, a stale-base bug and a server-test loopback issue (both since fixed), and an unsatisfiable test that the protected re-run correctly blocked. See [docs/first-run.md](docs/first-run.md). Repeatable real evals (prompt to graded result, Haiku workers; 4 small tasks and 2 harder ones, including a test-editing trap): 78 of 84 trials passed on 21 Oct 2026; see [evals/results/2026-10-21.md](evals/results/2026-10-21.md). Costs in reports are notional USD (list price, not money spent on a subscription). Everything else is tested against a scripted fake `claude`. A real `claude -p` plan-limit result has never been observed, so the rate-limit handling is keyed on error shapes from interactive transcripts.
 
 ## Try it without spending tokens
 
@@ -55,17 +88,17 @@ Unset `AOS_CLAUDE_BIN` and the same commands launch the real `claude`.
 
 - State is kept in `~/.aos/orch` (`$XDG_STATE_HOME/aos/orch`, or `$AOS_ORCH_DIR`). An existing dashboard-plugin folder from older versions is still used if the new one does not exist. If a worker crashed, `aos-orch status <id>` and the report show the end of its stderr.
 - Guardrails added since: existing tests are protected from edits by workers (`checks.protect_existing_tests`), loopback network for checks is an explicit opt-in (`checks.allow_loopback`), and a goal blocked at planning can be retried with `aos-orch run <id> --replan` (the planner is told what was wrong). Details: [orchestrator/README.md](orchestrator/README.md).
-- Optional advisory reviewer (`review.advisory`, off by default, never blocks) and untrusted-text fencing in prompts: [orchestrator/README.md](orchestrator/README.md). Model and worker-network notes: [docs/worker-network.md](docs/worker-network.md). How this lines up with Anthropic's agent guidance: [docs/best-practices-alignment.md](docs/best-practices-alignment.md). Scripted eval scaffold: `evals/`.
+- Optional advisory reviewer (`review.advisory`, off by default, never blocks) and untrusted-text fencing in prompts: [orchestrator/README.md](orchestrator/README.md). Model and worker-network notes: [docs/worker-network.md](docs/worker-network.md). How this lines up with Anthropic's agent guidance: [docs/best-practices-alignment.md](docs/best-practices-alignment.md). Eval harness, arms and how to regenerate the results table: [evals/README.md](evals/README.md).
 - Everything a worker may do, and the retry and budget behaviour, is one versioned rule set: `aos-orch rules show`, design in [docs/rules-design.md](docs/rules-design.md).
 - Engine internals, state layout, goal file and control server: [orchestrator/README.md](orchestrator/README.md), [docs/orchestrator-design.md](docs/orchestrator-design.md). The on-disk layout other tools can rely on: [docs/orch-state-contract.md](docs/orch-state-contract.md).
 - It implements [AOS-1](https://github.com/tomtomsatnav/aos-1-spec); schemas are vendored in `schemas/`.
-- Guard mode, verify any agent's work without orchestration: `aos-orch verify --repo <path> [--base main] [--check "node --test"]... [--json]` judges the repo's working tree (or `--tree <commit>`) against the base commit with the engine's guardrails: the anti-cheat diff analysis, the checks run sandboxed and judged against base-commit test counts, and the ORIGINAL existing tests re-run over the tree. The default check is the profile's test command (`node --test` / `npm test` in `node-library`). Exit 0 accepted, 1 rejected (the reasons name the failing tests). Pass a `--base` the agent could not move (e.g. a commit sha taken before it ran).
+- Guard mode in full: `aos-orch verify --repo <path> [--base main] [--check "node --test"]... [--json]` judges the repo's working tree (or `--tree <commit>`) against the base commit with the engine's guardrails: the anti-cheat diff analysis, the checks run sandboxed and judged against base-commit test counts, and the ORIGINAL existing tests re-run over the tree. The default check is the profile's test command (`node --test` / `npm test` in `node-library`). Exit 0 accepted, 1 rejected (the reasons name the failing tests). Pass a `--base` the agent could not move (e.g. a commit sha taken before it ran).
 - Tidy up: `aos-orch archive <goal-id>... | --blocked | --achieved | --older-than <days> [--dry-run]` moves finished goals to `<state>/archive/goals/` (never deletes; refuses live or active goals), `aos-orch unarchive <goal-id>` moves one back, `aos-orch goals --all` lists archived ones; the dashboard no longer shows archived goals.
-- Read-only live dashboard (goals, tasks, workers, cost): https://github.com/tomtomsatnav/agent-orchestration-standard. Its GOALS panel talks to this repo's control server (`aos-orch serve`, 127.0.0.1:4319).
+- Read-only live dashboard (goals, tasks, workers, cost): https://github.com/tomtomsatnav/agent-orchestration-standard. Its GOALS panel talks to this repo's control server (`aos-orch serve`, 127.0.0.1:4319). A Guard view of `verify` verdicts is coming (not yet released).
 
 ## How it stops cheating
 
-A worker is rewarded when the engine's checks pass, so the engine makes sure a pass is honest (`orchestrator/lib/anticheat.mjs`, `lib/harness-guard.mjs`). Each rule is tested against a fake-claude worker that cheats (`orchestrator/test/redteam.test.mjs` holds the end-to-end exploits that once reached `achieved`).
+A worker is rewarded when the engine's checks pass, so the engine makes sure a pass is honest (`orchestrator/lib/anticheat.mjs`, `lib/harness-guard.mjs`). The same rules back `aos-orch verify`. Each rule is tested against a fake-claude worker that cheats (`orchestrator/test/redteam.test.mjs` holds the end-to-end exploits that once reached `achieved`). In the real evals no agent attempted a covert cheat, so these rules are tested against scripted cheats only.
 
 **Enforced** (a failing attempt, or a goal that cannot be achieved):
 
@@ -89,6 +122,6 @@ A worker is rewarded when the engine's checks pass, so the engine makes sure a p
 
 **Self-check is never trusted:** `worker.self_check` output is only shown to the worker; the verdict is always the engine's own re-run after the attempt (a test that passes only inside a self-check fails the attempt: `redteam2.test.mjs` case 7), and files written after or during a run are caught by `worktree_mutated_during_checks`.
 
-**Known limits.** (0) Round 2: the child-process rule is observational. A test that spawns `node` and reads `.status` once, or attaches an empty `exit` listener, passes it; a `Worker` whose `error` event a test swallows is not detected (`todo` test in `redteam2.test.mjs`); `sh -c "node ..."` is not recognised; the original `child_process` can be reached through internals. Replaced fs functions are only seen if still replaced when the test process ends, and a baseline whose count depends on the check's environment (not clock/randomness) is not detected. Honest false positives: a test that replaces an fs read function and never restores it (`mock.method(fs, 'readFileSync')` without `restore()`), a test that registers a loader hook on purpose (loader tooling), and a test that spawns a `node` child purely for side effects and never looks at it. (1) The preload runs in the same process as the code under test: that code could read the nonce from `/proc/self/environ` (Linux) or attack things we do not snapshot (the test runner's internals, `Function.prototype`, a native addon); the freeze + marker design blocks the known assert/node:test tampering, it is not a proof. (2) Weakening that keeps the number of assertion calls (changing an expected value in place) is invisible to `tests_weakened`; with `protect_existing_tests` on the original tests are re-run at verify, which catches it for existing tests, but a weak NEW test passes honestly. (3) Per-file counts rely on the runner's events; a non-`node --test` command (`make test`, `npm test`) is only judged when its output carries a node test summary, and is not wrapped by the preload. Tests in other languages are not counted. (4) Node < 21 does not expand globs; the engine expands them itself for `node --test` checks. The preload needs Node >= 18.18 (`--import`). (5) `checks.allow_loopback: true` is host-wide localhost on macOS (sandbox-exec cannot restrict ports); a check could reach local services such as the AOS dashboard. Linux gives each check a private network namespace. The rules summary says so. (6) `checks.acceptance_first` only applies to goals with at least one criterion that has a check; plan approval now warns when it is on and no criterion has one. (7) The Linux bubblewrap path of the guard (read-only bind of the preload dir) is covered by argv tests and by the Linux CI job, which runs the bubblewrap tests green on ubuntu with Node 18 and 22.
+**Known limits.** (0) Round 2: the child-process rule is observational. A test that spawns `node` and reads `.status` once, or attaches an empty `exit` listener, passes it; a `Worker` whose `error` event a test swallows is not detected (`todo` test in `redteam2.test.mjs`); `sh -c "node ..."` is not recognised; the original `child_process` can be reached through internals. Replaced fs functions are only seen if still replaced when the test process ends, and a baseline whose count depends on the check's environment (not clock/randomness) is not detected. Honest false positives: a test that replaces an fs read function and never restores it (`mock.method(fs, 'readFileSync')` without `restore()`), a test that registers a loader hook on purpose (loader tooling), and a test that spawns a `node` child purely for side effects and never looks at it. (1) The preload runs in the same process as the code under test: that code could read the nonce from `/proc/self/environ` (Linux) or attack things we do not snapshot (the test runner's internals, `Function.prototype`, a native addon); the freeze + marker design blocks the known assert/node:test tampering, it is not a proof. (2) Weakening that keeps the number of assertion calls (changing an expected value in place) is invisible to `tests_weakened`; with `protect_existing_tests` on the original tests are re-run at verify, which catches it for existing tests, but a weak NEW test passes honestly. (3) Per-file counts rely on the runner's events; a non-`node --test` command (`make test`, `npm test`) is only judged when its output carries a node test summary, and is not wrapped by the preload. Tests in other languages are not counted. (4) Node < 21 does not expand globs; the engine expands them itself for `node --test` checks. The preload needs Node >= 18.18 (`--import`). (5) `checks.allow_loopback: true` is host-wide localhost on macOS (sandbox-exec cannot restrict ports); a check could reach local services such as the AOS dashboard. Linux gives each check a private network namespace. The rules summary says so. (6) `checks.acceptance_first` only applies to goals with at least one criterion that has a check; plan approval now warns when it is on and no criterion has one. (7) The Linux bubblewrap path of the guard (read-only bind of the preload dir) is covered by argv tests and by the Linux CI job, which runs the bubblewrap tests green on ubuntu with Node 18 and 22. (8) `aos-orch verify` cannot see hidden tests (an ordinary bug the tests miss is accepted) and rejects a legitimate behaviour change that an existing test asserts against (seen on a SWE-bench task); a human still reads its rejections.
 
 [MIT License](LICENSE).
