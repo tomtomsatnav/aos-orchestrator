@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { matchSelfCheck, isSelfCheckDenial, formatResponse, readRequests, writeResponse, HOOK_TIMEOUT_S } from '../lib/selfcheck.mjs';
@@ -12,7 +13,7 @@ import { buildPlannerPrompt } from '../lib/plan.mjs';
 import { buildWorkerPrompt, buildSettings } from '../lib/worker.mjs';
 import { sandboxAvailable } from '../lib/sandbox.mjs';
 import { readEvents, paths } from '../lib/state.mjs';
-import { mkSandbox, drive, goalOf, tasksOf, NO_OS_SANDBOX } from './helpers.mjs';
+import { mkSandbox, drive, goalOf, tasksOf, sleep, NO_OS_SANDBOX } from './helpers.mjs';
 
 const CHECKS = [{ argv: ['node', '--test', 'a.test.mjs'], timeout_s: 60 }, { argv: ['grep', '-q', 'x y', 'a.txt'], timeout_s: 5 }];
 const SKIP_SB = NO_OS_SANDBOX ? `no OS sandbox here (${sandboxAvailable().reason})` : false;
@@ -171,4 +172,31 @@ test('engine: with worker.self_check off the same call is an ordinary denial (fa
   assert.equal(ev.filter((e) => e.type === 'orch.check.self_run').length, 0);
   assert.equal(tasksOf(dir)[0].orch.attempt_log[0].outcome, 'denied');
   assert.equal(fs.existsSync(path.join(dir, 'tmp', 't1', '.aos-selfcheck')), false);
+});
+
+const SLOW_TEST = "import test from 'node:test'; test('slow', async () => { await new Promise((r) => setTimeout(r, 6000)); });\n";
+const psCommands = () => execFileSync('ps', ['-axo', 'command='], { encoding: 'utf8' });
+
+test('engine: stop() kills an in-flight self-check; a new engine adopts the worker with its self-check state (not failed as denied)', { skip: SKIP_SB }, async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  const file = `slow${process.pid}${Date.now()}.test.mjs`; const cmd = `node --test ${file}`;
+  sb.scenario({ tasks: { t1: [{ behavior: 'success', edits: [{ path: file, content: SLOW_TEST }], commands: [cmd] }] } });
+  const check = { argv: ['node', '--test', file], timeout_s: 60 };
+  const { dir } = await sb.goal({ success_criteria: [{ id: 'c1', text: 'x', check }],
+    plan: { tasks: [{ id: 't1', title: 'slow', description: 'd', depends_on: [], model_tier: 'haiku', path_scope: [file], allowed_commands: [], checks: [check], output_contract: 'x', acceptance: ['x'] }], risks: [] },
+    orch: { rules: { rules_version: 1, worker: { self_check: true, self_checks_max: 2 } } } });
+  const e1 = sb.engine(dir, { selfCheckPollMs: 30, pid: 2147480011 });
+  await e1.start();
+  await drive(e1, { until: () => e1.workers.get('t1')?.selfCheck?.busy === true, timeoutMs: 60000 });
+  await sleep(500); assert.ok(psCommands().includes(file), 'the self-check child is running');
+  await e1.stop();
+  await sleep(300);
+  assert.ok(!psCommands().includes(file), 'stop() killed the self-check process group');
+  const e2 = sb.engine(dir, { selfCheckPollMs: 30 });
+  await drive(e2, { timeoutMs: 120000 });
+  const ev = readEvents(dir);
+  assert.ok(ev.some((e) => e.type === 'orch.worker.adopted'), 'the worker was re-adopted');
+  const entry = tasksOf(dir)[0].orch.attempt_log[0];
+  assert.notEqual(entry.outcome, 'denied'); assert.equal(entry.denials, 0, 'the earlier self-check denial is not a policy denial');
+  assert.equal(goalOf(dir).status, 'achieved', goalOf(dir).blocked_reason);
 });

@@ -2,9 +2,9 @@
 // The dashboard reads only <state>/goals/, so archived goals disappear from its GOALS panel and "Needs you".
 import fs from 'node:fs';
 import path from 'node:path';
-import { goalsRoot, goalDirOf, paths, readJSON, pidAlive, lockStatus } from './state.mjs';
+import { goalsRoot, goalDirOf, paths, readJSON, pidAlive, lockStatus, attachedPid, ID_RE } from './state.mjs';
 
-export const GID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const GID_RE = ID_RE;
 export const archiveRoot = (orch) => path.join(orch, 'archive', 'goals');
 export const archivedDirOf = (orch, id) => path.join(archiveRoot(orch), id);
 
@@ -16,8 +16,8 @@ export function archiveRefusal(dir) {
   if (st.owner_alive) return `its engine lock is live (pid ${st.owner_pid})`;
   const l = readJSON(paths(dir).lock, null);
   if (l && pidAlive(l.pid)) return `its engine lock is held by live pid ${l.pid}`;
-  const a = readJSON(path.join(dir, 'attached.json'), null);
-  if (a && pidAlive(a.pid) && Date.now() - a.ts < 5000) return `an attached run (pid ${a.pid}) is waiting on it`;
+  const ap = attachedPid(dir);
+  if (ap) return `an attached run (pid ${ap}) is waiting on it`;
   if (g.status === 'active') return 'status is active';
   return null;
 }

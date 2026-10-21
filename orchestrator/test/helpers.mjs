@@ -9,6 +9,7 @@ import { readJSON, loadState, readEvents, paths } from '../lib/state.mjs';
 import { sandboxAvailable } from '../lib/sandbox.mjs';
 import { validateEvent, validateGoal, validateTask, validateAgent, validateHeartbeat } from '../lib/schema.mjs';
 
+globalThis[Symbol.for('aos.testFakeEnv')] = true; // the scripted fake claude gets its AOS_FAKE_* variables (lib/worker.mjs buildEnv); never set outside the tests
 export const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const FAKE = path.join(HERE, 'fake-claude.mjs');
 /** Hosts with no working OS sandbox (e.g. Linux without bubblewrap/user namespaces): test engines run checks unsandboxed (constructor
@@ -30,7 +31,7 @@ export function mkSandbox(name = 'aos-orch') {
   fs.mkdirSync(orch); fs.mkdirSync(fakeState);
   const sb = { root, repo, orch, fakeState, scenarioFile: path.join(root, 'scenario.json'), engines: [],
     scenario(obj) { fs.writeFileSync(sb.scenarioFile, JSON.stringify(obj)); return sb; },
-    env(extra = {}) { return { ...process.env, AOS_ORCH_DIR: orch, AOS_CLAUDE_BIN: FAKE, AOS_FAKE_SCENARIO: sb.scenarioFile, AOS_FAKE_STATE: fakeState, AOS_APPROVAL_POLL_MS: '40', ...extra }; },
+    env(extra = {}) { return { ...process.env, AOS_ORCH_DIR: orch, AOS_CLAUDE_BIN: FAKE, AOS_FAKE_SCENARIO: sb.scenarioFile, AOS_FAKE_STATE: fakeState, AOS_APPROVAL_POLL_MS: '40', NODE_OPTIONS: `--import=${path.join(HERE, 'enable-fake-env.mjs')}`, ...extra }; },
     async goal(spec = {}) {
       const base = { id: 'g-test', title: 'Test goal', success_criteria: [{ id: 'c1', text: 'all files present', check: { argv: ['grep', '-qx', 'gamma', 'c.txt'], timeout_s: 30 } }],
         budget: { max_ticks: 100000, max_usd: 50, max_wall_clock_s: 3600 },

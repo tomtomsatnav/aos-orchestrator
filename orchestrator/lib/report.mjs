@@ -19,7 +19,7 @@ export function buildReport({ goal, tasks, state = null, approvals = [], denials
   for (const c of goal.success_criteria) {
     L.push(`- [${c.met ? 'x' : ' '}] **${c.id}** ${c.text}${c.check ? ` (\`${c.check.argv.join(' ')}\`)` : ''}`);
     const r = criteriaResults[c.id];
-    if (r) L.push(fence((r.ok ? 'PASS' : 'FAIL') + ` exit=${r.exit_code}\n${(r.output || '').slice(-1500)}`).replace(/\n$/, ''));
+    if (r) L.push(fence(((r.ok ? 'PASS' : 'FAIL') + ` exit=${r.exit_code}\n${(r.output || '').slice(-1500)}`).replace(/```/g, "'''")).replace(/\n$/, ''));
   }
   L.push('', '## Tasks', '', '| task | status | tier | attempts | new tokens | outcomes |', '|---|---|---|---|---|---|');
   for (const t of tasks) {
@@ -41,11 +41,11 @@ export function buildReport({ goal, tasks, state = null, approvals = [], denials
   if (selfChecks) L.push('', `Self-checks: ${selfChecks} run(s) (approved check argv a worker asked the engine to run, sandboxed; not denials)`);
   if (o.review) {
     L.push('', '## Reviewer notes (advisory, written by a model, not verified)', '',
-      o.review.error ? `The advisory review did not complete: ${o.review.error}` : fence(o.review.text || '(empty)').trim(),
+      o.review.error ? `The advisory review did not complete: ${o.review.error}` : fence(String(o.review.text || '(empty)').replace(/```/g, "'''")).trim(),
       '', `(tier ${o.review.tier}; these notes never affect the goal status)`);
   }
   if (governor?.pause) L.push('', '## Governor', '', `paused: ${governor.pause.reason}`);
-  L.push('', '## Diff (base..integration)', fence(diffStat || '(no changes)'));
+  L.push('', '## Diff (base..integration)', fence(String(diffStat || '(no changes)').replace(/```/g, "'''")));
   L.push('## Review and merge (the engine never merges to your base branch)', '',
     '```sh', `git -C ${JSON.stringify(o.repo)} log --oneline ${o.base_branch}..${o.integration_branch}`,
     `git -C ${JSON.stringify(o.repo)} diff ${o.base_branch}..${o.integration_branch}`,

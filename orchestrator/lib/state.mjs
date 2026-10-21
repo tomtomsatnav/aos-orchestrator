@@ -174,6 +174,14 @@ export function lockStatus(dir, { staleTicks = 5, nowMs = Date.now(), ttlMs = 60
   return { owner_pid: l?.pid ?? null, owner_label: l?.label ?? null, owner_alive, lock_age_ms: l ? nowMs - l.ts : null, hb_seq: hb.seq, hb_age_ms, parked,
     pending_commands: cmds.count, oldest_command_age_ms: cmds.oldest_age_ms, stale_after_ms: limit, wedged };
 }
+/** A \`run\` waiting for a human (between engine runs it holds no lock) leaves this marker, refreshed twice a second. */
+export const attachedFile = (dir) => path.join(dir, 'attached.json');
+/** Pid of the live attached \`run\` of a goal dir (marker fresher than 5 s, process alive), else null. */
+export function attachedPid(dir, nowMs = Date.now()) {
+  const a = readJSON(attachedFile(dir), null);
+  return a && pidAlive(a.pid) && nowMs - a.ts < 5000 ? a.pid : null;
+}
+
 /** One-line human description of lockStatus (CLI + errors). */
 export function describeOwner(st) {
   if (!st.owner_pid) return 'no engine owns this goal';

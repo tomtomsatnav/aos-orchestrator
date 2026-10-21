@@ -15,7 +15,6 @@ import { matchGlob } from './glob.mjs';
 import * as G from './git.mjs';
 import { harnessTamperHits } from './harness-guard.mjs';
 
-export const KINDS = Object.freeze(['vacuous_pass', 'tests_reduced', 'tests_skipped', 'check_config_changed', 'tests_deleted', 'acceptance_modified', 'acceptance_empty', 'literal_copy', 'harness_tamper', 'tests_weakened']);
 export const MAX_FINDINGS = 20;
 
 // ---------------------------------------------------------------- test output

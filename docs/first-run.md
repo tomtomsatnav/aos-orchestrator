@@ -137,7 +137,7 @@ Runs that blocked that night, and why:
 
 ## What to take from this
 
-- Cost: the two runs together used about 107k new tokens (notional $0.48). The planner is the single largest line item because it runs on Opus; workers start on the cheapest tier that the plan allows.
+- Cost: runs 1 (slugify, 39.3k new tokens, $0.15) and 2 (tinymd, 67.8k, $0.33) together used about 107k new tokens (notional $0.48); the later runs in section 3 are not included. The planner is the single largest line item because it runs on Opus; workers start on the cheapest tier that the plan allows.
 - The gate is real: the plan review is where the human catches scope growth (the slugify plan added a file the prompt never mentioned) before any worker runs.
 - Checks, not the worker's say-so, decide whether a task is done. In the slugify run the Haiku workers were not allowed to run commands, and said so in their summaries; the engine ran the real `node --test` commands in the sandbox and merged only what passed.
 - These are small goals on small repos. They show the mechanism works end to end; they are not evidence about large refactors or flaky test suites.
