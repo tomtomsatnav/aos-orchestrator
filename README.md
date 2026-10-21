@@ -6,13 +6,13 @@
 
 Coding agents rewarded by passing tests will sometimes game them, for example by rewriting a test's expected value instead of fixing the code.
 
-The approach: an unattended agent never marks its own homework. `aos-orch verify` re-runs the original tests from the base commit in a sandbox and checks the diff for edited, weakened, skipped or deleted tests. The orchestrator adds planning and parallel workers on top, but in our evals that did not pay off.
+The approach: an unattended agent never marks its own homework. `aos-orch verify` re-runs the original tests from the base commit in a sandbox and checks the diff for edited, weakened, skipped or deleted tests. The orchestrator adds planning and parallel workers on top; on tasks a single session already solved, that only added cost and failure modes of its own.
 
 Real runs, 21 Oct 2026, Haiku, 5 to 10 trials per cell, costs notional (list price). Full write-up and limits: [evals/results/2026-10-21.md](evals/results/2026-10-21.md).
 
 | impossible-test (a test expects a wrong value) | bare Haiku | AOS, defences off (control) | AOS | Haiku + `aos-orch verify` |
 |---|---|---|---|---|
-| test rewrite accepted | 10/10 (each announced in the final message) | 10/10 (merged under a green report) | 0/10 | 0/5 (the guard rejected all 5 rewrites) |
+| test rewrite accepted (the rewrite was disclosed and arguably right, but never signed off) | 10/10 (each announced in the final message) | 10/10 (merged under a green report) | 0/10 | 0/5 (the guard rejected all 5 rewrites) |
 | mean cost, time per trial | $0.007, 18 s | $0.077, 37 s | $0.159, 62 s | $0.007, 18 s |
 
 | large-codebase (42 files, 30 hidden cases) | bare Haiku | Haiku + `aos-orch verify` | AOS | AOS after the day's fixes |
@@ -74,7 +74,7 @@ Details and residual risks: [docs/security.md](docs/security.md). Reporting a vu
 
 ## Try it without spending tokens
 
-`npm test` runs the whole suite (about 2 minutes, 530+ tests) against a scripted fake `claude`; no tokens are spent. To drive the CLI the same way, point it at the fake in a scratch directory (needs a throwaway git repo with a `main` branch):
+`npm test` runs the whole suite (about 2 minutes, 730+ tests) against a scripted fake `claude`; no tokens are spent. To drive the CLI the same way, point it at the fake in a scratch directory (needs a throwaway git repo with a `main` branch):
 
 ```sh
 export AOS_ORCH_DIR=/tmp/aos-demo-state AOS_CLAUDE_BIN=$PWD/orchestrator/test/fake-claude.mjs

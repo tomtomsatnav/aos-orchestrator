@@ -10,5 +10,5 @@ node_modules/
 .playwright-mcp/
 tmp/
 
-# eval output
-evals/results/
+# eval output: results files are committed on purpose (the write-ups cite them); scratch logs are not
+evals/results/**/*.log
