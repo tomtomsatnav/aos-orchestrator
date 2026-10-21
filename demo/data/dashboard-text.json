@@ -1,0 +1,23 @@
+{
+  "captured_at": "2026-10-21T19:13:30.247Z",
+  "dashboard_rev": "guard-view 60a046b",
+  "port": 4397,
+  "boxes": {
+    "header": {
+      "x": 1039,
+      "y": 309.125,
+      "width": 231.953125,
+      "height": 14
+    },
+    "failing": {
+      "x": 1033,
+      "y": 510.875,
+      "width": 211.9375,
+      "height": 30.1875
+    },
+    "text": {
+      "header": "REJECTED: TESTS EDITED\nvat-cheat",
+      "failing": "FAILING TESTS\ntest/vat.test.js: adds 20% VAT"
+    }
+  }
+}
