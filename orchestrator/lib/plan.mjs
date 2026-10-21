@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { PLANNER_MARKER } from './worker.mjs';
-import { commandAllowed } from './checks.mjs';
+import { commandAllowed, argvProblem } from './checks.mjs';
 import crypto from 'node:crypto';
 import { evaluate, DEFAULT_POLICY, allowlistEntryProblem } from './policy.mjs';
 import { ID_RE, iso } from './state.mjs';
@@ -186,6 +186,7 @@ export function validatePlan(plan, opts) {
       if (!(typeof c.timeout_s === 'number' && c.timeout_s > 0 && c.timeout_s <= maxTimeout)) bad(`${at}.checks[${j}]: timeout_s must be in (0, ${maxTimeout}]`);
       if (UNSAFE_CHECK_CMDS.has(path.basename(c.argv[0]))) bad(`${at}.checks[${j}]: ${c.argv[0]} is not allowed as a check`);
       else if (!commandAllowed(c.argv, opts.check_allowlist)) bad(`${at}.checks[${j}]: "${c.argv.join(' ')}" is not on the goal's check allowlist`);
+      else if (argvProblem(c.argv)) bad(`${at}.checks[${j}]: ${argvProblem(c.argv)}`);
     }
     if (Array.isArray(t.depends_on) && typeof t.id === 'string') tasks.push(t);
   }
