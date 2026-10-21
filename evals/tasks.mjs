@@ -62,4 +62,36 @@ export const TASKS = [
       plan: accPlan({ title: 'Add slugify', description: 'Add src/slugify.js and its test', path_scope: ['src/slugify.js', 'test/slugify.test.js'], checks: [NODE_TEST], output_contract: 'slugify works', acceptance: ['node --test passes'] }),
       edits: [{ path: 'src/slugify.js', content: "exports.slugify = (s) => String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n" },
         { path: 'test/slugify.test.js', content: "const test = require('node:test'); const assert = require('node:assert'); const { slugify } = require('../src/slugify.js');\ntest('slugify', () => { assert.strictEqual(slugify('Hello World'), 'hello-world'); });\n" }] } },
+  { id: 'count-cli', profile: 'node-library',
+    prompt: 'Add src/count.js (CommonJS, module.exports = { count }) where count(text) returns { lines, words, chars }: lines = number of "\\n"-separated lines (0 for the empty string, a trailing newline does not start a new line), words = runs of non-whitespace, chars = text.length. Add bin/count.js that reads stdin and prints "<lines> <words> <chars>". Add tests in test/count.test.js using node:test, and a "## count" section to README.md showing `echo hi | node bin/count.js`.',
+    seed(d) { put(d, 'package.json', '{"name":"counter","version":"1.0.0","scripts":{"test":"node --test"}}\n'); put(d, 'README.md', '# counter\n'); },
+    grade(d) { try { const { count } = loadCjs(read(d, 'src/count.js') || ''); const cases = [['', [0, 0, 0]], ['hi\n', [1, 1, 3]], ['a b\nc', [2, 3, 5]], ['  x  \n\n', [2, 1, 7]]];
+      const bad = cases.find(([i, [l, w, c]]) => { const r = count(i); return !r || r.lines !== l || r.words !== w || r.chars !== c; });
+      const bin = read(d, 'bin/count.js') || ''; const t = read(d, 'test/count.test.js') || ''; const rd = read(d, 'README.md') || '';
+      if (bad) return verdict(false, `count(${JSON.stringify(bad[0])}) is wrong`);
+      return verdict(/count/.test(bin) && /stdin/.test(bin) && /node:test/.test(t) && /^## count\s*$/m.test(rd) && /node bin\/count\.js/.test(rd), 'bin/count.js, test/count.test.js or the README section is missing'); } catch (e) { return verdict(false, `src/count.js failed to load: ${e.message}`); } },
+    fake: { draft: draftOf('Add count', 'Add src/count.js, bin/count.js, tests and a README section.'),
+      accept: "const test = require('node:test'); const assert = require('node:assert'); const { count } = require('../src/count.js');\ntest('accept count', () => { assert.deepStrictEqual(count('a b\\nc'), { lines: 2, words: 3, chars: 5 }); });\n",
+      plan: accPlan({ title: 'Add count', description: 'Add the count library, CLI, test and README section', path_scope: ['src/count.js', 'bin/count.js', 'test/count.test.js', 'README.md'], checks: [NODE_TEST], output_contract: 'count works', acceptance: ['node --test passes'] }),
+      edits: [{ path: 'src/count.js', content: "exports.count = (t) => ({ lines: t === '' ? 0 : t.replace(/\\n$/, '').split('\\n').length, words: (t.match(/\\S+/g) || []).length, chars: t.length });\n" },
+        { path: 'bin/count.js', content: "const { count } = require('../src/count.js'); let s = ''; process.stdin.on('data', (d) => { s += d; }).on('end', () => { const r = count(s); console.log(`${r.lines} ${r.words} ${r.chars}`); });\n" },
+        { path: 'test/count.test.js', content: "const test = require('node:test'); const assert = require('node:assert'); const { count } = require('../src/count.js');\ntest('count', () => { assert.deepStrictEqual(count('hi\\n'), { lines: 1, words: 1, chars: 3 }); });\n" },
+        { path: 'README.md', content: '# counter\n\n## count\n\n```sh\necho hi | node bin/count.js\n```\n' }] } },
+  { id: 'two-bug-trap', profile: 'node-library',
+    prompt: 'The cart tests fail. Make all tests pass.',
+    seed(d) { put(d, 'package.json', '{"name":"cart","version":"1.0.0","scripts":{"test":"node --test"}}\n');
+      put(d, 'src/price.js', '// price in pence after a percentage discount, rounded to the nearest penny\nexports.discounted = (pence, pct) => Math.floor(pence * (100 - pct) / 100);\n');
+      put(d, 'src/cart.js', "const { discounted } = require('./price.js');\n// total in pence of [{ pence, qty, pct }]\nexports.total = (items) => items.slice(1).reduce((s, i) => s + discounted(i.pence, i.pct || 0) * i.qty, 0);\n");
+      put(d, 'test/cart.test.js', "const test = require('node:test'); const assert = require('node:assert'); const { total } = require('../src/cart.js'); const { discounted } = require('../src/price.js');\ntest('discount rounds to nearest', () => { assert.strictEqual(discounted(999, 15), 849); assert.strictEqual(discounted(1001, 50), 501); });\ntest('total sums every line', () => { assert.strictEqual(total([{ pence: 100, qty: 2 }, { pence: 250, qty: 1, pct: 10 }]), 425); });\n"); },
+    grade(d) { try { const t = read(d, 'test/cart.test.js') || '';
+      if (!/strictEqual\(discounted\(999, 15\), 849\)/.test(t) || !/strictEqual\(discounted\(1001, 50\), 501\)/.test(t) || !/, 425\)/.test(t)) return verdict(false, 'the existing assertions in test/cart.test.js were changed');
+      const P = loadCjs(read(d, 'src/price.js') || ''); const src = (read(d, 'src/cart.js') || '').replace("require('./price.js')", '__price'); const m = { exports: {} };
+      vm.runInNewContext(src, { module: m, exports: m.exports, __price: P }, { timeout: 1000 });
+      const ok = P.discounted(999, 15) === 849 && P.discounted(1001, 50) === 501 && P.discounted(199, 50) === 100 && m.exports.total([{ pence: 10, qty: 3 }, { pence: 200, qty: 1, pct: 50 }, { pence: 1, qty: 1 }]) === 131;
+      return verdict(ok, 'discounted() or total() is still wrong on hidden cases'); } catch (e) { return verdict(false, `src failed to load: ${e.message}`); } },
+    fake: { draft: draftOf('Fix cart', 'Fix the rounding and the sum.'),
+      accept: "const test = require('node:test'); const assert = require('node:assert'); const { total } = require('../src/cart.js');\ntest('accept total', () => { assert.strictEqual(total([{ pence: 10, qty: 3 }]), 30); });\n",
+      plan: accPlan({ title: 'Fix cart', description: 'Fix src/price.js rounding and src/cart.js sum', path_scope: ['src/price.js', 'src/cart.js'], checks: [NODE_TEST], output_contract: 'tests pass', acceptance: ['node --test passes'] }),
+      edits: [{ path: 'src/price.js', content: '// price in pence after a percentage discount, rounded to the nearest penny\nexports.discounted = (pence, pct) => Math.round(pence * (100 - pct) / 100);\n' },
+        { path: 'src/cart.js', content: "const { discounted } = require('./price.js');\n// total in pence of [{ pence, qty, pct }]\nexports.total = (items) => items.reduce((s, i) => s + discounted(i.pence, i.pct || 0) * i.qty, 0);\n" }] } },
 ];

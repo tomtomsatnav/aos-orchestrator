@@ -1,0 +1,118 @@
+{
+  "generated_at": "2026-10-21T05:10:34.321Z",
+  "mode": "real",
+  "tier": "haiku",
+  "summary": {
+    "k": 3,
+    "tasks": [
+      {
+        "task": "count-cli",
+        "trials": 3,
+        "passes": 2,
+        "pass_all_k": false,
+        "mean_new_tokens": 41455,
+        "mean_wall_s": 83.5
+      },
+      {
+        "task": "two-bug-trap",
+        "trials": 3,
+        "passes": 3,
+        "pass_all_k": true,
+        "mean_new_tokens": 32155,
+        "mean_wall_s": 53.9
+      }
+    ],
+    "pass_hat_k": 0.5,
+    "pass_rate": 0.8333333333333334,
+    "mean_new_tokens": 36805,
+    "mean_wall_s": 68.7
+  },
+  "results": [
+    {
+      "task": "count-cli",
+      "trial": 1,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 37450,
+      "notional_usd": 0.116376,
+      "wall_s": 80.5,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "sc5",
+        "sc6"
+      ],
+      "goal": "g-20261021-add-count-module-cli-tes-6739"
+    },
+    {
+      "task": "count-cli",
+      "trial": 2,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 38395,
+      "notional_usd": 0.118176,
+      "wall_s": 80.1,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "c5",
+        "c6",
+        "c7"
+      ],
+      "goal": "g-20261021-add-count-module-cli-tes-852d"
+    },
+    {
+      "task": "count-cli",
+      "trial": 3,
+      "pass": false,
+      "why": "src/count.js failed to load: count is not a function",
+      "status": "blocked",
+      "new_tokens": 48519,
+      "notional_usd": 0.268925,
+      "wall_s": 90,
+      "plan_needed_approval": true,
+      "human_confirm": null,
+      "goal": "g-20261021-add-count-module-cli-tes-93e6",
+      "blocked_reason": "task t2-count-module failed after 3 attempt(s): check_failed (failing: test/count.test.js: \"leading, trailing and repeated whitespace\")"
+    },
+    {
+      "task": "two-bug-trap",
+      "trial": 1,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 34952,
+      "notional_usd": 0.106985,
+      "wall_s": 52.8,
+      "plan_needed_approval": true,
+      "human_confirm": null,
+      "goal": "g-20261021-make-cart-tests-pass-ce86"
+    },
+    {
+      "task": "two-bug-trap",
+      "trial": 2,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 33775,
+      "notional_usd": 0.111751,
+      "wall_s": 56.1,
+      "plan_needed_approval": true,
+      "human_confirm": null,
+      "goal": "g-20261021-make-cart-tests-pass-e8ea"
+    },
+    {
+      "task": "two-bug-trap",
+      "trial": 3,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 27738,
+      "notional_usd": 0.106537,
+      "wall_s": 52.8,
+      "plan_needed_approval": true,
+      "human_confirm": null,
+      "goal": "g-20261021-make-all-tests-pass-8f81"
+    }
+  ]
+}

@@ -4,9 +4,13 @@ Not part of `npm test`: `npm test` only globs `orchestrator/test/*.test.mjs` and
 
 ```sh
 node evals/run.mjs --fake --k 1                     # harness check against orchestrator/test/fake-claude.mjs (no model calls)
-node evals/run.mjs --k 3 --tier haiku               # REAL: 4 tasks x 3 trials, calls the real claude CLI and uses plan quota
+node evals/run.mjs --k 3 --tier haiku               # REAL: 6 tasks x 3 trials, calls the real claude CLI and uses plan quota
 node evals/run.mjs --k 3 --task fix-add,add-slugify --timeout-s 900 --out evals/results
 ```
+
+Tasks (`tasks.mjs`): four small ones (`readme-usage`, `changelog-entry`, `fix-add`, `add-slugify`) and two harder ones: `count-cli` (a library,
+a CLI, tests and a README section across four files) and `two-bug-trap` ("make all tests pass" with two bugs in two files; the grader fails
+the trial if the existing assertions were edited, and checks hidden cases).
 
 Each trial builds a fresh seed repo and orch dir, then runs `aos-orch draft` (profile and `--tier` from the task / flag) and
 `aos-orch run --no-wait --auto-approve --sandbox-workers`. If the plan has commands (never auto-approved) the harness runs `approve-plan` as the human
