@@ -116,7 +116,8 @@ test('cli: an attached run stays attached through human-criterion confirmation a
   sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [{ behavior: 'success', edits: [{ path: 'a.txt', content: 'alpha\n' }] }] } });
   const spec = { id: 'g-hw', title: 'Create a.txt', success_criteria: [crit('a.txt', 'alpha'), { id: 'c2', text: 'reads well', verify: 'human' }], orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec)); const env = sb.env();
-  const c = spawn(process.execPath, [CLI, 'run', gf, '--poll-ms', '50', '--interval-s', '0.2'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  // a host with no working check sandbox (e.g. an unprivileged Linux container without user namespaces): opt out explicitly, as a user would
+  const c = spawn(process.execPath, [CLI, 'run', gf, '--poll-ms', '50', '--interval-s', '0.2', ...(NO_OS_SANDBOX ? ['--unsandboxed-checks'] : [])], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let err = ''; let out = ''; c.stderr.on('data', (d) => { err += d; }); c.stdout.on('data', (d) => { out += d; }); const closed = new Promise((res) => c.on('close', res));
   const waitFor = async (re) => { const end = Date.now() + 30000; while (!re.test(err) && Date.now() < end) await sleep(50); assert.match(err, re); };
   await waitFor(/aos-orch approve-plan g-hw/);

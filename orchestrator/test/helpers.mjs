@@ -102,12 +102,22 @@ export function assertValidState(assert, dir) {
   return evs;
 }
 
+/** Is any live process still in this process group? A zombie does not count: on Linux in a container whose PID 1 does not reap
+ *  (e.g. `node --test` as PID 1, no --init) the killed, orphaned worker children stay as zombies, and kill(-pgid, 0) succeeds on them. */
+function groupAlive(pgid) {
+  try { process.kill(-pgid, 0); } catch { return false; }
+  try {
+    const rows = execFileSync('ps', ['-A', '-o', 'pgid=,stat='], { encoding: 'utf8' }).split('\n');
+    return rows.some((r) => { const [g, st] = r.trim().split(/\s+/); return Number(g) === pgid && !st.startsWith('Z'); });
+  } catch { return true; } // no ps: the signal probe stands
+}
+
 export function procsAlive(dir) {
   const out = [];
   const wd = path.join(dir, 'workers');
   for (const f of fs.existsSync(wd) ? fs.readdirSync(wd) : []) if (f.endsWith('.pid.json')) {
     const p = readJSON(path.join(wd, f));
-    try { process.kill(-p.pgid, 0); out.push(f); } catch { /* gone */ }
+    if (groupAlive(p.pgid)) out.push(f);
   }
   return out;
 }
