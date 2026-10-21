@@ -1,0 +1,86 @@
+{
+  "generated_at": "2026-10-21T05:15:34.026Z",
+  "mode": "real",
+  "tier": "haiku",
+  "summary": {
+    "k": 4,
+    "tasks": [
+      {
+        "task": "count-cli",
+        "trials": 4,
+        "passes": 4,
+        "pass_all_k": true,
+        "mean_new_tokens": 32491,
+        "mean_wall_s": 70.3
+      }
+    ],
+    "pass_hat_k": 1,
+    "pass_rate": 1,
+    "mean_new_tokens": 32491,
+    "mean_wall_s": 70.3
+  },
+  "results": [
+    {
+      "task": "count-cli",
+      "trial": 1,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 33495,
+      "notional_usd": 0.112726,
+      "wall_s": 72.3,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "sc5",
+        "sc6"
+      ],
+      "goal": "g-20261021-add-count-module-cli-tes-35a4"
+    },
+    {
+      "task": "count-cli",
+      "trial": 2,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 32143,
+      "notional_usd": 0.099172,
+      "wall_s": 69.2,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "c5"
+      ],
+      "goal": "g-20261021-add-count-module-cli-tes-3ffc"
+    },
+    {
+      "task": "count-cli",
+      "trial": 3,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 30686,
+      "notional_usd": 0.095236,
+      "wall_s": 67.1,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-count-utility-with-l-4df6"
+    },
+    {
+      "task": "count-cli",
+      "trial": 4,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 33638,
+      "notional_usd": 0.103162,
+      "wall_s": 72.4,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "c5",
+        "c6"
+      ],
+      "goal": "g-20261021-add-count-module-cli-tes-7108"
+    }
+  ]
+}

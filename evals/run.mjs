@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Opt-in model-behaviour evals (alignment doc row 8). NOT part of `npm test`. Runs N tiny tasks x k trials through draft -> plan -> run with
 // `--sandbox-workers`, grades each result with a deterministic grader, and reports pass^k, mean tokens and mean wall time as JSON + a markdown table.
-//   node evals/run.mjs --k 3 --tier haiku [--task id,id] [--timeout-s 900] [--out evals/results] [--fake]
+//   node evals/run.mjs --k 3 --tier haiku [--task id,id] [--timeout-s 900] [--out evals/results] [--fake] [--keep]
 // Real mode spends subscription quota (planner on opus per the rules, workers from --tier). --fake runs everything against orchestrator/test/fake-claude.mjs.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -16,10 +16,10 @@ const FAKE = path.join(HERE, '..', 'orchestrator', 'test', 'fake-claude.mjs');
 const FAKE_ENV = path.join(HERE, '..', 'orchestrator', 'test', 'enable-fake-env.mjs'); // the engine only forwards the fake's scenario variables when this is preloaded
 
 function parseFlags(argv) {
-  const f = { k: 3, tier: 'haiku', 'timeout-s': 900, fake: false, task: null, out: path.join(HERE, 'results') };
+  const f = { k: 3, tier: 'haiku', 'timeout-s': 900, fake: false, keep: false, task: null, out: path.join(HERE, 'results') };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]; if (!a.startsWith('--')) throw new Error(`unexpected argument ${a}`);
-    const name = a.slice(2); if (name === 'fake') { f.fake = true; continue; }
+    const name = a.slice(2); if (name === 'fake' || name === 'keep') { f[name] = true; continue; }
     if (!(name in f)) throw new Error(`unknown flag ${a}`);
     f[name] = argv[++i]; if (f[name] === undefined) throw new Error(`${a} needs a value`);
   }
@@ -99,8 +99,11 @@ async function trial(task, n, flags) {
     res.pass = v.ok; res.why = v.why;
   } catch (e) { res.why = `harness error: ${String(e.message).slice(0, 200)}`; } finally {
     res.wall_s = Math.round((Date.now() - t0) / 100) / 10;
-    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ }
-    try { fs.rmSync(`${repo}-aos-worktrees`, { recursive: true, force: true }); } catch { /* best effort */ }
+    if (flags.keep && !res.pass) res.kept = root; // --keep: a failed trial's repo, goal dir and events stay for inspection
+    else {
+      try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(`${repo}-aos-worktrees`, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
   }
   return res;
 }

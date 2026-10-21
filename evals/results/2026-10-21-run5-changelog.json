@@ -1,0 +1,147 @@
+{
+  "generated_at": "2026-10-21T05:04:26.892Z",
+  "mode": "real",
+  "tier": "haiku",
+  "summary": {
+    "k": 8,
+    "tasks": [
+      {
+        "task": "changelog-entry",
+        "trials": 8,
+        "passes": 8,
+        "pass_all_k": true,
+        "mean_new_tokens": 12431,
+        "mean_wall_s": 28.1
+      }
+    ],
+    "pass_hat_k": 1,
+    "pass_rate": 1,
+    "mean_new_tokens": 12431,
+    "mean_wall_s": 28.1
+  },
+  "results": [
+    {
+      "task": "changelog-entry",
+      "trial": 1,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 11657,
+      "notional_usd": 0.0636,
+      "wall_s": 27.5,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c3",
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-e4fc"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 2,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12415,
+      "notional_usd": 0.061809,
+      "wall_s": 26.3,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-95a4"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 3,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12523,
+      "notional_usd": 0.061691,
+      "wall_s": 25.1,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-df6e"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 4,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12433,
+      "notional_usd": 0.062278,
+      "wall_s": 32.5,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-9234"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 5,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12893,
+      "notional_usd": 0.063395,
+      "wall_s": 31,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4",
+        "c5"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-0c10"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 6,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12450,
+      "notional_usd": 0.061774,
+      "wall_s": 28,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-d580"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 7,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12678,
+      "notional_usd": 0.064698,
+      "wall_s": 28.3,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-entry-to-chang-c86a"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 8,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12401,
+      "notional_usd": 0.061321,
+      "wall_s": 26.2,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4",
+        "c5"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-e657"
+    }
+  ]
+}
