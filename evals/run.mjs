@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Opt-in model-behaviour evals (alignment doc row 8). NOT part of `npm test`. Runs N tiny tasks x k trials through draft -> plan -> run with
 // `--sandbox-workers`, grades each result with a deterministic grader, and reports pass^k, mean tokens and mean wall time as JSON + a markdown table.
-//   node evals/run.mjs --k 3 --tier haiku [--task id,id] [--timeout-s 900] [--out evals/results] [--fake] [--keep] [--arm aos|control|bare|bare-sonnet] [--control] [--label name] [--keep-all]
+//   node evals/run.mjs --k 3 --tier haiku [--task id,id] [--timeout-s 900] [--out evals/results] [--fake] [--keep] [--arm aos|control|bare|bare-sonnet] [--control] [--label name] [--keep-all] [--max-tokens N]
+// --max-tokens: passed to `aos-orch draft` so every AOS trial gets the same token cap (the drafter's own default can be too low for large work; bare runs have no cap)
 // --arm bare / bare-sonnet: no orchestrator. One `claude -p "<prompt>" --model haiku|sonnet --output-format json` in the seed repo with normal edit and Bash
 // permissions, then the same grader on the working tree. claimed_success = the final message says the work is done / tests pass (regex, excerpt kept).
 // --control: the same tasks with the CONFIGURABLE defences relaxed in the goal's rules (checks.protect_existing_tests false, checks.acceptance_first false,
@@ -25,7 +26,7 @@ const FAKE = path.join(HERE, '..', 'orchestrator', 'test', 'fake-claude.mjs');
 const FAKE_ENV = path.join(HERE, '..', 'orchestrator', 'test', 'enable-fake-env.mjs'); // the engine only forwards the fake's scenario variables when this is preloaded
 
 function parseFlags(argv) {
-  const f = { k: 3, tier: 'haiku', 'timeout-s': 900, fake: false, keep: false, 'keep-all': false, control: false, arm: 'aos', task: null, label: null, out: path.join(HERE, 'results') };
+  const f = { k: 3, tier: 'haiku', 'timeout-s': 900, fake: false, keep: false, 'keep-all': false, control: false, arm: 'aos', 'max-tokens': null, task: null, label: null, out: path.join(HERE, 'results') };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]; if (!a.startsWith('--')) throw new Error(`unexpected argument ${a}`);
     const name = a.slice(2); if (name === 'fake' || name === 'keep' || name === 'keep-all' || name === 'control') { f[name] = true; continue; }
@@ -149,7 +150,7 @@ async function trial(task, n, flags) {
       Object.assign(env, { NODE_OPTIONS: `${env.NODE_OPTIONS ? `${env.NODE_OPTIONS} ` : ''}--import=${FAKE_ENV}`, AOS_CLAUDE_BIN: FAKE, AOS_FAKE_SCENARIO: path.join(root, 'scenario.json'), AOS_FAKE_STATE: path.join(root, 'fake-state') });
     }
     const goalFile = path.join(root, 'goal.json');
-    const d = await cli(['draft', task.prompt, '--repo', repo, '--out', goalFile, '--profile', task.profile, '--tier', flags.tier], { env, cwd: root, timeoutMs: left() });
+    const d = await cli(['draft', task.prompt, '--repo', repo, '--out', goalFile, '--profile', task.profile, '--tier', flags.tier, ...(flags['max-tokens'] ? ['--max-tokens', String(flags['max-tokens'])] : [])], { env, cwd: root, timeoutMs: left() });
     if (d.code !== 0 || !fs.existsSync(goalFile)) { res.why = `draft failed (exit ${d.code}${d.timedOut ? ', timed out' : ''}): ${d.stderr.trim().split('\n').slice(-2).join(' | ').slice(0, 200)}`; return res; }
     { let g = jsonOf(fs.readFileSync(goalFile, 'utf8')); // per-task goal settings (e.g. a tight attempt budget), then the control arm's relaxed rules
       if (g && task.patchGoal) g = task.patchGoal(g) || g;
