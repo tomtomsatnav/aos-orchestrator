@@ -93,7 +93,7 @@ async function trial(task, n, flags) {
       const id = info?.goal || (ids.length === 1 ? ids[0] : null); if (id) { res.goal = id; usageOf(id); } }
     if (r.timedOut) { res.why = 'trial timed out'; res.status = 'timeout'; return res; }
     if (!info?.goal) { res.why = `run produced no result (exit ${r.code})`; return res; }
-    res.status = info.status;
+    res.status = info.status; if (info.blocked_reason) res.blocked_reason = String(info.blocked_reason).slice(0, 300);
     try { extract(info.goal); } catch { res.why = `no integration branch (status ${info.status})`; return res; }
     const v = task.grade(checkout);
     res.pass = v.ok; res.why = v.why;

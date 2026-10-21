@@ -1,0 +1,227 @@
+{
+  "generated_at": "2026-10-21T04:51:07.135Z",
+  "mode": "real",
+  "tier": "haiku",
+  "summary": {
+    "k": 3,
+    "tasks": [
+      {
+        "task": "readme-usage",
+        "trials": 3,
+        "passes": 3,
+        "pass_all_k": true,
+        "mean_new_tokens": 11389,
+        "mean_wall_s": 27
+      },
+      {
+        "task": "changelog-entry",
+        "trials": 3,
+        "passes": 2,
+        "pass_all_k": false,
+        "mean_new_tokens": 14265,
+        "mean_wall_s": 31.5
+      },
+      {
+        "task": "fix-add",
+        "trials": 3,
+        "passes": 3,
+        "pass_all_k": true,
+        "mean_new_tokens": 19479,
+        "mean_wall_s": 42.8
+      },
+      {
+        "task": "add-slugify",
+        "trials": 3,
+        "passes": 3,
+        "pass_all_k": true,
+        "mean_new_tokens": 23056,
+        "mean_wall_s": 58.2
+      }
+    ],
+    "pass_hat_k": 0.75,
+    "pass_rate": 0.9166666666666666,
+    "mean_new_tokens": 17047,
+    "mean_wall_s": 39.9
+  },
+  "results": [
+    {
+      "task": "readme-usage",
+      "trial": 1,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 11972,
+      "notional_usd": 0.058769,
+      "wall_s": 29.1,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "existing-title-kept"
+      ],
+      "goal": "g-20261021-add-usage-section-to-rea-0834"
+    },
+    {
+      "task": "readme-usage",
+      "trial": 2,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 11220,
+      "notional_usd": 0.059438,
+      "wall_s": 24.9,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "existing-title-kept"
+      ],
+      "goal": "g-20261021-add-a-usage-section-to-r-6ff4"
+    },
+    {
+      "task": "readme-usage",
+      "trial": 3,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 10975,
+      "notional_usd": 0.057624,
+      "wall_s": 26.9,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "existing-title-kept"
+      ],
+      "goal": "g-20261021-add-usage-section-to-rea-ad00"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 1,
+      "pass": false,
+      "why": "missing 1.1.0 entry above 1.0.0 with the retry bullet, or 1.0.0 changed",
+      "status": "blocked",
+      "new_tokens": 18629,
+      "notional_usd": 0.095783,
+      "wall_s": 38.4,
+      "plan_needed_approval": false,
+      "human_confirm": null,
+      "goal": "g-20261021-add-1-1-0-changelog-entr-1410"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 2,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 11724,
+      "notional_usd": 0.062123,
+      "wall_s": 25.5,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-7b16"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 3,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12443,
+      "notional_usd": 0.062062,
+      "wall_s": 30.6,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c3",
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-21ec"
+    },
+    {
+      "task": "fix-add",
+      "trial": 1,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 19726,
+      "notional_usd": 0.083643,
+      "wall_s": 43.4,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-fix-add-in-src-add-js-so-4f64"
+    },
+    {
+      "task": "fix-add",
+      "trial": 2,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 18787,
+      "notional_usd": 0.082028,
+      "wall_s": 40.1,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "sc3"
+      ],
+      "goal": "g-20261021-fix-add-in-src-add-js-so-0fcd"
+    },
+    {
+      "task": "fix-add",
+      "trial": 3,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 19924,
+      "notional_usd": 0.080033,
+      "wall_s": 45,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-fix-add-in-src-add-js-so-6a9e"
+    },
+    {
+      "task": "add-slugify",
+      "trial": 1,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 21437,
+      "notional_usd": 0.082649,
+      "wall_s": 42.3,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-slugify-module-and-n-7578"
+    },
+    {
+      "task": "add-slugify",
+      "trial": 2,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 24767,
+      "notional_usd": 0.070672,
+      "wall_s": 64,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "tests-cover-behavior"
+      ],
+      "goal": "g-20261021-add-slugify-function-wit-0ed7"
+    },
+    {
+      "task": "add-slugify",
+      "trial": 3,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 22965,
+      "notional_usd": 0.07749,
+      "wall_s": 68.4,
+      "plan_needed_approval": true,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-slugify-module-with--144d"
+    }
+  ]
+}
