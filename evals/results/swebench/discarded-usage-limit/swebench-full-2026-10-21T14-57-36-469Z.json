@@ -1,0 +1,312 @@
+{
+  "generated_at": "2026-10-21T14:57:58.807Z",
+  "arms": [
+    "bare-haiku",
+    "bare-sonnet",
+    "guarded",
+    "guarded-cascade",
+    "guarded-best-of-3"
+  ],
+  "k": 1,
+  "instances": [
+    "psf__requests-1142",
+    "psf__requests-1724",
+    "psf__requests-1766",
+    "pytest-dev__pytest-5262",
+    "pytest-dev__pytest-5631",
+    "pytest-dev__pytest-5809",
+    "pytest-dev__pytest-5787",
+    "pytest-dev__pytest-6197",
+    "pytest-dev__pytest-10356",
+    "sphinx-doc__sphinx-8548",
+    "sphinx-doc__sphinx-9229",
+    "sphinx-doc__sphinx-9461"
+  ],
+  "stopped": "waiting for usage quota",
+  "pruned_images": [],
+  "summary": [
+    {
+      "arm": "bare-haiku",
+      "resolved": 1,
+      "of": 12,
+      "trials": 1,
+      "new_tokens": 41183,
+      "notional_usd": 0.02,
+      "wall_min": 1.43,
+      "errors": 0,
+      "guard_rejections": "-",
+      "rejected_unresolved": 0,
+      "rejected_resolved": 0,
+      "escalations": "-",
+      "raw_resolved": 1
+    },
+    {
+      "arm": "bare-sonnet",
+      "resolved": 1,
+      "of": 12,
+      "trials": 1,
+      "new_tokens": 24858,
+      "notional_usd": 0.11,
+      "wall_min": 0.65,
+      "errors": 0,
+      "guard_rejections": "-",
+      "rejected_unresolved": 0,
+      "rejected_resolved": 0,
+      "escalations": "-",
+      "raw_resolved": 1
+    },
+    {
+      "arm": "guarded",
+      "resolved": 1,
+      "of": 12,
+      "trials": 1,
+      "new_tokens": 36627,
+      "notional_usd": 0.01,
+      "wall_min": 1.21,
+      "errors": 0,
+      "guard_rejections": "0/1",
+      "rejected_unresolved": 0,
+      "rejected_resolved": 0,
+      "escalations": "-",
+      "raw_resolved": 1
+    },
+    {
+      "arm": "guarded-cascade",
+      "resolved": 1,
+      "of": 12,
+      "trials": 1,
+      "new_tokens": 39867,
+      "notional_usd": 0.01,
+      "wall_min": 1.18,
+      "errors": 0,
+      "guard_rejections": "0/1",
+      "rejected_unresolved": 0,
+      "rejected_resolved": 0,
+      "escalations": 0,
+      "raw_resolved": 1
+    }
+  ],
+  "results": [
+    {
+      "instance": "psf__requests-1142",
+      "arm": "bare-haiku",
+      "trial": 1,
+      "resolved": true,
+      "model": "haiku",
+      "session": {
+        "model": "haiku",
+        "new_tokens": 41183,
+        "cache_read_tokens": 546470,
+        "notional_usd": 0.0158403,
+        "num_turns": 15,
+        "status": "finished",
+        "claimed_success": true,
+        "final_message": " `strict` argument that modern Python's `http.client` rejects. I ran the suite under Python 3.9 in a venv at `/tmp/req-venv`, outside the repo, because the vendored code doesn't run on 3.10+. I did not fix that, since it's outside this issue.\n\nI did not add a new test for the header behavior, since you asked me not to modify existing tests and didn't ask for new ones. I can add one if you want it.",
+        "wall_s": 63.9
+      },
+      "files": [
+        "M requests/models.py"
+      ],
+      "grade": {
+        "resolved": true,
+        "applied": true,
+        "f2p": {
+          "pass": 1,
+          "fail": 0
+        },
+        "p2p": {
+          "pass": 5,
+          "fail": 0
+        },
+        "infra_failure": false,
+        "run_id": "psf__requests-1142-bare-haiku-1-1792594385807",
+        "wall_s": 21.4
+      },
+      "raw_resolved": true,
+      "new_tokens": 41183,
+      "notional_usd": 0.0158403,
+      "wall_s": 85.6
+    },
+    {
+      "instance": "psf__requests-1142",
+      "arm": "bare-sonnet",
+      "trial": 1,
+      "resolved": true,
+      "model": "sonnet",
+      "session": {
+        "model": "sonnet",
+        "new_tokens": 24858,
+        "cache_read_tokens": 75414,
+        "notional_usd": 0.1131474,
+        "num_turns": 3,
+        "status": "finished",
+        "claimed_success": true,
+        "final_message": "so every request got the header. Now:\n- **Requests with a body:** unchanged. The header is set to the body's length.\n- **Other methods with no body:** unchanged. POST and PUT still get `Content-Length: 0`.\n- **GET and HEAD with no body:** no header is sent. This is the case that made amazon.com return 503.\n\nThe auth step calls the same function to recompute the length, so it follows the same rule.",
+        "wall_s": 17.7
+      },
+      "files": [
+        "M requests/models.py"
+      ],
+      "grade": {
+        "resolved": true,
+        "applied": true,
+        "f2p": {
+          "pass": 1,
+          "fail": 0
+        },
+        "p2p": {
+          "pass": 5,
+          "fail": 0
+        },
+        "infra_failure": false,
+        "run_id": "psf__requests-1142-bare-sonnet-1-1792594425244",
+        "wall_s": 21.2
+      },
+      "raw_resolved": true,
+      "new_tokens": 24858,
+      "notional_usd": 0.1131474,
+      "wall_s": 39.1
+    },
+    {
+      "instance": "psf__requests-1142",
+      "arm": "guarded",
+      "trial": 1,
+      "resolved": true,
+      "model": "haiku",
+      "session": {
+        "model": "haiku",
+        "new_tokens": 36627,
+        "cache_read_tokens": 412250,
+        "notional_usd": 0.0130802,
+        "num_turns": 12,
+        "status": "finished",
+        "claimed_success": true,
+        "final_message": ", and those tests need network access anyway. I did not modify any tests. I also did not confirm the amazon.com 503 itself, since there is no network access here.\n\nI did not add a new regression test; the existing suite doesn't cover this header and you asked not to change tests. If you want one, a small test asserting `'Content-Length' not in Request('GET', url).prepare().headers` would cover it.",
+        "wall_s": 47.3
+      },
+      "files": [
+        "M requests/models.py"
+      ],
+      "guard": {
+        "accepted": true,
+        "integrity": false,
+        "reasons": [],
+        "files": [
+          "M requests/models.py"
+        ],
+        "static_warnings": [
+          "no_checks"
+        ],
+        "orig_tests": [
+          "test_requests.py"
+        ],
+        "orig_selection": "related",
+        "agent_tests": [],
+        "protected": {
+          "ok": true,
+          "baseline_passed": 5,
+          "now_passed": 5
+        },
+        "checks": [
+          {
+            "argv": "python -m py_compile <1 changed .py files>",
+            "ok": true
+          }
+        ],
+        "duration_s": 3.9
+      },
+      "guard_full_reasons": [],
+      "grade": {
+        "resolved": true,
+        "applied": true,
+        "f2p": {
+          "pass": 1,
+          "fail": 0
+        },
+        "p2p": {
+          "pass": 5,
+          "fail": 0
+        },
+        "infra_failure": false,
+        "run_id": "psf__requests-1142-guarded-1-1792594497852",
+        "wall_s": 21.3
+      },
+      "raw_resolved": true,
+      "new_tokens": 36627,
+      "notional_usd": 0.0130802,
+      "wall_s": 72.7
+    },
+    {
+      "instance": "psf__requests-1142",
+      "arm": "guarded-cascade",
+      "trial": 1,
+      "resolved": true,
+      "steps": [
+        {
+          "model": "haiku",
+          "new_tokens": 39867,
+          "cache_read_tokens": 470433,
+          "notional_usd": 0.01448803,
+          "num_turns": 14,
+          "status": "finished",
+          "claimed_success": true,
+          "wall_s": 45.7,
+          "guard": {
+            "accepted": true,
+            "integrity": false,
+            "reasons": [],
+            "files": [
+              "M requests/models.py"
+            ],
+            "static_warnings": [
+              "no_checks"
+            ],
+            "orig_tests": [
+              "test_requests.py"
+            ],
+            "orig_selection": "related",
+            "agent_tests": [],
+            "protected": {
+              "ok": true,
+              "baseline_passed": 5,
+              "now_passed": 5
+            },
+            "checks": [
+              {
+                "argv": "python -m py_compile <1 changed .py files>",
+                "ok": true
+              }
+            ],
+            "duration_s": 3.8
+          }
+        }
+      ],
+      "stop_reason": "accepted",
+      "files": [
+        "M requests/models.py"
+      ],
+      "models_used": [
+        "haiku"
+      ],
+      "grade": {
+        "resolved": true,
+        "applied": true,
+        "f2p": {
+          "pass": 1,
+          "fail": 0
+        },
+        "p2p": {
+          "pass": 5,
+          "fail": 0
+        },
+        "infra_failure": false,
+        "run_id": "psf__requests-1142-guarded-cascade-1-1792594568843",
+        "wall_s": 21.3
+      },
+      "raw_resolved": true,
+      "new_tokens": 39867,
+      "notional_usd": 0.014488,
+      "wall_s": 71
+    }
+  ]
+}

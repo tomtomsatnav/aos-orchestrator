@@ -27,9 +27,9 @@ test('renderDraft: a criterion with a newline is shown as separate lines (never 
 test('draft budgets: sized to a small goal (not the rules maximums), described truthfully, summary line matches; flags only tighten', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup()); userRules(sb); sb.scenario(noBudgets());
   let r = await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'x', env: sb.env() });
-  assert.equal(r.ok, true, r.errors.join(';')); assert.deepEqual(r.draft.budgets, { max_new_tokens: 150000, max_wall_s: 1200, max_attempts: 2 });
-  assert.equal(r.spec.budget.max_wall_clock_s, 1200); assert.equal(r.spec.orch.budgets.max_new_tokens, 150000); assert.equal(r.spec.orch.budgets.max_attempts, 2);
-  assert.match(r.rules_text, /limits: \$5, 150000 tokens, 1200s, 2 attempts\/task/, 'the summary shows what the draft compiled to, not the rules maximum 3');
+  assert.equal(r.ok, true, r.errors.join(';')); assert.deepEqual(r.draft.budgets, { max_new_tokens: 300000, max_wall_s: 1200, max_attempts: 2 });
+  assert.equal(r.spec.budget.max_wall_clock_s, 1200); assert.equal(r.spec.orch.budgets.max_new_tokens, 300000); assert.equal(r.spec.orch.budgets.max_attempts, 2);
+  assert.match(r.rules_text, /limits: \$5, 300000 tokens, 1200s, 2 attempts\/task/, 'the summary shows what the draft compiled to, not the rules maximum 3');
   const txt = renderDraft(r); assert.match(txt, /budget attempts: 2 \(draft default for a small goal; rules limit 3\)/); assert.equal(/lowered by draft/.test(txt), false);
   r = await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'x', env: sb.env(), overrides: { max_new_tokens: 90000, max_wall_s: 300, tier: 'haiku' } });
   assert.equal(r.ok, true); assert.equal(r.spec.orch.budgets.max_new_tokens, 90000); assert.equal(r.spec.budget.max_wall_clock_s, 300); assert.equal(r.spec.orch.rules.plan.max_start_tier, 'haiku');
@@ -116,7 +116,8 @@ test('cli: an attached run stays attached through human-criterion confirmation a
   sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [{ behavior: 'success', edits: [{ path: 'a.txt', content: 'alpha\n' }] }] } });
   const spec = { id: 'g-hw', title: 'Create a.txt', success_criteria: [crit('a.txt', 'alpha'), { id: 'c2', text: 'reads well', verify: 'human' }], orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec)); const env = sb.env();
-  const c = spawn(process.execPath, [CLI, 'run', gf, '--poll-ms', '50', '--interval-s', '0.2'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  // a host with no working check sandbox (e.g. an unprivileged Linux container without user namespaces): opt out explicitly, as a user would
+  const c = spawn(process.execPath, [CLI, 'run', gf, '--poll-ms', '50', '--interval-s', '0.2', ...(NO_OS_SANDBOX ? ['--unsandboxed-checks'] : [])], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let err = ''; let out = ''; c.stderr.on('data', (d) => { err += d; }); c.stdout.on('data', (d) => { out += d; }); const closed = new Promise((res) => c.on('close', res));
   const waitFor = async (re) => { const end = Date.now() + 30000; while (!re.test(err) && Date.now() < end) await sleep(50); assert.match(err, re); };
   await waitFor(/aos-orch approve-plan g-hw/);
@@ -132,7 +133,7 @@ test('the plan approval summary shows the compiled attempts/tokens/wall of a dra
   const d = await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'x', env: sb.env() }); assert.equal(d.ok, true);
   const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify({ ...d.spec, id: 'g-sum' }));
   const env = sb.env(); assert.equal((await cli(['run', gf, '--no-wait', '--poll-ms', '50', '--interval-s', '0.2'], env)).code, 4);
-  const r = await cli(['plan', 'g-sum'], env); assert.match(r.out, /limits: \$5, 150000 tokens, 1200s, 2 attempts\/task/);
+  const r = await cli(['plan', 'g-sum'], env); assert.match(r.out, /limits: \$5, 150000 tokens, 1200s, 2 attempts\/task/); assert.match(r.out, /token budget: 150000 new tokens, sized from this plan \(1 tasks; draft estimate 300000/);
 });
 
 // ------------------------------------------------------------------ run report 2026-10-21 (UX items 2-9)

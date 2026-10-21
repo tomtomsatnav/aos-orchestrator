@@ -24,6 +24,31 @@ test('harness guard: an honest run leaves valid markers and per-file counts', as
   assert.equal(parseTestSummary(r.summary_text).tests, 3);
 });
 
+test('harness guard: a test file that require()s other test files (an aggregator) is one honest process, not deleted markers', async (t) => {
+  // real eval trial (hard-feature-2, T6): test/recurrence.test.js was `require('./rrule.test.js'); require('./expand.test.js'); ...`; node attributes each test to the
+  // file where test() was CALLED, so the reporter saw 4 files from 1 process and the old "files > markers" count blocked the goal as harness_tamper.
+  const T = "const test = require('node:test'); const assert = require('node:assert');\n";
+  const d = mk({ 'package.json': '{"type":"commonjs"}', 'test/a.test.js': `${T}test('a1', () => assert.ok(1)); test('a2', () => assert.ok(1));\n`, 'test/b.test.js': `${T}test('b1', () => assert.ok(1));\n`,
+    'test/c.test.js': `${T}test('c1', () => assert.ok(1));\n`, 'test/all.test.js': "require('./a.test.js'); require('./b.test.js'); require('./c.test.js');\n" }); t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  const r = await run(d, 'test/all.test.js');
+  assert.equal(r.ok, true, JSON.stringify(r.harness_problems)); assert.equal(r.harness.processes, 1);
+  assert.deepEqual(Object.fromEntries(Object.entries(r.test_files).map(([f, x]) => [f, x.tests])), { 'test/a.test.js': 2, 'test/b.test.js': 1, 'test/c.test.js': 1 });
+  const r2 = await run(d, 'test/all.test.js', 'test/a.test.js'); // the aggregator next to one of the files it loads: 2 processes, both marked
+  assert.equal(r2.ok, true, JSON.stringify(r2.harness_problems)); assert.equal(r2.harness.processes, 2);
+});
+
+test('harness guard: a test process that deletes its own markers at exit is still harness_tamper (also behind an aggregator)', async (t) => {
+  const T = "const test = require('node:test'); const assert = require('node:assert');\n";
+  const wipe = "const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');\n"
+    + "process.on('exit', () => { for (const x of fs.readdirSync(os.tmpdir())) if (x.startsWith('aos-hg-')) for (const n of ['start', 'end']) { try { fs.unlinkSync(path.join(os.tmpdir(), x, `${process.pid}.${n}`)); } catch {} } });\n";
+  const d = mk({ 'package.json': '{"type":"commonjs"}', 'test/a.test.js': `${T}test('a1', () => assert.ok(1));\n`, 'test/b.test.js': `${T}test('b1', () => assert.ok(1));\n`,
+    'test/x.test.js': `${T}${wipe}test('x1', () => assert.ok(1));\n`, 'test/all.test.js': `${wipe}require('./a.test.js'); require('./b.test.js');\n` }); t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  for (const files of [['test/x.test.js', 'test/a.test.js'], ['test/all.test.js', 'test/x.test.js'], ['test/all.test.js', 'test/b.test.js']]) {
+    const r = await run(d, ...files);
+    assert.equal(r.ok, false, files.join()); assert.equal(r.harness_tamper, true); assert.match(r.harness_problems.join(' '), /left no harness marker/);
+  }
+});
+
 test('harness guard: assert / node:test cannot be neutered by code under test (names built at run time, so no static hit)', async (t) => {
   const evil = "const n = 'node:' + 'ass' + 'ert'; const a = (await import(n)).default;\nfor (const k of Object.keys(a)) if (typeof a[k] === 'function' && k !== 'AssertionError') a[k] = () => {};\nexport const add = () => 0;\n";
   const d = mk({ 'src.mjs': evil, 'x.test.mjs': `${HEAD}import { add } from './src.mjs';\ntest('adds', () => assert.equal(add(2, 3), 5));\n` }); t.after(() => fs.rmSync(d, { recursive: true, force: true }));

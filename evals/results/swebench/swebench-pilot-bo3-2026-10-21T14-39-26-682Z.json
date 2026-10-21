@@ -1,0 +1,378 @@
+{
+  "generated_at": "2026-10-21T14:39:26.682Z",
+  "arms": [
+    "guarded-best-of-3"
+  ],
+  "k": 1,
+  "results": [
+    {
+      "instance": "psf__requests-1766",
+      "arm": "guarded-best-of-3",
+      "trial": 1,
+      "resolved": true,
+      "candidates": [
+        {
+          "copy": 0,
+          "finished_order": 0,
+          "model": "haiku",
+          "new_tokens": 41960,
+          "cache_read_tokens": 617108,
+          "notional_usd": 0.016447180000000002,
+          "num_turns": 19,
+          "status": "finished",
+          "claimed_success": true,
+          "wall_s": 59,
+          "guard": {
+            "accepted": true,
+            "integrity": false,
+            "reasons": [],
+            "files": [
+              "M requests/auth.py",
+              "A test_digest_qop.py"
+            ],
+            "static_warnings": [
+              "no_checks"
+            ],
+            "orig_tests": [
+              "test_requests.py"
+            ],
+            "orig_selection": "related",
+            "agent_tests": [
+              "test_digest_qop.py"
+            ],
+            "protected": {
+              "ok": true,
+              "baseline_passed": 45,
+              "now_passed": 45
+            },
+            "checks": [
+              {
+                "argv": "python -m py_compile <2 changed .py files>",
+                "ok": true
+              },
+              {
+                "argv": "pytest -rA test_digest_qop.py",
+                "ok": true
+              }
+            ],
+            "duration_s": 10.4
+          },
+          "guarded_at_s": 69.6,
+          "grade": {
+            "resolved": true,
+            "applied": true,
+            "f2p": {
+              "pass": 6,
+              "fail": 0
+            },
+            "p2p": {
+              "pass": 79,
+              "fail": 0
+            },
+            "infra_failure": false,
+            "run_id": "psf__requests-1766-guarded-best-of-3-1-c0-1792593432649",
+            "wall_s": 44.6
+          },
+          "patch_bytes": 1105,
+          "repro_files": [
+            "test_digest_qop.py"
+          ]
+        },
+        {
+          "copy": 1,
+          "finished_order": 1,
+          "model": "haiku",
+          "new_tokens": 38332,
+          "cache_read_tokens": 392686,
+          "notional_usd": 0.013281260000000001,
+          "num_turns": 14,
+          "status": "finished",
+          "claimed_success": true,
+          "wall_s": 109,
+          "guard": {
+            "accepted": true,
+            "integrity": false,
+            "reasons": [],
+            "files": [
+              "M requests/auth.py",
+              "A test_digest_qop_quoting.py"
+            ],
+            "static_warnings": [
+              "no_checks"
+            ],
+            "orig_tests": [
+              "test_requests.py"
+            ],
+            "orig_selection": "related",
+            "agent_tests": [
+              "test_digest_qop_quoting.py"
+            ],
+            "protected": {
+              "ok": true,
+              "baseline_passed": 45,
+              "now_passed": 45
+            },
+            "checks": [
+              {
+                "argv": "python -m py_compile <2 changed .py files>",
+                "ok": true
+              },
+              {
+                "argv": "pytest -rA test_digest_qop_quoting.py",
+                "ok": true
+              }
+            ],
+            "duration_s": 9.4
+          },
+          "guarded_at_s": 118.7,
+          "grade": {
+            "resolved": true,
+            "applied": true,
+            "f2p": {
+              "pass": 6,
+              "fail": 0
+            },
+            "p2p": {
+              "pass": 79,
+              "fail": 0
+            },
+            "infra_failure": false,
+            "run_id": "psf__requests-1766-guarded-best-of-3-1-c1-1792593477317",
+            "wall_s": 45.5
+          },
+          "patch_bytes": 1272,
+          "repro_files": [
+            "test_digest_qop_quoting.py"
+          ]
+        },
+        {
+          "copy": 2,
+          "finished_order": 2,
+          "model": "haiku",
+          "new_tokens": 43384,
+          "cache_read_tokens": 742515,
+          "notional_usd": 0.018040950000000004,
+          "num_turns": 19,
+          "status": "finished",
+          "claimed_success": true,
+          "wall_s": 110,
+          "guard": {
+            "accepted": true,
+            "integrity": false,
+            "reasons": [],
+            "files": [
+              "M requests/auth.py",
+              "A test_requests_digest_qop.py"
+            ],
+            "static_warnings": [
+              "no_checks"
+            ],
+            "orig_tests": [
+              "test_requests.py"
+            ],
+            "orig_selection": "related",
+            "agent_tests": [
+              "test_requests_digest_qop.py"
+            ],
+            "protected": {
+              "ok": true,
+              "baseline_passed": 45,
+              "now_passed": 45
+            },
+            "checks": [
+              {
+                "argv": "python -m py_compile <2 changed .py files>",
+                "ok": true
+              },
+              {
+                "argv": "pytest -rA test_requests_digest_qop.py",
+                "ok": true
+              }
+            ],
+            "duration_s": 9.8
+          },
+          "guarded_at_s": 128.5,
+          "grade": {
+            "resolved": true,
+            "applied": true,
+            "f2p": {
+              "pass": 6,
+              "fail": 0
+            },
+            "p2p": {
+              "pass": 79,
+              "fail": 0
+            },
+            "infra_failure": false,
+            "run_id": "psf__requests-1766-guarded-best-of-3-1-c2-1792593522888",
+            "wall_s": 43.7
+          },
+          "patch_bytes": 1296,
+          "repro_files": [
+            "test_requests_digest_qop.py"
+          ]
+        }
+      ],
+      "matrix": {
+        "cells": {
+          "0": {
+            "0": {
+              "pass": true,
+              "passed": 1,
+              "failed": 0,
+              "rc": 0
+            },
+            "1": {
+              "pass": true,
+              "passed": 1,
+              "failed": 0,
+              "rc": 0
+            },
+            "2": {
+              "pass": true,
+              "passed": 1,
+              "failed": 0,
+              "rc": 0
+            },
+            "base": {
+              "pass": false,
+              "passed": 0,
+              "failed": 1,
+              "rc": 1
+            }
+          },
+          "1": {
+            "0": {
+              "pass": true,
+              "passed": 1,
+              "failed": 0,
+              "rc": 0
+            },
+            "1": {
+              "pass": true,
+              "passed": 1,
+              "failed": 0,
+              "rc": 0
+            },
+            "2": {
+              "pass": true,
+              "passed": 1,
+              "failed": 0,
+              "rc": 0
+            },
+            "base": {
+              "pass": false,
+              "passed": 0,
+              "failed": 1,
+              "rc": 1
+            }
+          },
+          "2": {
+            "0": {
+              "pass": true,
+              "passed": 1,
+              "failed": 0,
+              "rc": 0
+            },
+            "1": {
+              "pass": true,
+              "passed": 1,
+              "failed": 0,
+              "rc": 0
+            },
+            "2": {
+              "pass": true,
+              "passed": 1,
+              "failed": 0,
+              "rc": 0
+            },
+            "base": {
+              "pass": false,
+              "passed": 0,
+              "failed": 1,
+              "rc": 1
+            }
+          }
+        },
+        "applied": {
+          "0": true,
+          "1": true,
+          "2": true
+        },
+        "duration_s": 7.2
+      },
+      "selections": {
+        "first": {
+          "chosen": 0,
+          "resolved": true,
+          "wall_to_choice_s": 69.6
+        },
+        "repro": {
+          "chosen": 0,
+          "resolved": true,
+          "fallback": false,
+          "why": {
+            "0": "CHOSEN: passes 3 valid repro(s) [0,1,2], agreement 2, finished #1",
+            "1": "ranked 2: passes 3 valid repro(s) [0,1,2], agreement 2, finished #2",
+            "2": "ranked 3: passes 3 valid repro(s) [0,1,2], agreement 2, finished #3"
+          },
+          "ranking": [
+            {
+              "copy": 0,
+              "finished_order": 0,
+              "accepted": true,
+              "repro_valid": true,
+              "repro_files": [
+                "test_digest_qop.py"
+              ],
+              "passes_valid_repros": [
+                0,
+                1,
+                2
+              ],
+              "score": 3,
+              "agreement": 2
+            },
+            {
+              "copy": 1,
+              "finished_order": 1,
+              "accepted": true,
+              "repro_valid": true,
+              "repro_files": [
+                "test_digest_qop_quoting.py"
+              ],
+              "passes_valid_repros": [
+                0,
+                1,
+                2
+              ],
+              "score": 3,
+              "agreement": 2
+            },
+            {
+              "copy": 2,
+              "finished_order": 2,
+              "accepted": true,
+              "repro_valid": true,
+              "repro_files": [
+                "test_requests_digest_qop.py"
+              ],
+              "passes_valid_repros": [
+                0,
+                1,
+                2
+              ],
+              "score": 3,
+              "agreement": 2
+            }
+          ]
+        }
+      },
+      "raw_resolved_any": true,
+      "resolved_first": true,
+      "new_tokens": 123676,
+      "notional_usd": 0.047769,
+      "wall_s": 270
+    }
+  ]
+}

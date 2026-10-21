@@ -152,6 +152,13 @@ Residual risks (honest list):
   prefix; node aborts at startup if its current directory is not readable (cwd must be inside the allowed worktree); the symlinked
   `/tmp` and `/var` must be passed as real paths (the builder resolves them).
 
+## Guard mode (`aos-orch verify`): what it does and does not protect
+
+`verify` judges a finished tree against a base commit; it does not supervise the agent while it works.
+- **Enforced:** the tree is copied into a private scratch repository (the agent's `.git` config and hooks are not used; symlinks out of the tree are refused; size-bounded). The ORIGINAL test files of the base commit are written over the tree and re-run, and the checks run, in the check sandbox (fails closed without one unless `--unsandboxed-checks`). The diff is analysed for edited, weakened, skipped, deleted or reduced tests and config tampering.
+- **Pass a base the agent cannot move.** If the agent can commit onto the base branch, a diff against it is empty and passes. Use a commit sha recorded before the session (the dashboard's opt-in hook records HEAD at session start for this reason).
+- **Not covered:** it cannot see hidden tests, so an honest but wrong implementation passes; it rejects legitimate behaviour changes whose old behaviour an existing test asserts (a human must approve the test change); it runs the repository's own tests, so only verify repositories whose tests you are willing to run in the sandbox.
+
 ## Platform sandbox notes
 
 - **macOS:** acceptance checks run under `sandbox-exec` (deny-default profile); workers too by default for `aos-orch run goal.json` (`--no-sandbox-workers` opts out).

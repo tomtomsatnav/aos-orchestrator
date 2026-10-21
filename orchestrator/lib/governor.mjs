@@ -162,6 +162,7 @@ export function usageOf(u) {
   return { new_tokens: (x.input_tokens || 0) + (x.cache_creation_input_tokens || 0) + (x.output_tokens || 0), cache_read_tokens: x.cache_read_input_tokens || 0 };
 }
 
+const TICK_FLOOR_S = 1; // regular polls are >= 1s apart (default 10s, the evals 2s; heartbeat interval_s floors at 1s): faster SUSTAINED ticking looks like a runaway loop
 /** Budget evaluation. goal: goal.json object; nowMs: ms; seq: heartbeat seq; inflight: extra new tokens not yet accounted. */
 export function checkBudgets(goal, { nowMs, seq, inflightTokens = 0, softFrac = 0.8 }) {
   const o = goal.orch, b = goal.budget, B = o.budgets;
@@ -177,7 +178,25 @@ export function checkBudgets(goal, { nowMs, seq, inflightTokens = 0, softFrac = 
     if (frac(wall, b.max_wall_clock_s) >= 1) out.hard.push(`wall-clock cap reached (${Math.round(wall)}s >= ${b.max_wall_clock_s}s)`);
     else if (frac(wall, b.max_wall_clock_s) >= softFrac) out.soft.push(`wall clock at ${Math.round(softFrac * 100)}% of the cap`);
   }
-  if (Number.isFinite(b.max_ticks) && (seq > b.max_ticks || b.max_ticks <= 0)) out.hard.push(`tick budget exceeded (${seq} > ${b.max_ticks})`);
+  // max_ticks guards against a runaway engine loop (ticks far faster than its poll), not against a long goal: time is max_wall_clock_s's job. So the cap
+  // grows by one tick per elapsed wall-clock second: an engine polling every >= 1s never hits it however long the goal runs
+  // (an eval at a 2s poll used to stop at ~17 min with tick budget exceeded (501 > 500)), while a tick storm still exceeds max_ticks extra ticks quickly.
+  const tickCap = b.max_ticks + Math.floor(Math.max(0, wall) / TICK_FLOOR_S);
+  if (Number.isFinite(b.max_ticks) && (seq > tickCap || b.max_ticks <= 0)) out.hard.push(`tick budget exceeded (${seq} > ${tickCap})`);
   if (Number.isFinite(b.max_usd) && ((o.usage.notional_usd || 0) >= b.max_usd || b.max_usd <= 0)) out.hard.push(`notional USD cap reached ($${(o.usage.notional_usd).toFixed(4)} >= $${b.max_usd})`);
   return out;
+}
+
+// ---- elastic token budget (drafted goals only, unless the human passed --max-tokens): sized from the plan, grown only while the goal makes progress; never above `hard` (the rules limit)
+const TIER_TOKENS = { haiku: 60000, sonnet: 120000, opus: 200000 }; const RETRY_HEADROOM = 1.5; const GROW_STEP = 0.25; const MIN_PLAN_BUDGET = 150000;
+const round10k = (n) => Math.ceil(n / 10000) * 10000;
+/** Working token budget from a plan: per task an allowance by tier, +10% per path_scope entry (max 10), summed, x1.5 for retries, plus what the planner already used; capped at `hard`. */
+export function planTokenBudget(tasks, { used = 0, hard = Infinity } = {}) {
+  const sum = tasks.reduce((s, t) => s + (TIER_TOKENS[t.model_tier ?? t.orch?.model_tier] || TIER_TOKENS.sonnet) * (1 + Math.min((t.path_scope ?? t.orch?.path_scope ?? []).length, 10) / 10), 0);
+  return Math.min(hard, Math.max(MIN_PLAN_BUDGET, round10k(sum * RETRY_HEADROOM + used)));
+}
+/** The new working budget when usage is at `softFrac` of it AND progress (merged tasks + met criteria) rose since the last extension; else null. Bounded step, never above `hard`. */
+export function grownTokenBudget({ used, cap, progress, mark, hard, softFrac = 0.8 }) {
+  if (!(cap > 0) || cap >= hard || used < softFrac * cap || !(progress > mark)) return null;
+  const next = Math.min(hard, round10k(cap * (1 + GROW_STEP))); return next > cap ? next : null;
 }

@@ -39,7 +39,8 @@ aos-orch run goal.json
 - Governor (`lib/governor.mjs`): no new dispatch at 80% of the 5h window until it resets; pause everything at 90% of the 7d
   window (manual `resume`); a rejected `rate_limit_event` pauses until `resetsAt` plus 60 s; with no reset time it backs off
   15 -> 30 -> 60 -> 240 min. Budgets: new-token cap (soft 80%: no new opus work; hard 100%: stop dispatch, 60 s grace,
-  SIGTERM the group), goal wall clock, per-attempt wall clock and stall, max attempts, max ticks, notional USD.
+  SIGTERM the group), goal wall clock, per-attempt wall clock and stall, max attempts, max ticks (a runaway-loop guard: the
+  cap grows by one tick per elapsed second, so only ticking faster than once a second exhausts it), notional USD.
 
 ## Commands
 

@@ -1,0 +1,228 @@
+{
+  "generated_at": "2026-10-21T14:32:41.219Z",
+  "arms": [
+    "bare-haiku",
+    "guarded"
+  ],
+  "k": 1,
+  "results": [
+    {
+      "instance": "psf__requests-1142",
+      "arm": "bare-haiku",
+      "trial": 1,
+      "resolved": true,
+      "model": "haiku",
+      "session": {
+        "model": "haiku",
+        "new_tokens": 36992,
+        "cache_read_tokens": 416354,
+        "notional_usd": 0.013220039999999997,
+        "num_turns": 12,
+        "status": "finished",
+        "claimed_success": true,
+        "final_message": "1 errors, all `unexpected keyword argument 'strict'` (an incompatibility with this Python version). The failing set is identical before and after the change, so the change doesn't cause them. No existing tests were modified and I didn't add a new one.\n\nI haven't tested this against amazon.com itself, since I had no network access to it. The local checks confirm the header is no longer sent on GET.",
+        "wall_s": 42.1
+      },
+      "files": [
+        "M requests/models.py"
+      ],
+      "grade": {
+        "resolved": true,
+        "applied": true,
+        "f2p": {
+          "pass": 1,
+          "fail": 0
+        },
+        "p2p": {
+          "pass": 5,
+          "fail": 0
+        },
+        "infra_failure": false,
+        "run_id": "psf__requests-1142-bare-haiku-1-1792592898751",
+        "wall_s": 21.5
+      },
+      "raw_resolved": true,
+      "new_tokens": 36992,
+      "notional_usd": 0.013220039999999997,
+      "wall_s": 63.8
+    },
+    {
+      "instance": "psf__requests-1142",
+      "arm": "guarded",
+      "trial": 1,
+      "resolved": true,
+      "model": "haiku",
+      "session": {
+        "model": "haiku",
+        "new_tokens": 40716,
+        "cache_read_tokens": 480582,
+        "notional_usd": 0.01479562,
+        "num_turns": 14,
+        "status": "finished",
+        "claimed_success": true,
+        "final_message": "ttplib` don't run on Python 3.12. To get the code running at all, I used a temporary shim outside the repo to restore the `collections` aliases. I did not run the suite on a Python version the codebase fully supports, so the network-dependent tests are unverified.\n\nI did not add a regression test, since you asked not to modify existing tests. Adding one would be a natural follow-up if you want it.",
+        "wall_s": 43.3
+      },
+      "files": [
+        "M requests/models.py"
+      ],
+      "guard": {
+        "accepted": true,
+        "integrity": false,
+        "reasons": [],
+        "files": [
+          "M requests/models.py"
+        ],
+        "static_warnings": [
+          "no_checks"
+        ],
+        "orig_tests": [
+          "test_requests.py"
+        ],
+        "orig_selection": "related",
+        "agent_tests": [],
+        "protected": {
+          "ok": true,
+          "baseline_passed": 5,
+          "now_passed": 5
+        },
+        "checks": [
+          {
+            "argv": "python -m py_compile <1 changed .py files>",
+            "ok": true
+          }
+        ],
+        "duration_s": 4
+      },
+      "guard_full_reasons": [],
+      "grade": {
+        "resolved": true,
+        "applied": true,
+        "f2p": {
+          "pass": 1,
+          "fail": 0
+        },
+        "p2p": {
+          "pass": 5,
+          "fail": 0
+        },
+        "infra_failure": false,
+        "run_id": "psf__requests-1142-guarded-1-1792592967660",
+        "wall_s": 21.2
+      },
+      "raw_resolved": true,
+      "new_tokens": 40716,
+      "notional_usd": 0.01479562,
+      "wall_s": 68.5
+    },
+    {
+      "instance": "psf__requests-1766",
+      "arm": "bare-haiku",
+      "trial": 1,
+      "resolved": true,
+      "model": "haiku",
+      "session": {
+        "model": "haiku",
+        "new_tokens": 33698,
+        "cache_read_tokens": 304398,
+        "notional_usd": 0.01091398,
+        "num_turns": 11,
+        "status": "finished",
+        "claimed_success": false,
+        "final_message": "requests.py` also depend on an httpbin server.\n\nTo verify, run the digest tests in an environment with an older Python (3.8–3.11 is a safe bet) and `pytest` plus `pytest-httpbin` installed, then `pytest test_requests.py -k digest`. The header itself can be checked by calling `build_digest_header` with a sample challenge and confirming the output contains `qop=\"auth\"`.\n\nI did not commit the change.",
+        "wall_s": 30.8
+      },
+      "files": [
+        "M requests/auth.py"
+      ],
+      "grade": {
+        "resolved": true,
+        "applied": true,
+        "f2p": {
+          "pass": 6,
+          "fail": 0
+        },
+        "p2p": {
+          "pass": 79,
+          "fail": 0
+        },
+        "infra_failure": false,
+        "run_id": "psf__requests-1766-bare-haiku-1-1792593019855",
+        "wall_s": 45.2
+      },
+      "raw_resolved": true,
+      "new_tokens": 33698,
+      "notional_usd": 0.01091398,
+      "wall_s": 76.2
+    },
+    {
+      "instance": "psf__requests-1766",
+      "arm": "guarded",
+      "trial": 1,
+      "resolved": true,
+      "model": "haiku",
+      "session": {
+        "model": "haiku",
+        "new_tokens": 32696,
+        "cache_read_tokens": 475311,
+        "notional_usd": 0.012342510000000001,
+        "num_turns": 14,
+        "status": "finished",
+        "claimed_success": true,
+        "final_message": "at collection before any test runs. I also found no existing test that asserts on the `qop` text, so no tests were modified.\n\nThe header now matches RFC 2617, which quotes `qop` as a string, and the curl output the issue refers to. Servers that are strict about the quoting should accept it. A run on a Python version the repo supports would confirm no existing test depends on the old unquoted form.",
+        "wall_s": 43.7
+      },
+      "files": [
+        "M requests/auth.py"
+      ],
+      "guard": {
+        "accepted": true,
+        "integrity": false,
+        "reasons": [],
+        "files": [
+          "M requests/auth.py"
+        ],
+        "static_warnings": [
+          "no_checks"
+        ],
+        "orig_tests": [
+          "test_requests.py"
+        ],
+        "orig_selection": "related",
+        "agent_tests": [],
+        "protected": {
+          "ok": true,
+          "baseline_passed": 45,
+          "now_passed": 45
+        },
+        "checks": [
+          {
+            "argv": "python -m py_compile <1 changed .py files>",
+            "ok": true
+          }
+        ],
+        "duration_s": 9
+      },
+      "guard_full_reasons": [],
+      "grade": {
+        "resolved": true,
+        "applied": true,
+        "f2p": {
+          "pass": 6,
+          "fail": 0
+        },
+        "p2p": {
+          "pass": 79,
+          "fail": 0
+        },
+        "infra_failure": false,
+        "run_id": "psf__requests-1766-guarded-1-1792593118024",
+        "wall_s": 43.2
+      },
+      "raw_resolved": true,
+      "new_tokens": 32696,
+      "notional_usd": 0.012342510000000001,
+      "wall_s": 96.1
+    }
+  ]
+}

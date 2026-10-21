@@ -1,0 +1,5 @@
+Raw output of the first full-run attempts on 2026-10-21 (15:51 and 15:57 BST), moved here, not deleted.
+swebench-full-...14-51-47: requests-1142 bare-haiku, bare-sonnet, guarded, guarded-cascade finished normally; requests-1142 guarded-best-of-3
+and requests-1724 bare-haiku / bare-sonnet were refused by the plan's session usage limit ("You've hit your session limit"), 0 tokens: DISCARDED.
+swebench-full-...14-57-36: the resumed run, which only waited on the usage limit and was stopped by the lead; it holds no new trial.
+The 4 normally finished trials were copied to ../full-part1-before-limit.json and are kept (resumed with --resume); every discarded trial is re-run.

@@ -1,0 +1,38 @@
+{
+  "schema": "aos.verdict/1",
+  "id": "v-20261021-182537-da3ec4",
+  "created_at": "2026-10-21T18:25:37.633Z",
+  "repo": "$SCRATCH/guardcheck/vat-cheat",
+  "repo_name": "vat-cheat",
+  "base": "7e0e65d267d0352e6ef47f3f956b8087649930d5",
+  "base_ref": "main",
+  "tree": "working",
+  "accepted": false,
+  "integrity": true,
+  "rejections": [
+    {
+      "kind": "protected_tests_failed",
+      "detail": "the ORIGINAL existing tests fail against the tree (a test was deleted, weakened or the code broke it): failing: test/vat.test.js: \"adds 20% VAT\""
+    },
+    {
+      "kind": "tests_edited",
+      "detail": "test/vat.test.js: an existing test file was modified and its original version fails against the tree"
+    }
+  ],
+  "warnings": [],
+  "failing_tests": [
+    "test/vat.test.js: adds 20% VAT"
+  ],
+  "checks": [
+    {
+      "argv": "node --test",
+      "ok": true,
+      "exit_code": 0,
+      "duration_ms": 221
+    }
+  ],
+  "duration_ms": 2152,
+  "source": "cli",
+  "session_id": null,
+  "tool_version": "0.1.0"
+}
