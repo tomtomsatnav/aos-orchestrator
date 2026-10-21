@@ -920,7 +920,8 @@ export class Engine {
       plan = r2.plan; v = validate(plan);
     }
     if (!v.ok) return this._planRejected(S, o.replans ? [`still invalid after ${o.replans} automatic re-plan(s)`, ...v.errors] : v.errors);
-    o.plan_warnings = await this._planWarnings(goal, v.tasks);
+    o.plan_warnings = await this._planWarnings(goal, v.tasks, v.notes);
+    for (const n of v.notes || []) this.ev('orch.plan.deps_added', 'orchestrator', n.task, { added: n.added, rule: 'plan.whole_suite_check' });
     o.tasks_hash_v = 2; // new plans are hashed with their description/output_contract/acceptance too (older goals keep v1 so their approval still verifies)
     S.tasks = toTasks(v.tasks, goal, this.now(), this._R(goal).retry.ladder);
     S.agents = S.tasks.map((t) => ({ id: t.assignee, role: 'worker', capabilities: ['edit', 'bash'], can_delegate: false, status: 'idle', current_task: null, last_event_at: null, orch: { tier: t.orch.model_tier } }));
@@ -939,8 +940,9 @@ export class Engine {
   }
 
   /** Informational warnings shown at plan approval: {taskId|'goal': [text]}. (a) a path_scope that includes an EXISTING test file; (b) a check on a test that looks like it needs a local server while checks.allow_loopback is false. */
-  async _planWarnings(goal, tasks) {
+  async _planWarnings(goal, tasks, notes = []) {
     const o = goal.orch; const w = {}; const add = (k, m) => { (w[k] ||= []).push(m); };
+    for (const n of notes) add(n.task, n.text); // dependencies validatePlan added for a whole-suite task check
     const prot = o.protected_tests?.files || [];
     if (o.acceptance_first === true && !goal.success_criteria.some((c) => c.check)) add('goal', 'checks.acceptance_first is on but NO success criterion has a check, so no acceptance tests are required for this goal (the rule applies only to goals with a code criterion). Add a criterion with a check, or accept that nothing is written test-first.');
     for (const t of tasks) {
@@ -1256,8 +1258,12 @@ export class Engine {
 
     await this._ensureIntegration(S);
     const wt = path.join(o.worktree_root, task.id);
-    const w = await G.worktreeAdd(o.repo, goal.id, wt, task.orch.branch, o.integration_branch);
-    if (w.branch_created) o.created_branches.push(task.orch.branch);
+    // EVERY attempt (retries too) starts on a fresh branch from the CURRENT integration tip: a retry must see what other tasks merged since the
+    // previous attempt (a reused branch keeps the old base, so a whole-suite check keeps failing on work that is already merged)
+    const baseSha = await this._freshTaskBranch(S, task, wt);
+    task.orch.attempt_log.at(-1).base_sha = baseSha;
+    const w = await G.worktreeAdd(o.repo, goal.id, wt, task.orch.branch, baseSha);
+    if (w.branch_created && !o.created_branches.includes(task.orch.branch)) o.created_branches.push(task.orch.branch);
     task.orch.worktree = wt;
     const real = realpathDeepest(wt);
     const policyFile = this.wpath(task.id, seq, 'policy.json');
@@ -1298,6 +1304,17 @@ export class Engine {
     return wt;
   }
   _integrationWt(goal) { return path.join(goal.orch.worktree_root, 'integration'); }
+  /** Before an attempt: drop the task's previous worktree and branch (only a branch this engine created), so worktreeAdd branches anew. -> the integration tip sha the attempt starts from. */
+  async _freshTaskBranch(S, task, wt) {
+    const o = S.goal.orch;
+    if (task.orch.worktree || fs.existsSync(wt)) await G.worktreeRemove(o.repo, task.orch.worktree || wt);
+    task.orch.worktree = null;
+    if (await G.branchExists(o.repo, task.orch.branch)) {
+      if (!o.created_branches.includes(task.orch.branch)) throw new Error(`branch ${task.orch.branch} exists but was not created by this engine: refusing to reuse or delete it`);
+      if (!(await G.deleteOwnBranch(o.repo, S.goal.id, task.orch.branch))) throw new Error(`cannot delete the previous attempt's branch ${task.orch.branch}`);
+    } else if (!o.created_branches.includes(task.orch.branch)) { o.created_branches.push(task.orch.branch); saveState(this.dir, S); } // recorded BEFORE it exists: a crash in between never leaves an unowned branch
+    return (await G.git(o.repo, ['rev-parse', '--verify', `refs/heads/${o.integration_branch}^{commit}`])).stdout.trim();
+  }
   /** {bin, args, sandboxed}: the worker argv, wrapped in sandbox-exec when the goal sets orch.sandbox_workers (throws if unavailable). */
   _workerCommand(goal, args, env, { worktree, tmpDir, policyFile, selfCheckResDir }) {
     if (!goal.orch.sandbox_workers) return { bin: this.bin, args, sandboxed: false };

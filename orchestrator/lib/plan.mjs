@@ -60,7 +60,11 @@ export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: []
       + 'So give every task a fast check that exercises exactly that task\'s change (e.g. node --test on its own test file), because the worker uses it to fix its work before finishing.'] : []),
     ...(c.acceptance_first ? ['ACCEPTANCE TESTS FIRST (checks.acceptance_first): emit at least one task with "role":"acceptance" that ONLY writes test files (path_scope: test files/directories only) describing the goal\'s behaviour with concrete expected values, and no implementation. '
       + 'Its check must not require the new tests to pass yet (e.g. `node --check <file>`), because the code does not exist. EVERY other task must depend (directly or through other tasks) on an acceptance task. '
+      + 'Write ONE acceptance test file PER FEATURE (e.g. test/<feature>.test.js), so that each implementation task\'s check runs ONLY its own feature\'s file (e.g. `node --test test/<feature>.test.js`): never give an implementation task a check that also runs the acceptance tests of another task\'s feature (they fail until that task is merged); the engine runs every acceptance test once all tasks are merged. '
       + 'Implementation tasks may READ the acceptance tests but their path_scope must never reach them: the engine rejects such a plan, fails any attempt that changes them, and re-runs them from their committed version at the end.'] : []),
+    'TASK CHECKS JUDGE THE TASK\'S OWN SCOPE: a task\'s checks run while the other tasks\' work is NOT merged yet, so they must exercise only that task\'s change (e.g. the test runner on that task\'s OWN test files, a syntax check of its files). '
+      + 'Do not give a task a whole-suite check (a package test script, or a test runner without file arguments or with a directory/glob): it fails for reasons outside the task. The whole suite belongs in the goal\'s success criteria, which run once every task is merged. '
+      + 'If a task does get a whole-suite check, the engine makes it depend on every other task that changes code (and shows that at approval).',
     'Produce tasks that are small (one concern, ideally < 200 changed lines), have disjoint path_scope where possible, start at the cheapest plausible tier, and each have at least one check from the allowed commands.',
     'Every task must create or change files within its path_scope. Do NOT add verification-only tasks (run the tests, check the output, review): the engine already runs each task\'s checks after the task and the goal\'s success-criteria checks at the end.',
     `OUTPUT SCHEMA: ${OUTPUT_SCHEMA}`,
@@ -205,7 +209,49 @@ export function validatePlan(plan, opts) {
     else if (d === t.id) bad(`${t.id}: depends on itself`);
   }
   if (!errors.length) { const cyc = findCycle(tasks); if (cyc.length) bad(`dependency cycle among: ${cyc.join(', ')}`); }
-  return { ok: errors.length === 0, errors, tasks: errors.length ? [] : tasks };
+  const notes = errors.length ? [] : wholeSuiteDeps(tasks, bad);
+  return { ok: errors.length === 0, errors, tasks: errors.length ? [] : tasks, notes: errors.length ? [] : notes };
+}
+
+const NODE_VALUE_FLAGS = new Set(['--import', '--require', '-r', '--loader', '--experimental-loader', '--env-file', '--test-reporter', '--test-reporter-destination', '--test-name-pattern', '--test-skip-pattern', '--test-concurrency', '--test-timeout', '--test-shard']);
+/**
+ * A check that runs the WHOLE test suite instead of named files: `npm|pnpm|yarn test` / `run test` (the package script decides what runs), `make test|check`,
+ * and `node --test` without a file argument or with a directory / glob argument.
+ */
+export function isWholeSuiteCheck(argv) {
+  if (!Array.isArray(argv) || !argv.length) return false;
+  const b = path.basename(String(argv[0])); const rest = argv.slice(1);
+  if (['npm', 'pnpm', 'yarn'].includes(b)) return rest[0] === 'test' || rest[0] === 't' || (rest[0] === 'run' && rest[1] === 'test');
+  if (b === 'make') return rest.some((a) => a === 'test' || a === 'check');
+  if (b !== 'node' || !rest.includes('--test')) return false;
+  const files = [];
+  for (let i = 0; i < rest.length; i++) { const a = rest[i]; if (NODE_VALUE_FLAGS.has(a)) { i++; continue; } if (!a.startsWith('-')) files.push(a); }
+  return !files.length || files.some((f) => /[*?{}[\]]/.test(f) || f.endsWith('/') || !/\.[A-Za-z0-9]+$/.test(path.basename(f)));
+}
+/** A path_scope that can only change documentation (no code, no tests, no configuration): such a task never changes what a test suite sees. */
+export const docsOnlyScope = (scope) => Array.isArray(scope) && scope.length > 0 && scope.every((g) => typeof g === 'string' && (/\.(?:md|markdown|txt|rst|adoc)$/i.test(g) || /^(?:\.\/)?docs\//.test(g)));
+
+/**
+ * A task-level whole-suite check judges the work of EVERY task, so it can only pass once all of it is merged: such a task gets every other task that
+ * changes code as a (transitive) dependency, added here and returned as a note for the approval screen. When that is impossible (one of those tasks
+ * already runs after it) the plan is rejected with a clear error. Mutates `tasks` (entries are replaced by copies; the planner's plan object is not changed).
+ */
+function wholeSuiteDeps(tasks, bad) {
+  const notes = [];
+  const ancestors = (id) => { const byId = new Map(tasks.map((t) => [t.id, t])); const seen = new Set(); const st = [...(byId.get(id)?.depends_on || [])]; while (st.length) { const d = st.pop(); if (seen.has(d)) continue; seen.add(d); st.push(...(byId.get(d)?.depends_on || [])); } return seen; };
+  for (let i = 0; i < tasks.length; i++) {
+    const t = tasks[i];
+    const whole = (t.checks || []).filter((c) => isWholeSuiteCheck(c.argv)).map((c) => c.argv.join(' '));
+    if (!whole.length) continue;
+    const anc = ancestors(t.id);
+    const missing = tasks.filter((x) => x.id !== t.id && !anc.has(x.id) && !docsOnlyScope(x.path_scope));
+    const after = missing.filter((x) => ancestors(x.id).has(t.id));
+    if (after.length) { bad(`${t.id}: its check "${whole[0]}" runs the WHOLE test suite, so it can only pass after every other task that changes code is merged, but ${after.map((x) => x.id).join(', ')} run(s) after ${t.id}. Give ${t.id} a check on its own test files instead (e.g. node --test <its test file>); the whole suite belongs in the goal's success criteria`); continue; }
+    if (!missing.length) continue;
+    tasks[i] = { ...t, depends_on: [...t.depends_on, ...missing.map((x) => x.id)] };
+    notes.push({ task: t.id, added: missing.map((x) => x.id), text: `WHOLE-SUITE CHECK: "${whole[0]}" runs every test, which fails while other tasks' work is not merged, so the engine made this task also wait for ${missing.map((x) => x.id).join(', ')} (dependencies added to the plan). To let it run earlier, give it a check on its own test files instead.` });
+  }
+  return notes;
 }
 
 /** Build AOS-1 task objects (+ orch extension, design section 3) from a validated plan. */
@@ -287,8 +333,8 @@ export function tasksHash(tasks, v = 1) {
 /** The tasks-hash version of a goal: 2 once the engine created its plan with v2 (goal.orch.tasks_hash_v), 1 for a goal whose plan predates v2 (its approval must keep verifying). */
 export const tasksHashV = (goal) => { const o = goal?.orch || {}; const fp = o.plan_fingerprint || o.plan_approval; return fp ? (fp.tasks_hash_v || 1) : (o.tasks_hash_v || 1); };
 export const tasksHashFor = (goal, tasks) => tasksHash(tasks, tasksHashV(goal));
-/** Plain-text rendering of reviewView for `status` / `approvals` / `approve-plan`. `rulesText` (rules-store renderRulesFor) is printed after the tasks, next to the rules hash. */
-export function renderReview(view, rulesText) {
+/** Plain-text rendering of reviewView for `status` / `approvals` / `plan`. `rulesText` (rules-store renderRulesFor) is printed after the tasks, next to the rules hash; `selfCheck`: the goal's rules turn worker.self_check on. */
+export function renderReview(view, rulesText, { selfCheck = false } = {}) {
   const L = [];
   const e = escCtrl; const arg = (a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : e(JSON.stringify(String(a))));
   for (const w of view.goal_warnings || []) L.push(`!! WARNING: ${e(w)}`);
@@ -303,7 +349,8 @@ export function renderReview(view, rulesText) {
     if (t.description) block('description', t.description);
     if (t.output_contract) block('output contract', t.output_contract);
     if ((t.acceptance || []).length) block('acceptance', t.acceptance.join(' | '));
-    L.push(`  worker commands: ${t.allowed_commands.length ? t.allowed_commands.map(e).join(' | ') : '(none; read-only inspection only)'}`);
+    const sc = selfCheck && t.checks.length ? 'self-check: may run its approved checks via the engine' : null; // worker.self_check: the engine runs them, sandboxed
+    L.push(`  worker commands: ${t.allowed_commands.length ? `${t.allowed_commands.map(e).join(' | ')}${sc ? `; ${sc}` : ''}` : sc ? `(none; read-only inspection; ${sc})` : '(none; read-only inspection only)'}`);
     for (const c of t.checks) L.push(`  check (sandboxed, ${e(c.timeout_s)}s): ${c.argv.map(arg).join(' ')}`);
   }
   if (rulesText) L.push(...String(rulesText).split('\n'));
