@@ -62,7 +62,41 @@ export function judgeRun(argv, summary, baseline = null, { allowSkip = false } =
   }
   return { ok: true, applicable: true };
 }
+/**
+ * The test summary the engine trusts for one check result: the per-file counts of the engine's OWN reporter (harness-reporter.mjs, a separate channel code under
+ * test cannot write to) when the run has them, else the TAP/spec text. Text printed by the code under test (fake `ok` / `# tests 99` lines) never inflates them.
+ */
+export function summaryOfRun(r) {
+  const sm = parseTestSummary(r.summary_text ?? r.output);
+  const files = r.test_files && typeof r.test_files === 'object' ? Object.values(r.test_files) : null;
+  if (!files || !files.length || !sm) return sm;
+  const sum = (k) => files.reduce((n, f) => n + (Number(f[k]) || 0), 0);
+  if (!files.some((f) => 'skipped' in f)) return { ...sm, tests: sum('tests'), pass: sum('pass') }; // compact records (no skip/todo counts) are only ever baselines
+  return { ...sm, tests: sum('tests'), pass: sum('pass'), skipped: sum('skipped'), todo: sum('todo') };
+}
 export const checkKey = (argv) => argv.join(' ');
+/**
+ * Merge repeated baseline runs of one check ({tests, pass, skipped, todo, source, files?} or null): the LARGEST count wins (per file too), so a test file whose
+ * registered tests depend on the clock / randomness cannot record a low baseline by luck. unstable=true when the runs disagreed. -> merged | null
+ */
+export function mergeBaselineRuns(runs) {
+  const rs = (runs || []).filter(Boolean); if (!rs.length) return null;
+  const top = rs.reduce((a, b) => (b.tests > a.tests ? b : a));
+  const max = (k) => Math.max(...rs.map((r) => r[k] ?? 0));
+  const out = { ...top, tests: max('tests'), pass: max('pass'), skipped: max('skipped'), todo: max('todo'), runs: rs.length };
+  let unstable = rs.some((r) => r.tests !== top.tests);
+  if (rs.some((r) => r.files)) {
+    const files = {};
+    for (const r of rs) for (const [f, c] of Object.entries(r.files || {})) {
+      const cur = files[f];
+      if (cur && cur.tests !== c.tests) unstable = true;
+      if (!cur || c.tests > cur.tests) files[f] = { ...c };
+    }
+    out.files = files;
+  }
+  if (unstable) out.unstable = true;
+  return out;
+}
 
 const DECL_RE = /(^|[^\w.$])(?:test|it)(?:\.(?:only|skip|todo))?\s*\(/g;
 /** Static fallback for a baseline: test( / it( declarations in the test files a check would run. `files` = [{path, text}] of the base commit. */

@@ -30,7 +30,8 @@ import { buildReport } from './report.mjs';
 import { probeClaudeVersion } from './cli-version.mjs';
 import { runAdvisoryReview } from './review.mjs';
 import * as HG from './harness-guard.mjs';
-import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath } from './anticheat.mjs';
+const BASELINE_RUNS = 2;
+import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, summaryOfRun, mergeBaselineRuns, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath } from './anticheat.mjs';
 import { isTestPath } from './protect.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -1006,12 +1007,17 @@ export class Engine {
     for (const t of S.tasks) for (const c of t.orch.checks) if (isTestRunArgv(c.argv)) checks.set(checkKey(c.argv), c);
     let files = null;
     for (const [key, c] of checks) {
-      let b = null;
-      try {
-        const r = await runCheck({ argv: forceTapArgv(c.argv), timeout_s: Math.min(c.timeout_s || 300, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('baseline') }), ...this._sandboxOpts(goal, wt, 'baseline') });
-        const sm = r.rejected ? null : parseTestSummary(r.summary_text ?? r.output);
-        if (sm) b = { tests: sm.tests, pass: sm.pass, skipped: sm.skipped, todo: sm.todo, source: 'run', ...(r.test_files ? { files: HG.compactFiles(r.test_files) } : {}) };
-      } catch { /* static fallback */ } finally { await G.discardChanges(wt).catch(() => {}); }
+      let b = null; const runs = [];
+      for (let i = 0; i < BASELINE_RUNS; i++) { // twice, the larger count wins: a test file that registers a different number of tests per run (clock, randomness) cannot record a low baseline by luck
+        try {
+          const r = await runCheck({ argv: forceTapArgv(c.argv), timeout_s: Math.min(c.timeout_s || 300, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('baseline') }), ...this._sandboxOpts(goal, wt, 'baseline') });
+          const sm = r.rejected ? null : summaryOfRun(r);
+          runs.push(sm ? { tests: sm.tests, pass: sm.pass, skipped: sm.skipped, todo: sm.todo, source: 'run', ...(r.test_files ? { files: HG.compactFiles(r.test_files) } : {}) } : null);
+        } catch { runs.push(null); /* static fallback */ } finally { await G.discardChanges(wt).catch(() => {}); }
+        if (!runs[i]) break;
+      }
+      b = mergeBaselineRuns(runs);
+      if (b?.unstable) this.ev('orch.anticheat.warning', 'orchestrator', null, { kinds: ['baseline_unstable'], detail: `${key.slice(0, 80)}: the baseline runs counted different numbers of tests; the larger count is enforced` });
       if (!b) { files ||= await this._readTestFiles(wt); b = { tests: staticTestCount(c.argv, files), source: 'static' }; }
       A.baselines[key] = { ...b, at: iso(this.now()) };
     }
@@ -1025,10 +1031,16 @@ export class Engine {
     const goal = S.goal; const o = goal.orch; const A = this._anti(goal);
     const { js } = runnerFor(o.protected_tests?.files || []);
     if (!js.length || A.protected_counts) return;
-    try {
-      const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('baseline') }), ...this._sandboxOpts(goal, wt, 'baseline') });
-      if (r.test_files) A.protected_counts = { files: HG.compactFiles(r.test_files), at: iso(this.now()) };
-    } catch { /* no per-file counts: the total-count rules still apply */ } finally { await G.discardChanges(wt).catch(() => {}); }
+    const runs = [];
+    for (let i = 0; i < BASELINE_RUNS; i++) {
+      try {
+        const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('baseline') }), ...this._sandboxOpts(goal, wt, 'baseline') });
+        if (!r.test_files) break;
+        runs.push({ tests: 0, files: HG.compactFiles(r.test_files) });
+      } catch { break; /* no per-file counts: the total-count rules still apply */ } finally { await G.discardChanges(wt).catch(() => {}); }
+    }
+    const m = mergeBaselineRuns(runs);
+    if (m) A.protected_counts = { files: m.files, at: iso(this.now()), ...(m.unstable ? { unstable: true } : {}) };
   }
 
   /** Per-file test counts of an acceptance task's files, from the attempt worktree (== the committed version). null when they cannot be counted. */
@@ -1079,7 +1091,7 @@ export class Engine {
   _judgeChecks(goal, results, entry, task) {
     const A = this._anti(goal); const tests = []; let bad = null;
     for (const r of results) {
-      const sm = parseTestSummary(r.summary_text ?? r.output); const b = A.baselines?.[checkKey(r.argv)];
+      const sm = summaryOfRun(r); const b = A.baselines?.[checkKey(r.argv)];
       let v = judgeRun(r.argv, sm, b, { allowSkip: !!task?.orch.allow_skip?.length });
       if (v.ok) v = HG.judgePerFile(b?.files, r.test_files);
       if (sm) tests.push({ check: checkKey(r.argv).slice(0, 120), tests: sm.tests, pass: sm.pass, skipped: sm.skipped, todo: sm.todo, baseline: b ? b.tests : null });
@@ -1104,7 +1116,7 @@ export class Engine {
       for (const { f, commit } of js) { const b = await G.showBlob(o.repo, commit, f); if (b) { fs.mkdirSync(path.dirname(path.join(wt, f)), { recursive: true }); fs.writeFileSync(path.join(wt, f), b); } }
       if (js.length) {
         const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js.map((x) => x.f)]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('acceptance') }), ...this._sandboxOpts(goal, wt, 'acceptance') });
-        const sm = parseTestSummary(r.summary_text ?? r.output); res.tests = sm ? sm.tests : null; lastFiles = r.test_files || null;
+        const sm = summaryOfRun(r); res.tests = sm ? sm.tests : null; lastFiles = r.test_files || null;
         res.ok = r.ok; if (!r.ok) res.output = tail(r.output || '', 2000);
         else if (r.harness_tamper) { res.ok = false; res.kind = 'harness_tamper'; res.output = `anti-cheat harness_tamper: ${r.harness_problems.slice(0, 3).join(' | ')}`.slice(0, 600); }
         else if (!(sm && sm.tests > 0 && sm.pass > 0)) { res.ok = false; res.output = `anti-cheat: the acceptance tests ran ${sm ? `${sm.tests} test(s) of which ${sm.pass} passed` : 'with no countable test summary'}`; }
