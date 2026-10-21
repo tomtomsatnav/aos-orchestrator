@@ -131,7 +131,7 @@ Condensed; numbers from each goal's report and events.
 
 Runs that blocked that night, and why:
 
-- Stale base: a task started from an out-of-date base (bug, since fixed: every attempt now branches fresh from the integration tip).
+- Ordering and stale base (2 goals): a task ran the whole test suite before other tasks' work was merged, and retries reused the first attempt's out-of-date base. Both are fixed: every attempt now branches fresh from the integration tip, and a task with a whole-suite check automatically waits for every task that changes code.
 - Unsatisfiable test: the protected re-run of the original tests failed, so the goal correctly blocked instead of passing.
 - Server test: an existing test that starts a local server cannot pass in the check sandbox (loopback issue, since fixed with `checks.allow_loopback`).
 
