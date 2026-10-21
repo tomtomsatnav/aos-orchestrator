@@ -1,9 +1,10 @@
 # What a real run looks like
 
-Two real goals, run with the real `claude` binary against throwaway repos. Nothing here is mocked. Numbers come straight from each goal's `report.md`, `tasks.json` and `events.ndjson`. Costs are notional USD (list price), not money spent on a subscription. Paths are shown with `~`.
+Real goals, run with the real `claude` binary against throwaway repos. Nothing here is mocked. Numbers come straight from each goal's `report.md`, `tasks.json` and `events.ndjson`. Costs are notional USD (list price), not money spent on a subscription. Paths are shown with `~`.
 
 1. [Slugify](#1-add-a-slugify-cli-4-tasks-all-haiku): small, planner plus four Haiku workers.
 2. [tinymd](#2-tinymd-fenced-code-nested-blockquotes-escaping-a-bigger-run): a bigger goal in an existing library, mixed Haiku and Sonnet.
+3. [Later runs](#3-later-runs-same-night-real-claude-worker-sandbox-on-self-check-on): two more all-Haiku goals, the comparison, and what blocked.
 
 ## 1. Add a slugify CLI (4 tasks, all Haiku)
 
@@ -112,6 +113,27 @@ A zero-dependency Node markdown converter with 10 existing tests. The goal: add 
 - Timing (one session, UTC): goal created 21:45:10, plan ready 21:46:13 (about a minute of planning), plan approved 21:47:02, all four tasks done by 21:48:53 (1 min 52 s of execution), then the goal waited for two human-verified criteria until they were confirmed at 21:53:34.
 - Result: the full suite, `npm test`, passes with 33 of 33 tests; the 10 original tests are byte-identical to the base commit.
 - Integration diffstat: 8 files, 199 insertions, 7 deletions (`README.md` +51, `src/lexer.mjs`, `src/parser.mjs`, `src/render.mjs`, `src/util.mjs`, and three new test files of 35 to 37 lines each).
+
+## 3. Later runs, same night (real `claude`, worker sandbox on, self-check on)
+
+Condensed; numbers from each goal's report and events.
+
+| goal | outcome | tasks | new tokens | wall time | tests |
+|---|---|---|---|---|---|
+| e2e2 A: fix clamp bug, add words and groupBy, README | achieved | 5, all haiku, all first attempt | 47.5k | about 305 s | 25/25, original tests untouched |
+| e2e2 B: shopkit, fix formatCents padding, add parseCents and removeItem, README | achieved | 5, all haiku, all first attempt | 53.1k | about 230 s | 29/29 |
+| tinymd (section 2) | achieved | 4 (haiku, sonnet, sonnet, haiku) | 67.8k | | 33/33 |
+| dashboard dogfood, `aos-dash --json` | achieved | | 61.5k | | mergeable patch |
+
+- e2e2 A: 8 self-checks ran; anti-cheat clean (5 passes, 2 acceptance re-runs ok).
+- e2e2 B: anti-cheat clean.
+- Plain `claude` vs the orchestrator on the same goal: both passed the test-editing trap. Plain was faster. The orchestrator isolates the work on a branch. Running the comparison exposed reliability issues in the orchestrator, which were then fixed.
+
+Runs that blocked that night, and why:
+
+- Ordering and stale base (2 goals): a task ran the whole test suite before other tasks' work was merged, and retries reused the first attempt's out-of-date base. Both are fixed: every attempt now branches fresh from the integration tip, and a task with a whole-suite check automatically waits for every task that changes code.
+- Unsatisfiable test: the protected re-run of the original tests failed, so the goal correctly blocked instead of passing.
+- Server test: an existing test that starts a local server cannot pass in the check sandbox (loopback issue, since fixed with `checks.allow_loopback`).
 
 ## What to take from this
 

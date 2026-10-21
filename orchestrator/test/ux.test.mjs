@@ -94,6 +94,7 @@ test('cli: plan is read-only; run stops with the exact next command; run --wait-
   const end = Date.now() + 20000; while (!/waiting for your command/.test(err) && Date.now() < end) await sleep(50);
   assert.match(err, /waiting for your command/); assert.match(err, /PLAN FOR REVIEW/);
   await sleep(1200); assert.equal(readJSON(paths(dir).goal).orch.plan_state, 'awaiting_approval', 'still waiting: the engine proceeds only on the human command'); assert.equal(c.exitCode, null);
+  r = await cli(['status', 'g-ux'], env); assert.match(JSON.parse(r.out).heartbeat.status, /^waiting \(attached run pid \d+\)$/, 'parked at plan approval: not shown as stopped');
   r = await cli(['approve-plan', 'g-ux'], env); assert.match(r.out, /queued; the attached run \(pid \d+\) will apply it within one tick/);
   assert.equal(await closed, 0, err); assert.equal(JSON.parse(out).status, 'achieved');
 });
