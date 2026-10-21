@@ -358,3 +358,7 @@ export const TASKS = [
       plan: accPlan({ title: 'Add the recurrence engine', description: 'Implement rrule.js, expand.js, exclusions.js, occurrences.js and extend format.js and index.js', path_scope: ['src/rrule.js', 'src/expand.js', 'src/exclusions.js', 'src/occurrences.js', 'src/format.js', 'src/index.js'], checks: [NODE_TEST], output_contract: 'feature works', acceptance: ['node --test passes'] }),
       edits: Object.entries(RC_FIX).map(([p, content]) => ({ path: p, content })) } },
 ];
+
+// larger tasks live in their own files
+import { PARALLEL_TASK, PARALLEL_TASK_8 } from './tasks-parallel.mjs';
+TASKS.push(PARALLEL_TASK, PARALLEL_TASK_8);
