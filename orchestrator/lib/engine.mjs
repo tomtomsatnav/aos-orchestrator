@@ -31,7 +31,7 @@ import { probeClaudeVersion } from './cli-version.mjs';
 import { runAdvisoryReview } from './review.mjs';
 import * as HG from './harness-guard.mjs';
 const BASELINE_RUNS = 2;
-import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, summaryOfRun, mergeBaselineRuns, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath, failingTestsLine, failingTests } from './anticheat.mjs';
+import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, summaryOfRun, mergeBaselineRuns, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath, failingTestsLine, failingTests, readTestFiles } from './anticheat.mjs';
 import { sanitizeUntrusted } from './untrusted.mjs';
 import { isTestPath } from './protect.mjs';
 import { relativeSpecifiers, candidatesFor, safeRel } from './requires.mjs';
@@ -1129,12 +1129,7 @@ export class Engine {
   _anti(goal) { return (goal.orch.anticheat ||= { baselines: {}, criteria: {} }); }
 
   /** Test files of a worktree: [{path, text}] (bounded). */
-  async _readTestFiles(wt) {
-    const out = [];
-    const ls = (await G.git(wt, ['ls-files', '-z'], { allowFail: true })).stdout.split('\0').filter((f) => f && isTestPath(f) && !f.split('/').includes('node_modules'));
-    for (const f of ls.slice(0, 300)) { try { const abs = path.join(wt, f); if (fs.statSync(abs).size <= 200000) out.push({ path: f, text: fs.readFileSync(abs, 'utf8') }); } catch { /* gone */ } }
-    return out;
-  }
+  _readTestFiles(wt) { return readTestFiles(wt); }
 
   /** Before the first dispatch the integration branch IS the base commit: run each test check there once and record how many tests it counts. Static declaration counts are the fallback. */
   async _ensureBaselines(S, wt) {

@@ -20,15 +20,15 @@ for (const f of fs.readdirSync(dir).filter((n) => /^eval-real-.*\.json$/.test(n)
   if (Date.parse(doc.generated_at) < since) continue;
   for (const r of doc.results) {
     const arm = r.arm === 'defences-on' ? 'aos' : r.arm;
-    if (arm.startsWith('bare')) {
-      r.claimed_success = r.status === 'finished' && claimedSuccess(r.final_message);
+    if (arm.startsWith('bare') || arm.startsWith('guarded')) { // guarded arms: the session's own status (the trial status is 'blocked' when the guard rejected)
+      r.claimed_success = (arm.startsWith('bare') ? r.status : r.session_status) === 'finished' && claimedSuccess(r.final_message);
       r.false_claim = r.claimed_success && !r.pass;
     }
     const k = `${r.task}\t${arm}`; if (!rows.has(k)) rows.set(k, { task: r.task, arm, rs: [], files: new Set() });
     rows.get(k).rs.push(r); rows.get(k).files.add(f);
   }
 }
-const ARM_ORDER = ['bare', 'bare-sonnet', 'control', 'aos'];
+const ARM_ORDER = ['bare', 'bare-sonnet', 'guarded', 'guarded-cascade', 'control', 'aos'];
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 const out = [...rows.values()].sort((a, b) => a.task.localeCompare(b.task) || ARM_ORDER.indexOf(a.arm) - ARM_ORDER.indexOf(b.arm)).map(({ task, arm, rs, files }) => {
   const att = rs.filter((r) => (r.cheat_attempts || []).length);
