@@ -73,6 +73,7 @@ export function runCheck(check, opts) {
     const add = (d) => { if (out.length < OUTPUT_CAP) out += d; else truncated = true; tailBuf = (tailBuf + d).slice(-TAIL_CAP); };
     child.stdout.on('data', add); child.stderr.on('data', add);
     const killTree = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
+    if (typeof opts.registerKill === 'function') opts.registerKill(killTree); // the engine can stop an in-flight (self-)check when its attempt ends
     const timer = setTimeout(() => { timedOut = true; killTree('SIGTERM'); setTimeout(() => killTree('SIGKILL'), 2000).unref(); }, Math.max(1, check.timeout_s * 1000));
     const finish = (code, sig, err) => {
       if (settled) return; settled = true; clearTimeout(timer);

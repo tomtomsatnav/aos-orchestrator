@@ -24,7 +24,7 @@ import { Governor, DEFAULTS as GOV_DEFAULTS, detectLimitFailure, checkBudgets, u
 import { listTestFiles, runnerFor, scopeHitsTests, serverWarnings } from './protect.mjs';
 import { startableTiers, buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHashFor, tasksHashV, reviewView, canonical, sha256 } from './plan.mjs';
 import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
-import { sandboxAvailable, workerSandboxAvailable, wrapWorkerCommand, DEFAULT_SANDBOX_BIN } from './sandbox.mjs';
+import { developerDirs, sandboxAvailable, workerSandboxAvailable, wrapWorkerCommand, DEFAULT_SANDBOX_BIN } from './sandbox.mjs';
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
 import { buildReport } from './report.mjs';
 import { probeClaudeVersion } from './cli-version.mjs';
@@ -504,7 +504,7 @@ export class Engine {
         rec = this._adopt(S, task);
         if (!rec) continue;
       }
-      if (rec.tail.update()) rec.lastProgressMs = now;
+      if (rec.tail.update() || rec.selfCheck?.busy) rec.lastProgressMs = now;
       for (const info of rec.tail.takeRateLimits()) { this.gov.observe(info, now); rec.lastRL = info; }
       const alive = rec.exited ? false : rec.handle ? true : (pidAlive(rec.pid) && this._pidMatches(rec));
       if (alive && !rec.termAtReal) {
@@ -565,6 +565,8 @@ export class Engine {
 
   /** Stage A: read the final stream, account usage, persist result.json. Stage B: _decide. */
   async _collect(S, task, rec) {
+    await this._endSelfChecks(rec); // an in-flight self-check never outlives its attempt (it could still write into the worktree the authoritative checks run in)
+    if (rec.selfCheck) this._cleanSelfCheckDirs(task.id); // no stale *.res.json / selfcheck-<task> tmp dir carried into the next attempt
     const goal = S.goal; const o = goal.orch;
     const entry = task.orch.attempt_log.at(-1);
     const res = rec.tail.result;
@@ -706,10 +708,19 @@ export class Engine {
       return this._failAttempt(S, task, entry, 'scope_violation', { escalate: true, note: `changed files outside path_scope: ${outside.slice(0, 5).join(', ')}` });
     }
     await G.commitAll(wt, `aos: ${task.id} attempt ${entry.n} (${entry.tier})`);
+    const headBefore = await G.head(wt);
     // anti-cheat, before any check runs worker-written test code: skipped / deleted tests, test configuration, acceptance tests, copied expectations
     const ac = await this._anticheatDiff(S, task, entry, wt);
     if (ac.fail) return this._failAttempt(S, task, entry, ac.fail.kind, { escalate: true, note: ac.note });
     const checks = await runChecks(task.orch.checks, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp(task.id) }), allowlist: this._checkAllowlist(goal), ...this._sandboxOpts(goal, wt, task.id) });
+    // the authoritative checks must leave the committed worktree exactly as it was (a leftover self-check process, or the check itself, writing into it = fail)
+    const dirty = await G.changedPaths(wt).catch((e) => [`(git status failed: ${String(e.message).slice(0, 80)})`]);
+    const headAfter = await G.head(wt).catch(() => null);
+    if (dirty.length || headAfter !== headBefore) {
+      this.ev('orch.check.failed', 'orchestrator', task.id, { reason: 'worktree_mutated_during_checks', paths: dirty.slice(0, 20), head_moved: headAfter !== headBefore });
+      await G.git(wt, ['reset', '--hard', headBefore], { allowFail: true }).catch(() => {}); await G.discardChanges(wt).catch(() => {});
+      return this._failAttempt(S, task, entry, 'worktree_mutated_during_checks', { escalate: true, note: `the worktree changed while the checks ran: ${dirty.slice(0, 5).join(', ') || 'HEAD moved'}` });
+    }
     entry.checks_ok = checks.ok;
     const last = checks.results.at(-1);
     this.ev(checks.ok ? 'orch.check.passed' : 'orch.check.failed', 'orchestrator', task.id, { attempt: entry.n, checks: checks.results.map((r) => ({ argv: r.argv.join(' '), ok: r.ok, exit_code: r.exit_code, timed_out: r.timed_out, sandboxed: r.sandboxed ?? null })) });
@@ -1247,7 +1258,7 @@ export class Engine {
     const args = W.buildArgs({ prompt, tier, sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, settingsFile: path.join(this.P.workers, 'settings.json') });
     const env = W.buildEnv({ base: this.env, goalId: goal.id, taskId: task.id, attempt: task.attempts, worktree: real, policyFile, approvalsDir: this.P.approvals, tmpDir: this._tmp(task.id), decisionLog: path.join(this.P.workers, 'decisions.ndjson'), bin: this.bin });
     const stdout = this.wpath(task.id, seq, 'stream.ndjson'); const stderr = this.wpath(task.id, seq, 'stderr');
-    const cmd = this._workerCommand(goal, args, env, { worktree: real, tmpDir: env.TMPDIR, policyFile });
+    const cmd = this._workerCommand(goal, args, env, { worktree: real, tmpDir: env.TMPDIR, policyFile, selfCheckResDir: sc?.state.resDir });
     const h = W.startWorker({ bin: cmd.bin, args: cmd.args, env, cwd: wt, stdoutFile: stdout, stderrFile: stderr, spawnFn: this.spawnFn });
     const rec = { task: task.id, seq, pid: h.pid, pgid: h.pgid, session_id: sessionId, tail: new W.StreamTail(stdout), handle: h, exited: null,
       startedMs: this.now(), lastProgressMs: this.now(), killReason: null, termAtReal: 0, selfCheck: sc ? sc.state : null };
@@ -1276,13 +1287,13 @@ export class Engine {
   }
   _integrationWt(goal) { return path.join(goal.orch.worktree_root, 'integration'); }
   /** {bin, args, sandboxed}: the worker argv, wrapped in sandbox-exec when the goal sets orch.sandbox_workers (throws if unavailable). */
-  _workerCommand(goal, args, env, { worktree, tmpDir, policyFile }) {
+  _workerCommand(goal, args, env, { worktree, tmpDir, policyFile, selfCheckResDir }) {
     if (!goal.orch.sandbox_workers) return { bin: this.bin, args, sandboxed: false };
     const av = workerSandboxAvailable({ bin: this.sandboxBin });
     if (!av.ok) throw new Error(`worker OS sandbox unavailable (${av.reason}): orch.sandbox_workers is set, refusing to start the worker unsandboxed`);
-    const w = wrapWorkerCommand([W.resolveBin(this.bin, env.PATH), ...args], { worktree, tmpDir, policyFile, approvalsDir: this.P.approvals,
+    const w = wrapWorkerCommand([W.resolveBin(this.bin, env.PATH), ...args], { worktree, tmpDir, policyFile, approvalsDir: this.P.approvals, selfCheckResDir,
       decisionLog: path.join(this.P.workers, 'decisions.ndjson'), settingsFile: path.join(this.P.workers, 'settings.json'), hookDir: path.dirname(this.hookScript),
-      gitCommon: path.join(goal.orch.repo, '.git'), claudeBin: W.resolveBin(this.bin, env.PATH), sessionId: args[args.indexOf('--session-id') + 1], sysTmp: env.AOS_FAKE_STATE ? path.dirname(env.AOS_FAKE_STATE) : undefined /* test mode only: the scripted fake's scenario + state */, home: this.env.HOME, profileDir: path.join(this.dir, 'sandbox'),
+      gitCommon: path.join(goal.orch.repo, '.git'), claudeBin: W.resolveBin(this.bin, env.PATH), sessionId: args[args.indexOf('--session-id') + 1], sysTmp: env.AOS_FAKE_STATE ? path.dirname(env.AOS_FAKE_STATE) : undefined /* test mode only: the scripted fake's scenario + state */, home: this.env.HOME, profileDir: path.join(this.dir, 'sandbox'), developerDirs: this._devDirs(),
       bin: this.sandboxBin, ...(this.workerSandbox || {}) });
     return { bin: w.bin, args: w.args, sandboxed: true };
   }
@@ -1293,37 +1304,64 @@ export class Engine {
     if (R.self_check !== true || !(task.orch.checks || []).length) return null;
     const dir = path.join(this._tmp(task.id), SC.INBOX_NAME);
     fs.rmSync(dir, { recursive: true, force: true }); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // responses leave through an ENGINE-owned dir beside (not inside) the worker's writable tmp dir: the worker sandbox may read it (the hook does), never write it
+    const resDir = path.join(this._tmp(`selfcheck-res-${task.id}`));
+    this._cleanSelfCheckDirs(task.id);
     const checks = task.orch.checks.map((c) => ({ argv: [...c.argv], timeout_s: c.timeout_s }));
     const max = R.self_checks_max ?? SC.SELF_CHECKS_MAX_DEFAULT;
-    return { ctx: { dir: realpathDeepest(dir), checks, max },
-      state: { dir, checks, max, wt: realWt, attempt: task.attempts, busy: false, stats: { runs: 0, capped: 0, ms: 0, output_bytes: 0 } } };
+    return { ctx: { dir: realpathDeepest(dir), res_dir: realpathDeepest(resDir), checks, max },
+      state: { dir, resDir, checks, max, wt: realWt, attempt: task.attempts, busy: false, bad: 0, flooded: false, aborted: false, running: null, kill: null, stats: { runs: 0, capped: 0, ms: 0, output_bytes: 0 } } };
   }
-  /** Answer pending self-check requests: one run at a time per worker, the argv always from the engine's copy of the plan. */
+  /** Between attempts: no stale responses, no leftover selfcheck-<task> check tmp dir. Recreates the (empty) response dir for the next attempt. */
+  _cleanSelfCheckDirs(taskId) {
+    try { fs.rmSync(path.join(this.P.tmp, `selfcheck-res-${taskId}`), { recursive: true, force: true }); fs.mkdirSync(path.join(this.P.tmp, `selfcheck-res-${taskId}`), { recursive: true, mode: 0o700 }); } catch { /* best effort */ }
+    try { fs.rmSync(path.join(this.P.tmp, `selfcheck-${taskId}`), { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+  /** The attempt is over: stop (SIGKILL the process group) and await any self-check still running for it. */
+  async _endSelfChecks(rec) {
+    const sc = rec.selfCheck; if (!sc) return;
+    sc.aborted = true;
+    if (sc.busy) { try { sc.kill?.('SIGKILL'); } catch { /* gone */ } try { await sc.running; } catch { /* already reported */ } }
+  }
+  /** Answer pending self-check requests: one run at a time per worker, the argv always from the engine's copy of the plan. A flooded inbox is capped, bulk-cleaned and finally ignored. */
   _serviceSelfChecks() {
     for (const rec of this.workers.values()) {
       const sc = rec.selfCheck;
       if (!sc || sc.busy) continue;
       const reqs = SC.readRequests(sc.dir);
+      for (const j of reqs.junk || []) { try { fs.unlinkSync(path.join(sc.dir, j)); } catch { /* a directory or gone */ } }
       if (!reqs.length) continue;
-      const q0 = reqs[0];
+      const valid = [];
+      for (const r of reqs) {
+        if (r.index >= 0 && r.index < sc.checks.length && !sc.flooded) { valid.push(r); continue; }
+        try { fs.rmSync(r.file, { force: true }); } catch { /* best effort */ } // invalid / anomalous / flood: deleted, never answered (a real hook never files one)
+        if (!sc.flooded) sc.bad++;
+      }
+      if (!sc.flooded && sc.bad + sc.stats.capped > sc.max + SC.BAD_EXTRA) {
+        sc.flooded = true;
+        this.ev('orch.check.self_flooded', 'orchestrator', rec.task, { attempt: sc.attempt, bad: sc.bad, capped: sc.stats.capped, max: sc.max });
+      }
+      if (sc.flooded) { for (const r of valid) { try { fs.rmSync(r.file, { force: true }); } catch { /* best effort */ } } continue; }
+      if (!valid.length) continue;
+      const q0 = valid[0];
       try { fs.rmSync(q0.file, { force: true }); } catch { /* answered anyway */ }
-      if (rec.exited || rec.termAtReal) { SC.writeResponse(sc.dir, q0.id, { error: 'the attempt is ending' }); continue; }
-      if (q0.index < 0 || q0.index >= sc.checks.length) { SC.writeResponse(sc.dir, q0.id, { error: 'unknown check' }); continue; }
+      if (rec.exited || rec.termAtReal || sc.aborted) { SC.writeResponse(sc.resDir, q0.id, { error: 'the attempt is ending' }); continue; }
       if (sc.stats.runs >= sc.max) {
-        sc.stats.capped++; SC.writeResponse(sc.dir, q0.id, { capped: true, max: sc.max });
+        sc.stats.capped++; SC.writeResponse(sc.resDir, q0.id, { capped: true, max: sc.max });
         this.ev('orch.check.self_capped', 'orchestrator', rec.task, { attempt: sc.attempt, max: sc.max });
         continue;
       }
       sc.busy = true; sc.stats.runs++;
+      rec.lastProgressMs = this.now(); // waiting on the engine's self-check is activity, not a stall
       const run = sc.stats.runs;
-      this._runSelfCheck(rec, sc, q0.index).then((r) => {
+      sc.running = this._runSelfCheck(rec, sc, q0.index).then((r) => {
         sc.stats.ms += r.duration_ms || 0; sc.stats.output_bytes += Buffer.byteLength(r.output || '');
-        SC.writeResponse(sc.dir, q0.id, r.refused ? { error: r.refused } : { ok: r.ok, exit_code: r.exit_code, timed_out: r.timed_out, duration_ms: r.duration_ms, run, max: sc.max,
+        SC.writeResponse(sc.resDir, q0.id, r.refused ? { error: r.refused } : { ok: r.ok, exit_code: r.exit_code, timed_out: r.timed_out, duration_ms: r.duration_ms, run, max: sc.max,
           output: tail(r.output || '', SC.OUTPUT_TAIL), truncated: (r.output || '').length > SC.OUTPUT_TAIL });
         this.ev('orch.check.self_run', 'orchestrator', rec.task, { attempt: sc.attempt, run, max: sc.max, argv: sc.checks[q0.index].argv.join(' ').slice(0, 300), ok: !!r.ok, exit_code: r.exit_code ?? null,
           timed_out: !!r.timed_out, sandboxed: r.sandboxed ?? null, duration_ms: r.duration_ms || 0, output_bytes: Buffer.byteLength(r.output || ''), ...(r.refused ? { refused: r.refused.slice(0, 200) } : {}) });
-      }).catch((e) => { SC.writeResponse(sc.dir, q0.id, { error: `engine error: ${String(e.message).slice(0, 120)}` }); })
-        .finally(() => { sc.busy = false; });
+      }).catch((e) => { SC.writeResponse(sc.resDir, q0.id, { error: `engine error: ${String(e.message).slice(0, 120)}` }); })
+        .finally(() => { sc.busy = false; sc.kill = null; rec.lastProgressMs = this.now(); });
     }
   }
   /** One self-check: the same runChecks path, env, allowlist and OS sandbox as the authoritative checks; never unsandboxed. Bounded by the attempt's wall clock. */
@@ -1335,13 +1373,17 @@ export class Engine {
     const left = Math.floor((goal.orch.budgets.task_wall_clock_s * 1000 - (this.now() - rec.startedMs)) / 1000);
     if (left < 2) return { refused: 'the attempt has no wall-clock time left', duration_ms: 0 };
     const c = sc.checks[idx];
-    const check = { argv: c.argv, timeout_s: Math.max(1, Math.min(Number(c.timeout_s) || SC.SELF_CHECK_MAX_S, SC.SELF_CHECK_MAX_S, left)) };
-    const r = await runChecks([check], { cwd: sc.wt, env: checkEnv({ base: this.env, tmpDir: this._tmp(name) }), allowlist: this._checkAllowlist(goal), ...opts });
+    // never longer than the attempt can wait: the worker's hook is blocked on this run, and the stall timer (stall_after_s) would otherwise kill it
+    const stallRoom = Math.floor(goal.orch.budgets.stall_after_s) - 30;
+    const check = { argv: c.argv, timeout_s: Math.max(1, Math.min(Number(c.timeout_s) || SC.SELF_CHECK_MAX_S, SC.SELF_CHECK_MAX_S, stallRoom, left)) };
+    if (sc.aborted) return { refused: 'the attempt is ending', duration_ms: 0 };
+    const r = await runChecks([check], { registerKill: (k) => { sc.kill = k; if (sc.aborted) k('SIGKILL'); }, cwd: sc.wt, env: checkEnv({ base: this.env, tmpDir: this._tmp(name) }), allowlist: this._checkAllowlist(goal), ...opts });
     return r.results[0] || { refused: 'no result', duration_ms: 0 };
   }
+  _devDirs() { return (this._devDirsCache ??= developerDirs(this.env)); } // from the engine's env (a test or caller may pass its own), not process.env
   _sandboxOpts(goal, wt, name) {
     const o = goal.orch;
-    return { sandbox: { worktree: wt, tmpDir: this._tmp(name), goalDir: this.dir, orchDir: this.orchDir, home: this.env.HOME, ports: o.check_localhost_ports || [], loopback: o.allow_loopback === true, profileDir: path.join(this.dir, 'sandbox') },
+    return { sandbox: { worktree: wt, tmpDir: this._tmp(name), goalDir: this.dir, orchDir: this.orchDir, home: this.env.HOME, ports: o.check_localhost_ports || [], loopback: o.allow_loopback === true, profileDir: path.join(this.dir, 'sandbox'), developerDirs: this._devDirs() },
       sandboxBin: this.sandboxBin, unsandboxed: o.unsandboxed_checks === true || this.testUnsandboxed, harnessMode: o.harness_tamper === 'warn' ? 'warn' : 'fail' };
   }
   async _hashInstructions(ref) {

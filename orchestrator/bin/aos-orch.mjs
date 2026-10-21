@@ -126,6 +126,14 @@ function workerSandboxDefault(specValue, f, platform = process.platform) {
   return specValue === true;
 }
 
+/** `run goal.json` on an existing goal: the stored orch.sandbox_workers decides (flags only apply when a goal is created). */
+function reportStoredWorkerSandbox(stored, f) {
+  if (stored) console.error('aos-orch: workers run inside the macOS sandbox (sandbox-exec; this goal was created with sandbox_workers on)');
+  else console.error('aos-orch: WARNING: this goal\'s workers run UNSANDBOXED (stored orch.sandbox_workers is not true), constrained only by the policy hook. Checks and self-checks stay sandboxed.');
+  if (f['sandbox-workers'] && !stored) console.error('aos-orch: WARNING: --sandbox-workers is ignored for an existing goal: it was created without the worker sandbox');
+  if (f['no-sandbox-workers'] && stored) console.error('aos-orch: WARNING: --no-sandbox-workers is ignored for an existing goal: it was created with the worker sandbox on');
+}
+
 async function main() {
   ensureDir(orch);
   switch (cmd) {
@@ -139,10 +147,12 @@ async function main() {
         if (flags['unsandboxed-checks']) spec.orch = { ...(spec.orch || {}), unsandboxed_checks: true };
         if (flags['sandbox-workers'] && flags['no-sandbox-workers']) die('--sandbox-workers and --no-sandbox-workers contradict each other', 64);
         if (flags['sandbox-workers'] && process.platform !== 'darwin') die(`--sandbox-workers: ${workerSandboxAvailable().reason}`);
-        spec.orch = { ...(spec.orch || {}), sandbox_workers: workerSandboxDefault(spec.orch?.sandbox_workers, flags) };
+        const id = spec.id && fs.existsSync(paths(goalDirOf(orch, spec.id)).goal) ? spec.id : null;
+        // an EXISTING goal keeps the sandbox_workers it was created with: report that stored value, never what this invocation's flags would have chosen
+        if (id) reportStoredWorkerSandbox(readJSON(paths(goalDirOf(orch, id)).goal).orch?.sandbox_workers === true, flags);
+        else spec.orch = { ...(spec.orch || {}), sandbox_workers: workerSandboxDefault(spec.orch?.sandbox_workers, flags) };
         if (typeof flags['accept-repo-loosening'] === 'string') spec.orch = { ...(spec.orch || {}), accept_repo_loosening: flags['accept-repo-loosening'].split(',').map((x) => x.trim()).filter(Boolean) };
         if (flags['auto-approve']) spec.orch = { ...(spec.orch || {}), approval_policy: { ...(spec.orch?.approval_policy || {}), plan: 'auto' } };
-        const id = spec.id && fs.existsSync(paths(goalDirOf(orch, spec.id)).goal) ? spec.id : null;
         if (id) dir = goalDirOf(orch, id); else { const made = await createGoal(orch, spec); dir = made.dir; for (const n of made.notices) console.error(`aos-orch: ${n}`); }
       } else dir = resolveGoalDir(arg1);
       assertRepoTrusted(readJSON(paths(dir).goal));

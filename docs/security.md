@@ -111,13 +111,24 @@ Residual risks (honest list):
 - **Self-check (protection 6):** a self-check executes worker-written code in the check sandbox while the worker is still running,
   i.e. BEFORE the anti-cheat diff and the scope check (both still run afterwards on everything in the worktree, so a write the run
   makes outside `path_scope` fails the attempt; a check that leaves untracked build output that is not git-ignored now fails the
-  attempt as a scope violation). The inbox is in the worker's writable tmp dir: a worker can forge requests (they only spend its
-  own cap) or responses (only fooling itself); the engine refuses a symlinked inbox and request files that are not small regular
-  files. Workers re-adopted after an engine restart get no self-check service (the hook times out and says so). It gives a
+  attempt as a scope violation). Channels: requests go into an inbox in the worker's writable tmp dir; responses come back through
+  an ENGINE-owned directory (`tmp/selfcheck-res-<task>`, beside the worker's tmp dir) that the macOS worker sandbox may read but not
+  write, so a worker that swaps the inbox for a symlink cannot make the (unsandboxed) engine create files anywhere, and cannot forge a
+  response. The engine only ever reads the inbox: each request is opened `O_NOFOLLOW|O_NONBLOCK`, must be a regular file of at most
+  4 KB (a FIFO, a symlink to `/dev/zero` or an oversized file is deleted unread), at most 64 names are examined per 150 ms scan, and an
+  attempt that files more than `self_checks_max + 16` bad or surplus requests is no longer serviced (`orch.check.self_flooded`). Without
+  the worker sandbox (Linux, opted out) the worker can write anywhere its user can, so this is hygiene there, not a boundary. A
+  self-check's timeout is capped at `min(check timeout, stall_after_s - 30, remaining wall clock)`, waiting on it counts as activity for
+  the stall detector, and an in-flight self-check is killed (process group) and awaited before the attempt is collected. After the
+  authoritative checks the worktree must still equal the commit the engine made (a detached process left behind by a check that
+  writes later fails the attempt as `worktree_mutated_during_checks`). Stale responses and the `selfcheck-<task>` check tmp dir are
+  removed between attempts. Workers re-adopted after an engine restart get no self-check service (the hook times out and says so). It gives a
   worker an execution oracle for its approved checks: output (up to 6000 chars per run, 5 runs) of code it wrote, from inside
   the check sandbox.
 
-- **Workers (`claude` itself) are OS-sandboxed only when you opt in** (`--sandbox-workers`, protection 5). By default they are
+- **Workers (`claude` itself) are OS-sandboxed by default on macOS** (opt out with `--no-sandbox-workers` / `orch.sandbox_workers: false`,
+  both warned loudly; protection 5); on Linux and elsewhere they are not (the flag fails closed there). An existing goal keeps the
+  value it was created with (`aos-orch run goal.json` reports the stored value and warns when a flag differs). Unsandboxed, they are
   constrained only by the policy hook (PreToolUse and PermissionRequest) and the isolation flags, and the hook is a heuristic shell
   parser: an unparsed construct is `ask`, not proof of safety. Even sandboxed, a worker has the network, keychain read and read access
   to `~/.claude` (other sessions' transcripts), and can write the approvals inbox (the hook must), so a worker that gets a shell past the
