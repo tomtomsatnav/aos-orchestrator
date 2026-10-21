@@ -8,6 +8,7 @@
 //   aos-orch serve [--port 4319] [--max-workers N] [--dashboard-url URL] [--origins a,b] [--leave-workers|--kill-workers] [--drain-s N]
 //   aos-orch login-link [--port N] | token [--show] | goals [--json]
 //   aos-orch draft "<prompt>" --repo <path> [--out goal.json] [--profile strict|node-library|docs-only] [--answers "..."] [--branch main] [--max-tokens N] [--max-wall-s N] [--tier haiku|sonnet|opus]
+//   aos-orch archive <goal-id>... | --blocked | --achieved | --older-than <days> [--dry-run] | unarchive <goal-id> | goals --all
 //   aos-orch confirm <goal-id> <criterion-id>
 //   aos-orch rules show [goal-id] | rules check <file> [--layer user|repo|goal] | rules explain <goal-id> <task-id> '<tool json>'
 //   aos-orch approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
@@ -22,6 +23,7 @@ import { renderRulesFor, readRulesSummary, renderUserRules, checkRulesFile, expl
 import { q, escCtrl, escBeyondC0 } from '../lib/ctrl.mjs';
 import { draftGoal, renderDraft, PROFILES } from '../lib/draft.mjs';
 import { orchLocation, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
+import { selectGoals, moveGoals, archiveRoot, GID_RE } from '../lib/archive.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
 import { workerSandboxAvailable } from '../lib/sandbox.mjs';
 import { Supervisor } from '../lib/supervisor.mjs';
@@ -36,7 +38,9 @@ const USAGE = `usage: aos-orch <command> ...   (node orchestrator/bin/aos-orch.m
                                    --sandbox-workers is the default on macOS; --no-sandbox-workers opts out (warned)
                                    --replan: ask the planner again for a goal blocked at planning
                                    --no-wait: exit at the first approval gate (code 4 for a plan), as before
-  status [goal-id] | goals [--json]   list goals / show one
+  status [goal-id] | goals [--json] [--all]   list goals / show one (--all: include archived)
+  archive <goal-id>... | --blocked | --achieved | --older-than <days> [--dry-run]   move finished goals to <state>/archive/goals/ (never deletes; refuses live/active goals)
+  unarchive <goal-id>              move an archived goal back
   plan <goal-id>                   read-only plan review; approve-plan | reject-plan <goal-id> decide it
   pause | resume | cancel | kill <goal-id>
   approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>   answer a worker permission request
@@ -52,7 +56,7 @@ if (argv.includes('--help') || argv.includes('-h') || argv[0] === 'help') { cons
 const flags = {}; const pos = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s', 'accept-repo-loosening', 'layer', 'repo', 'out', 'profile', 'answers', 'branch', 'max-tokens', 'max-wall-s', 'tier'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
+  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s', 'accept-repo-loosening', 'layer', 'repo', 'out', 'profile', 'answers', 'branch', 'max-tokens', 'max-wall-s', 'tier', 'older-than'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
 }
 const [cmd, arg1, arg2] = pos;
 const loc = flags['orch-dir'] ? { dir: path.resolve(flags['orch-dir']), legacy: false } : orchLocation();
@@ -342,9 +346,25 @@ async function main() {
       break;
     }
     case 'goals': {
+      const row = (root, id, archived) => { const d = path.join(root, id); const S = loadState(d); return S.goal ? { id, status: S.goal.status, plan_state: S.goal.orch.plan_state, tasks: `${S.tasks.filter((t) => t.status === 'done').length}/${S.tasks.length}`, engine: archived ? false : engineAlive(d), title: S.goal.title, ...(archived ? { archived: true } : {}) } : null; };
       const ids = fs.existsSync(goalsRoot(orch)) ? fs.readdirSync(goalsRoot(orch)) : [];
-      const rows = ids.map((id) => { const S = loadState(goalDirOf(orch, id)); return S.goal ? { id, status: S.goal.status, plan_state: S.goal.orch.plan_state, tasks: `${S.tasks.filter((t) => t.status === 'done').length}/${S.tasks.length}`, engine: engineAlive(goalDirOf(orch, id)), title: S.goal.title } : null; }).filter(Boolean);
-      if (flags.json) out(rows); else out(rows.length ? rows.map((r) => escCtrl(`${r.id}  ${r.status}${r.status === 'draft' ? `/${r.plan_state}` : ''}  tasks ${r.tasks}  ${r.engine ? 'engine' : '-'}  ${r.title}`)).join('\n') : '(no goals)');
+      const rows = ids.map((id) => row(goalsRoot(orch), id, false)).filter(Boolean);
+      if (flags.all) { let aids = []; try { aids = fs.readdirSync(archiveRoot(orch)).filter((id) => GID_RE.test(id)); } catch { /* none */ } rows.push(...aids.map((id) => row(archiveRoot(orch), id, true)).filter(Boolean)); }
+      if (flags.json) out(rows); else out(rows.length ? rows.map((r) => escCtrl(`${r.id}  ${r.status}${r.status === 'draft' ? `/${r.plan_state}` : ''}  tasks ${r.tasks}  ${r.engine ? 'engine' : '-'}  ${r.title}${r.archived ? '  [archived]' : ''}`)).join('\n') : '(no goals)');
+      break;
+    }
+    case 'archive': case 'unarchive': {
+      const to = cmd === 'archive' ? 'archive' : 'goals';
+      const olderThanDays = flags['older-than'] != null ? Number(flags['older-than']) : null;
+      if (olderThanDays != null && !(olderThanDays >= 0)) die('--older-than needs a number of days');
+      const filtered = !!(flags.blocked || flags.achieved || olderThanDays != null);
+      if (cmd === 'unarchive' && (filtered || pos.length !== 2)) die('usage: aos-orch unarchive <goal-id>', 2);
+      if (cmd === 'archive' && (pos.length > 1) === filtered) die('usage: aos-orch archive <goal-id>... | --blocked | --achieved | --older-than <days>  (ids or filters, not both) [--dry-run]', 2);
+      const ids = cmd === 'unarchive' || !filtered ? pos.slice(1) : selectGoals(orch, { blocked: !!flags.blocked, achieved: !!flags.achieved, olderThanDays });
+      const res = moveGoals(orch, ids, { to, dryRun: !!flags['dry-run'] });
+      for (const r of res) console.log(escCtrl(`${r.action}  ${r.id}${r.reason ? `  (${r.reason})` : ''}`));
+      if (!res.length) console.log('(nothing to move)');
+      if (res.some((r) => r.action === 'refused')) process.exitCode = 1;
       break;
     }
     default:
