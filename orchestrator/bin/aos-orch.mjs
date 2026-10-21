@@ -206,7 +206,10 @@ async function main() {
         out(ids.map((id) => { const S = loadState(goalDirOf(orch, id)); return S.goal ? { id, status: S.goal.status, title: S.goal.title, engine: engineAlive(goalDirOf(orch, id)) } : null; }).filter(Boolean));
       } else {
         const d = resolveGoalDir(arg1); const S = loadState(d);
-        out({ ...summarize(S, loadHeartbeat(d)), engine_running: engineAlive(d), engine: describeOwner(lockStatus(d)), governor: readJSON(path.join(orch, 'governor.json'), null) });
+        const sm = summarize(S, loadHeartbeat(d)); const att = attachedRun(d);
+        const parkedForHuman = S.goal.orch?.plan_state === 'awaiting_approval' || /^awaiting human confirmation/.test(String(S.goal.blocked_reason || ''));
+        if (att && !['achieved', 'failed', 'cancelled'].includes(S.goal.status) && (sm.heartbeat.status === 'stopped' || parkedForHuman)) sm.heartbeat = { ...sm.heartbeat, status: `waiting (attached run pid ${att})` }; // parked at plan approval / human confirm: the run is alive, the engine just holds no lock
+        out({ ...sm, engine_running: engineAlive(d), engine: describeOwner(lockStatus(d)), governor: readJSON(path.join(orch, 'governor.json'), null) });
         if (S.tasks.length) console.error(`\nPLAN FOR REVIEW (exact commands, model tier and path scope per task):\n${reviewText(d, S)}`);
       }
       break;

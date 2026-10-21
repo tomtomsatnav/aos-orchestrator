@@ -18,7 +18,7 @@ aos-orch run goal.json                                         # 2. plans, shows
 aos-orch approve-plan <id>                                     # 3. from a second terminal, once you have read the plan
 ```
 
-`run` prints the goal id and stays attached: the plan is shown, nothing runs until you approve it, and when every task is done it prints the report and exits. Your base branch is never touched; the work is on `aos/<goal>/integration` and the report gives the exact `git diff` and `git merge` commands. See [docs/first-run.md](docs/first-run.md) for two real runs, including every number.
+`run` prints the goal id and stays attached: the plan is shown, nothing runs until you approve it, and when every task is done it prints the report and exits. Your base branch is never touched; the work is on `aos/<goal>/integration` and the report gives the exact `git diff` and `git merge` commands. See [docs/first-run.md](docs/first-run.md) for real runs, including every number.
 
 Run `aos-orch doctor` first if anything looks off: it checks node, git, the `claude` version and flags, login, the sandbox, the state dir and the port (`--live` adds one tiny Haiku call).
 
@@ -37,7 +37,7 @@ Details and residual risks: [docs/security.md](docs/security.md). Reporting a vu
 
 ## Status
 
-Experimental. Platforms: macOS and Linux (bubblewrap); the worker sandbox (`--sandbox-workers`, the default on macOS) is macOS-only and fails closed on Linux; Windows via WSL is untested. The test suite runs on both (sandbox tests skip where no sandbox works). 10 real goals so far: 9 achieved, 1 blocked by a test-setup error. Costs in reports are notional USD (list price, not money spent on a subscription). Everything else is tested against a scripted fake `claude`. A real `claude -p` plan-limit result has never been observed, so the rate-limit handling is keyed on error shapes from interactive transcripts.
+Experimental. Platforms: macOS and Linux (bubblewrap); the worker sandbox (`--sandbox-workers`, the default on macOS) is macOS-only and fails closed on Linux; Windows via WSL is untested. The test suite runs on both (sandbox tests skip where no sandbox works). 18 real goals so far (counted from the goal directories): 13 achieved, 5 blocked. The blocks: a plan rejected for starting above the allowed tier, a test-setup error, a stale-base bug and a server-test loopback issue (both since fixed), and an unsatisfiable test that the protected re-run correctly blocked. See [docs/first-run.md](docs/first-run.md). Costs in reports are notional USD (list price, not money spent on a subscription). Everything else is tested against a scripted fake `claude`. A real `claude -p` plan-limit result has never been observed, so the rate-limit handling is keyed on error shapes from interactive transcripts.
 
 ## Try it without spending tokens
 

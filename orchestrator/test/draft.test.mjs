@@ -301,3 +301,17 @@ test('server: confirming a human-review criterion (authenticated) finishes the g
   assert.ok(readEvents(path.join(sb.orch, 'goals', id)).some((e) => e.type === 'human.note' && e.data.action === 'criterion.confirm'), 'audited');
   assert.equal((await s.api('POST', u, {})).status, 409);
 });
+
+test('draft prompt carries an engine-computed REPO FACTS block (git repo, base, counts, protected tests) and the draft output warns when a criterion adds tests to a protected file', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup()); userRules(sb); sb.scenario(SC('draft-ok.json'));
+  const r = await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'add alpha', env: sb.env() });
+  assert.equal(r.ok, true, r.errors.join('; '));
+  const p = calls(sb)[0].prompt;
+  assert.match(p, /REPO FACTS \(computed by the engine/); assert.match(p, /is a git repository: yes; base branch: main; head commit: [0-9a-f]{10}/);
+  assert.match(p, /file count: \d+; test files detected: \d+/); assert.match(p, /protect_existing_tests: ON/); assert.match(p, /add tests in new files/); assert.match(p, /repo names/);
+  const d = good(); d.success_criteria[1] = { id: 'c2', text: 'Add three tests to strings.test.mjs for words()', verify: 'human' };
+  const v = validateDraft(d, { compiled: compiled(), protectedTests: ['test/strings.test.mjs'] });
+  assert.equal(v.ok, true); assert.match(v.warnings.join(), /protected test file "test\/strings\.test\.mjs"|protected test file .*strings\.test\.mjs/);
+  d.success_criteria[1].text = 'Add three tests for words() in a new file words.test.mjs';
+  assert.deepEqual(validateDraft(d, { compiled: compiled(), protectedTests: ['test/strings.test.mjs'] }).warnings, []);
+});
