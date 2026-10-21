@@ -18,7 +18,7 @@ import path from 'node:path';
 import { Engine, createGoal, summarize, assertRepoTrusted } from '../lib/engine.mjs';
 import { reviewView, renderReview, planHash, tasksHashFor, tasksHashV } from '../lib/plan.mjs';
 import { rulesFingerprint } from '../lib/rules.mjs';
-import { renderRulesFor, renderUserRules, checkRulesFile, explainCall } from '../lib/rules-store.mjs';
+import { renderRulesFor, readRulesSummary, renderUserRules, checkRulesFile, explainCall } from '../lib/rules-store.mjs';
 import { q, escCtrl, escBeyondC0 } from '../lib/ctrl.mjs';
 import { draftGoal, renderDraft, PROFILES } from '../lib/draft.mjs';
 import { orchLocation, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
@@ -57,7 +57,14 @@ for (let i = 0; i < argv.length; i++) {
 const [cmd, arg1, arg2] = pos;
 const loc = flags['orch-dir'] ? { dir: path.resolve(flags['orch-dir']), legacy: false } : orchLocation();
 const orch = loc.dir;
-if (loc.legacy) console.error(`aos-orch: using the existing state in ${orch} (the new default is ${loc.fresh}; move the folder there, or set AOS_ORCH_DIR, to silence this)`);
+if (loc.legacy) { // at most once a day (or with --verbose): it is a notice, not a warning
+  const mark = path.join(orch, '.legacy-dir-notice'); const today = new Date().toISOString().slice(0, 10);
+  let seen = null; try { seen = fs.readFileSync(mark, 'utf8').trim(); } catch { /* first time */ }
+  if (flags.verbose || seen !== today) {
+    console.error(`aos-orch: using the existing state in ${orch} (the new default is ${loc.fresh}; move the folder there, or set AOS_ORCH_DIR, to silence this)`);
+    try { fs.writeFileSync(mark, `${today}\n`, { mode: 0o600 }); } catch { /* read-only: shown again next time */ }
+  }
+}
 
 // worker- and model-controlled strings reach the terminal: JSON output escapes what JSON.stringify leaves raw (C1, bidi, invisible characters), text output escapes every control character
 const out = (o) => console.log(typeof o === 'string' ? escCtrl(o).replace(/\\u000a/g, '\n') : JSON.stringify(o, (k, v) => (typeof v === 'string' ? escBeyondC0(v) : v), 2));
@@ -71,6 +78,8 @@ function resolveGoalDir(id) {
 }
 /** The rules summary the approval screens print (null before the goal's first tick; a tampered snapshot is shown as such). */
 const rulesSummaryOf = (dir, goal) => renderRulesFor(dir, goal);
+/** The plan review text: tasks (with the self-check note when the goal's rules turn it on) + the rules summary. */
+const reviewText = (dir, S) => renderReview(reviewView(S.tasks, S.goal), rulesSummaryOf(dir, S.goal), { selfCheck: readRulesSummary(dir, S.goal)?.worker?.self_check === true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** The exact next human command when `run` stops waiting on a human (plan approval, or a verify:"human" criterion). */
 function nextSteps(id, s) {
@@ -96,7 +105,7 @@ async function driveOnce(dir) {
   const onSig = async () => { console.error('aos-orch: signal received; releasing the lock (workers keep running and are re-adopted by the next run)'); await eng.stop(); process.exit(130); };
   process.on('SIGINT', onSig); process.on('SIGTERM', onSig);
   let last = '';
-  const timer = setInterval(() => { const s = eng.summary(); const line = `${s.status} tasks=${JSON.stringify(s.tasks)} tokens=${s.usage.new_tokens}${s.paused_reason ? ` paused: ${s.paused_reason}` : ''}`; if (line !== last) { console.error(line); last = line; } }, 1000);
+  const timer = setInterval(() => { const s = eng.summary(); if (!Object.keys(s.tasks || {}).length) return; /* no plan yet: nothing to count */ const line = `${s.status} tasks=${JSON.stringify(s.tasks)} tokens=${s.usage.new_tokens}${s.paused_reason ? ` paused: ${s.paused_reason}` : ''}`; if (line !== last) { console.error(line); last = line; } }, 1000);
   let status;
   try { status = await eng.run({ pollMs: Number(flags['poll-ms']) || eng.intervalMs }); } catch (e) {
     if (e.code !== 'LOCKED') throw e;
@@ -169,7 +178,7 @@ async function main() {
       // default: stay attached (--no-wait exits at the gate instead) while a human decides. The engine is only run again once a command (approve-plan, confirm, ...) has been queued by the human's own CLI call;
       // it applies that command itself, so nothing proceeds without it.
       while (!flags['no-wait'] && waiting(s) && status !== 'cancelled') {
-        if (s.plan_state === 'awaiting_approval') { const S = loadState(dir); console.error(`PLAN FOR REVIEW:\n${renderReview(reviewView(S.tasks, S.goal), rulesSummaryOf(dir, S.goal))}\n`); }
+        if (s.plan_state === 'awaiting_approval') { const S = loadState(dir); console.error(`PLAN FOR REVIEW:\n${reviewText(dir, S)}\n`); }
         for (const l of nextSteps(id, s)) console.error(`aos-orch: ${l}`);
         console.error('aos-orch: waiting for your command (Ctrl-C to stop; nothing runs until you give it)...');
         const mark = () => { try { fs.writeFileSync(attachedFile(dir), JSON.stringify({ pid: process.pid, ts: Date.now() })); } catch { /* best effort */ } };
@@ -187,7 +196,7 @@ async function main() {
       const d = resolveGoalDir(arg1); const S = loadState(d);
       if (!S.tasks.length) { console.error(`aos-orch: ${arg1} has no plan yet (state: ${S.goal.orch.plan_state}). \`aos-orch run ${arg1}\` asks the planner for one and stops for your approval.`); process.exit(2); }
       console.log(`PLAN FOR REVIEW (read-only; nothing is approved by looking). Goal ${escCtrl(S.goal.id)}: ${escCtrl(S.goal.title)}  [${S.goal.status}/${S.goal.orch.plan_state}]`);
-      console.log(renderReview(reviewView(S.tasks, S.goal), rulesSummaryOf(d, S.goal)));
+      console.log(reviewText(d, S));
       if (S.goal.orch.plan_state === 'awaiting_approval') console.log(`\nTo approve exactly this:  aos-orch approve-plan ${arg1}   (then \`aos-orch run ${arg1}\`)\nTo reject:                 aos-orch reject-plan ${arg1}`);
       break;
     }
@@ -198,7 +207,7 @@ async function main() {
       } else {
         const d = resolveGoalDir(arg1); const S = loadState(d);
         out({ ...summarize(S, loadHeartbeat(d)), engine_running: engineAlive(d), engine: describeOwner(lockStatus(d)), governor: readJSON(path.join(orch, 'governor.json'), null) });
-        if (S.tasks.length) console.error(`\nPLAN FOR REVIEW (exact commands, model tier and path scope per task):\n${renderReview(reviewView(S.tasks, S.goal), rulesSummaryOf(d, S.goal))}`);
+        if (S.tasks.length) console.error(`\nPLAN FOR REVIEW (exact commands, model tier and path scope per task):\n${reviewText(d, S)}`);
       }
       break;
     }
@@ -213,10 +222,15 @@ async function main() {
       if (cmd === 'approve-plan') { // approve exactly what is shown here: the engine refuses if the plan differs from this hash
         const S = loadState(d);
         if (!S.tasks.length) die('there is no plan to approve yet');
-        console.error(`PLAN YOU ARE APPROVING (commands run as you, checks inside the OS sandbox):\n${renderReview(reviewView(S.tasks, S.goal), rulesSummaryOf(d, S.goal))}`);
         const rules_hash = rulesFingerprint(S.goal, readJSON(paths(d).rules, null));
         extra = { reviewed: { plan_hash: planHash(readJSON(paths(d).plan)?.plan ?? null), tasks_hash: tasksHashFor(S.goal, S.tasks), ...(rules_hash ? { rules_hash } : {}) } };
-        console.error(`plan hash ${extra.reviewed.plan_hash.slice(0, 12)}${rules_hash ? `  rules hash ${rules_hash.slice(0, 12)}` : ''}`);
+        // the plan was reviewed with `aos-orch plan` (or the attached run's screen): confirm WHAT is approved by its hash, without printing it all again
+        console.error(`approved: plan ${extra.reviewed.plan_hash.slice(0, 12)}, ${S.tasks.length} task(s)${rules_hash ? `, rules ${rules_hash.slice(0, 12)}` : ''} (the engine refuses it if the plan changed since; \`aos-orch plan ${arg1}\` shows it)`);
+        { // what must never be approved unseen is still printed: a tampered rules snapshot, and the rule loosenings this approval accepts
+          const rt = rulesSummaryOf(d, S.goal).split('\n'); const i = rt.findIndex((l) => l.startsWith('LOOSENINGS YOU ARE APPROVING'));
+          if (rt[0].startsWith('RULES TAMPERED')) console.error(rt[0]);
+          if (i >= 0) { const end = rt.findIndex((l, k) => k > i && !l.startsWith('  ')); console.error(rt.slice(i, end < 0 ? undefined : end).join('\n')); }
+        }
       }
       enqueueCommand(d, { cmd, by: 'cli', ...extra });
       const st = lockStatus(d); const att = attachedRun(d);
@@ -229,7 +243,7 @@ async function main() {
       break;
     }
     case 'approvals': {
-      { const d = resolveGoalDir(arg1); const S = loadState(d); if (S.tasks.length) console.error(`PLAN (exact commands, model tier and path scope per task):\n${renderReview(reviewView(S.tasks, S.goal), rulesSummaryOf(d, S.goal))}\n`); }
+      { const d = resolveGoalDir(arg1); const S = loadState(d); if (S.tasks.length) console.error(`PLAN (exact commands, model tier and path scope per task):\n${reviewText(d, S)}\n`); }
       out(listApprovals(paths(resolveGoalDir(arg1)).approvals).map((a) => ({ id: a.id, task: a.task_id, tool: a.tool, status: a.status, reason: a.reason, expires_at: a.expires_at, input: a.tool === 'Bash' ? a.input?.command : a.input?.file_path, cwd: a.cwd ?? null }))); break; }
     case 'approve': case 'deny': {
       const d = resolveGoalDir(arg1); if (!arg2) die(`usage: aos-orch ${cmd} <goal-id> <A-n>`);

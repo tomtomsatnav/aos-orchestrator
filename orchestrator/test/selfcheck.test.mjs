@@ -11,7 +11,7 @@ import { compileRules, buildRulesSnapshot, summarizeRules, renderRulesSummary } 
 import { buildPlannerPrompt } from '../lib/plan.mjs';
 import { buildWorkerPrompt, buildSettings } from '../lib/worker.mjs';
 import { sandboxAvailable } from '../lib/sandbox.mjs';
-import { readEvents } from '../lib/state.mjs';
+import { readEvents, paths } from '../lib/state.mjs';
 import { mkSandbox, drive, goalOf, tasksOf, NO_OS_SANDBOX } from './helpers.mjs';
 
 const CHECKS = [{ argv: ['node', '--test', 'a.test.mjs'], timeout_s: 60 }, { argv: ['grep', '-q', 'x y', 'a.txt'], timeout_s: 5 }];
@@ -154,6 +154,10 @@ test('engine: a worker runs its approved check through the engine (sandboxed, fe
   assert.match(results[2], /limit reached \(2 self-checks per attempt\)/);
   assert.equal(fs.existsSync(outside), false);
   assert.ok(ev.some((e) => e.type === 'orch.check.passed' && e.task_id === 't1'), 'the engine still ran the authoritative check itself');
+  // report: self-check routings are counted on their own line, never listed as policy denials
+  const report = fs.readFileSync(paths(dir).report, 'utf8');
+  assert.match(report, /## Policy denials\n\nnone\n/); assert.doesNotMatch(report, /\(self_check\)/);
+  assert.match(report, /Self-checks: 2 run\(s\)/);
 });
 
 test('engine: with worker.self_check off the same call is an ordinary denial (failed attempt), and nothing is run', { skip: SKIP_SB }, async (t) => {

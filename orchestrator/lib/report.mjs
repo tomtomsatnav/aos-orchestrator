@@ -4,7 +4,7 @@ import { versionDrift } from './cli-version.mjs';
 import { reportLines } from './anticheat.mjs';
 const fence = (s) => `\n\`\`\`\n${String(s || '').trim()}\n\`\`\`\n`;
 
-export function buildReport({ goal, tasks, state = null, approvals = [], denials = [], diffStat = '', criteriaResults = {}, events = [], governor = null }) {
+export function buildReport({ goal, tasks, state = null, approvals = [], denials = [], selfChecks = 0, diffStat = '', criteriaResults = {}, events = [], governor = null }) {
   const o = goal.orch;
   const L = [];
   L.push(`# Goal report: ${goal.title}`, '', `- id: \`${goal.id}\``, `- status: **${goal.status}**${goal.blocked_reason ? ` (${goal.blocked_reason})` : ''}`,
@@ -38,6 +38,7 @@ export function buildReport({ goal, tasks, state = null, approvals = [], denials
   L.push('', '## Policy denials', '');
   if (!denials.length) L.push('none');
   for (const d of denials) L.push(`- ${d.task_id} attempt ${d.attempt}: ${d.label} (${d.rule})`);
+  if (selfChecks) L.push('', `Self-checks: ${selfChecks} run(s) (approved check argv a worker asked the engine to run, sandboxed; not denials)`);
   if (o.review) {
     L.push('', '## Reviewer notes (advisory, written by a model, not verified)', '',
       o.review.error ? `The advisory review did not complete: ${o.review.error}` : fence(o.review.text || '(empty)').trim(),

@@ -31,7 +31,7 @@ import { probeClaudeVersion } from './cli-version.mjs';
 import { runAdvisoryReview } from './review.mjs';
 import * as HG from './harness-guard.mjs';
 const BASELINE_RUNS = 2;
-import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, summaryOfRun, mergeBaselineRuns, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath } from './anticheat.mjs';
+import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, summaryOfRun, mergeBaselineRuns, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath, failingTestsLine } from './anticheat.mjs';
 import { isTestPath } from './protect.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -184,10 +184,12 @@ export class Engine {
     const expectedMs = backoffS(intervalS, hb.consecutive_errors) * 1000;
     const gap = hb.ts ? now - Date.parse(hb.ts) : 0;
     const seq = hb.seq + 1;
+    // a goal parked on purpose (waiting for plan approval, blocked, paused) is not ticked while it waits: an old heartbeat there is not a dead engine
+    const parked = goal.status === 'blocked' || (goal.status === 'draft' && o.plan_state === 'awaiting_approval') || hb.status === 'paused' || hb.status === 'stopped';
     hb = { ...hb, seq, ts: iso(now), interval_s: Math.max(1, intervalS), liveness: 'alive' };
     if (hb.status === 'stopped') hb.status = 'running';
     atomicWrite(P.hb, hb);
-    if (seq > 1 && gap > 3 * expectedMs && expectedMs >= 1000) this.ev('heartbeat.dead', 'orchestrator', null, { gap_s: Math.round(gap / 1000), expected_s: expectedMs / 1000 });
+    if (parked) { /* no heartbeat.dead / heartbeat.late after a deliberate wait */ } else if (seq > 1 && gap > 3 * expectedMs && expectedMs >= 1000) this.ev('heartbeat.dead', 'orchestrator', null, { gap_s: Math.round(gap / 1000), expected_s: expectedMs / 1000 });
     else if (seq > 1 && gap > 1.5 * expectedMs && expectedMs >= 1000) this.ev('heartbeat.late', 'orchestrator', null, { gap_s: Math.round(gap / 1000), expected_s: expectedMs / 1000 });
 
     // 2. Observe: drain human commands
@@ -675,7 +677,8 @@ export class Engine {
     if (final) {
       task.status = 'failed';
       this.ev('task.failed', 'orchestrator', task.id, { cause, attempts: task.attempts, tier: entry.tier, final: true, rule: atTop && task.attempts < task.max_attempts ? 'retry.ladder' : 'retry.max_attempts' });
-      S.goal.orch.halt_reason ??= `task ${task.id} failed after ${task.attempts} attempt(s): ${cause}${cause === 'merge_conflict' && note ? ` (${note})` : ''}`;
+      const failing = cause === 'check_failed' && check_output ? failingTestsLine(check_output, task.orch.worktree ? [task.orch.worktree, realpathDeepest(task.orch.worktree)] : null) : null;
+      S.goal.orch.halt_reason ??= `task ${task.id} failed after ${task.attempts} attempt(s): ${cause}${cause === 'merge_conflict' && note ? ` (${note})` : ''}${failing ? ` (failing: ${failing})` : ''}`.slice(0, 600);
       S.goal.orch.halt_at_ms ??= this.now();
       this._dropWorktree(S, task).catch(() => {});
     } else {
@@ -848,12 +851,12 @@ export class Engine {
     if (allDone && o.protected_tests?.files?.length && !o.protected_result) await this._runProtectedTests(S); // fail closed: protection on and never run -> run it before anything can be achieved
     if (allDone && o.anticheat?.acceptance?.items?.length && !o.anticheat.acceptance_result) await this._runAcceptanceTests(S); // fail closed, like the protected tests
     if (allDone && o.anticheat?.acceptance_result?.ok === false) {
-      goal.status = 'blocked'; goal.blocked_reason = `the ACCEPTANCE tests (written first, read-only for the other tasks) fail against the integration branch: ${String(o.anticheat.acceptance_result.output || '').split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 300)}`;
+      goal.status = 'blocked'; goal.blocked_reason = `the ACCEPTANCE tests (written first, read-only for the other tasks) fail against the integration branch: ${whyFailed(o.anticheat.acceptance_result)}`;
       this.ev('goal.blocked', 'orchestrator', null, { reason: goal.blocked_reason });
       return;
     }
     if (allDone && o.protected_result && o.protected_result.ok === false) {
-      goal.status = 'blocked'; goal.blocked_reason = `the ORIGINAL existing tests fail against the integration branch (a test was deleted, weakened or the code broke it): ${String(o.protected_result.output || '').split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 300)}`;
+      goal.status = 'blocked'; goal.blocked_reason = `the ORIGINAL existing tests fail against the integration branch (a test was deleted, weakened or the code broke it): ${whyFailed(o.protected_result)}`;
       this.ev('goal.blocked', 'orchestrator', null, { reason: goal.blocked_reason });
       return;
     }
@@ -976,7 +979,7 @@ export class Engine {
       try {
         for (const f of js) { const b = await G.showBlob(o.repo, pt.base_commit, f); if (b) { fs.mkdirSync(path.dirname(path.join(wt, f)), { recursive: true }); fs.writeFileSync(path.join(wt, f), b); } }
         const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('protected') }), ...this._sandboxOpts(goal, wt, 'protected') });
-        res.ok = r.ok; if (!r.ok) res.output = tail(r.output || '', 2000);
+        res.ok = r.ok; if (!r.ok) { res.output = tail(r.output || '', 2000); res.failing = failingTestsLine(r.output, [wt, realpathDeepest(wt)]); }
         const sm = parseTestSummary(r.summary_text ?? r.output);
         if (r.harness_tamper) { res.ok = false; res.kind = 'harness_tamper'; res.output = `anti-cheat harness_tamper: ${r.harness_problems.slice(0, 3).join(' | ')}`.slice(0, 600); }
         else if (r.ok && !(sm && sm.tests > 0 && sm.pass > 0)) { res.ok = false; res.output = `anti-cheat: the original tests ran ${sm ? `${sm.tests} test(s) of which ${sm.pass} passed` : 'with no countable test summary'}`; }
@@ -1119,7 +1122,7 @@ export class Engine {
       if (js.length) {
         const r = await runCheck({ argv: forceTapArgv(['node', '--test', ...js.map((x) => x.f)]), timeout_s: Math.min(this._R(goal).checks.max_timeout_s, 600) }, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp('acceptance') }), ...this._sandboxOpts(goal, wt, 'acceptance') });
         const sm = summaryOfRun(r); res.tests = sm ? sm.tests : null; lastFiles = r.test_files || null;
-        res.ok = r.ok; if (!r.ok) res.output = tail(r.output || '', 2000);
+        res.ok = r.ok; if (!r.ok) { res.output = tail(r.output || '', 2000); res.failing = failingTestsLine(r.output, [wt, realpathDeepest(wt)]); }
         else if (r.harness_tamper) { res.ok = false; res.kind = 'harness_tamper'; res.output = `anti-cheat harness_tamper: ${r.harness_problems.slice(0, 3).join(' | ')}`.slice(0, 600); }
         else if (!(sm && sm.tests > 0 && sm.pass > 0)) { res.ok = false; res.output = `anti-cheat: the acceptance tests ran ${sm ? `${sm.tests} test(s) of which ${sm.pass} passed` : 'with no countable test summary'}`; }
       }
@@ -1491,9 +1494,10 @@ export class Engine {
           try { fs.rmSync(o.worktree_root, { recursive: true, force: true }); fs.rmdirSync(path.dirname(o.worktree_root)); } catch { /* not empty / gone */ }
         }
       }
-      const decisions = (() => { try { return fs.readFileSync(path.join(this.P.workers, 'decisions.ndjson'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((d) => d.decision === 'deny'); } catch { return []; } })();
+      const decisions = (() => { try { return fs.readFileSync(path.join(this.P.workers, 'decisions.ndjson'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((d) => d.decision === 'deny' && d.rule !== 'self_check'); } catch { return []; } })(); // a self-check is routed to the engine by the hook, not a denial
+      const selfChecks = S.tasks.reduce((n, t) => n + (t.orch.attempt_log || []).reduce((m, a) => m + (a.self_checks?.runs || 0), 0), 0);
       const criteria = readJSON(path.join(this.dir, 'criteria.json'), {});
-      const md = buildReport({ goal, tasks: S.tasks, state: S, approvals: listApprovals(this.P.approvals), denials: decisions, diffStat, criteriaResults: criteria, events: readEvents(this.dir), governor: this.gov.load() });
+      const md = buildReport({ goal, tasks: S.tasks, state: S, approvals: listApprovals(this.P.approvals), denials: decisions, selfChecks, diffStat, criteriaResults: criteria, events: readEvents(this.dir), governor: this.gov.load() });
       atomicWrite(this.P.report, md);
       o.reported = true;
       this.ev('orch.report.written', 'orchestrator', null, { path: this.P.report, status: goal.status });
@@ -1510,6 +1514,8 @@ export class Engine {
   }
 }
 
+/** Why a protected / acceptance re-run failed, for blocked_reason: the failing tests by file and name when the TAP output names them, else the last output lines. */
+const whyFailed = (res) => (res.failing ? `failing: ${res.failing}` : String(res.output || '').split('\n').filter(Boolean).slice(-3).join(' | ')).slice(0, 400);
 /** {last_stderr} from the newest attempt that recorded a stderr tail (only when the task is not done). */
 const lastStderr = (t) => { const e = t.status === 'done' ? null : [...(t.orch.attempt_log || [])].reverse().find((a) => a.stderr_tail); return e ? { last_stderr: e.stderr_tail, last_stderr_outcome: e.outcome } : {}; };
 export function summarize(S, hb) {
