@@ -37,6 +37,29 @@ export function gatherRepoFacts(dir) {
 /** The tiers a plan may use: plan.tiers, none above plan.max_start_tier (what validatePlan enforces). */
 export const startableTiers = (tiers, maxStart) => { const m = TIERS.indexOf(maxStart); return (tiers || TIERS).filter((t) => m < 0 || TIERS.indexOf(t) <= m); };
 
+export const ACCEPTANCE_MIN_TIER_DEFAULT = 'sonnet';
+const rankOf = (t) => TIERS.indexOf(t);
+/**
+ * The tier an acceptance task starts at: the plan's tier raised to plan.acceptance_min_tier (a wrong expected value in a test-first task blocks the whole goal,
+ * so the test writer gets a stronger model by default). The user's tier limits always win: never above plan.max_start_tier, only tiers in plan.tiers.
+ * `R` = compiled rules (or null: engine defaults). -> {tier, raised?, capped?}  capped = the minimum could not be reached under the user's limits.
+ */
+export function acceptanceStartTier(tier, R) {
+  const min = R?.plan?.acceptance_min_tier ?? ACCEPTANCE_MIN_TIER_DEFAULT;
+  if (rankOf(tier) >= rankOf(min)) return { tier };
+  const allowed = startableTiers(R?.plan?.tiers ?? TIERS, R?.plan?.max_start_tier).sort((a, b) => rankOf(a) - rankOf(b));
+  const up = allowed.find((t) => rankOf(t) >= rankOf(min));
+  if (up) return { tier: up, raised: true };
+  const best = allowed.filter((t) => rankOf(t) > rankOf(tier)).at(-1);
+  return best ? { tier: best, raised: true, capped: true } : { tier, capped: true };
+}
+/** The tier an acceptance task is re-checked at after a dispute: the next rung of its ladder above `last`, at least sonnet, never above the ladder's top. */
+export function disputeTier(last, ladder = TIERS) {
+  const L = [...new Set((ladder?.length ? ladder : TIERS).filter((t) => TIERS.includes(t)))].sort((a, b) => rankOf(a) - rankOf(b));
+  const floor = Math.max(rankOf(last) + 1, rankOf('sonnet'));
+  return L.find((t) => rankOf(t) >= floor) ?? L.at(-1) ?? last;
+}
+
 /** `replan` = {errors[], plan?}: the previous plan was rejected by validatePlan; the exact errors are fed back (one automatic re-plan). */
 export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: [] }, constraints, replan = null }) {
   const B = goal.orch.budgets;
@@ -59,6 +82,7 @@ export function buildPlannerPrompt({ goal, facts = { files: [], make_targets: []
     ...(c.self_check ? [`WORKERS MAY RUN THEIR TASK'S CHECKS (worker.self_check): a worker may ask the engine to run its own task's \`checks\` argv exactly as written in the plan (nothing else, at most ${c.self_checks_max || 5} times per attempt); the engine runs them in the same sandbox and still re-runs them after the attempt. `
       + 'So give every task a fast check that exercises exactly that task\'s change (e.g. node --test on its own test file), because the worker uses it to fix its work before finishing.'] : []),
     ...(c.acceptance_first ? ['ACCEPTANCE TESTS FIRST (checks.acceptance_first): emit at least one task with "role":"acceptance" that ONLY writes test files (path_scope: test files/directories only) describing the goal\'s behaviour with concrete expected values, and no implementation. '
+      + 'In its description, quote the exact examples and expected values the goal gives, and tell it to copy them VERBATIM and never invent data the goal does not give (a wrong expected value blocks every implementation task). '
       + 'Its check must not require the new tests to pass yet (e.g. `node --check <file>`), because the code does not exist. EVERY other task must depend (directly or through other tasks) on an acceptance task. '
       + 'Write ONE acceptance test file PER FEATURE (e.g. test/<feature>.test.js), so that each implementation task\'s check runs ONLY its own feature\'s file (e.g. `node --test test/<feature>.test.js`): never give an implementation task a check that also runs the acceptance tests of another task\'s feature (they fail until that task is merged); the engine runs every acceptance test once all tasks are merged. '
       + 'Implementation tasks may READ the acceptance tests but their path_scope must never reach them: the engine rejects such a plan, fails any attempt that changes them, and re-runs them from their committed version at the end.'] : []),

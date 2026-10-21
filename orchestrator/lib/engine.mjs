@@ -22,7 +22,7 @@ import { realpathDeepest } from './policy-hook.mjs';
 import * as W from './worker.mjs';
 import { Governor, DEFAULTS as GOV_DEFAULTS, detectLimitFailure, checkBudgets, usageOf } from './governor.mjs';
 import { listTestFiles, runnerFor, scopeHitsTests, serverWarnings } from './protect.mjs';
-import { startableTiers, buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHashFor, tasksHashV, reviewView, canonical, sha256 } from './plan.mjs';
+import { acceptanceStartTier, disputeTier, startableTiers, buildPlannerPrompt, gatherRepoFacts, extractJson, validatePlan, toTasks, TIERS, humanReviewReason, planHash, tasksHashFor, tasksHashV, reviewView, canonical, sha256 } from './plan.mjs';
 import { scanRepoConfig, INSTRUCTION_FILES, sha256Buf, formatFindings, instructionNotice } from './repo-config.mjs';
 import { developerDirs, sandboxAvailable, workerSandboxAvailable, wrapWorkerCommand, DEFAULT_SANDBOX_BIN } from './sandbox.mjs';
 import { listApprovals, expireDue, readApproval } from './approvals.mjs';
@@ -689,18 +689,21 @@ export class Engine {
     if (sameTier) { if (cause === 'denied') task.orch.denial_retries++; else used[cause] = (used[cause] || 0) + 1; }
     const atTop = escalate && !sameTier && !next; // a failure on the top tier is final
     const final = task.attempts >= task.max_attempts || atTop;
+    const roots = final && task.orch.worktree ? [task.orch.worktree, realpathDeepest(task.orch.worktree)] : null;
+    // a failing test that an acceptance task wrote is read-only for this task: if the TEST is wrong, no retry can pass it, so say whose test it is
+    const accItems = final && cause === 'check_failed' && check_output ? (this._anti(S.goal).acceptance?.items || []) : [];
+    const failFiles = accItems.length ? new Set(failingTests(check_output, roots).map((f) => f.file).filter(Boolean)) : new Set();
+    const acc = accItems.find((i) => i.task !== task.id && (i.files || []).some((f) => failFiles.has(f)));
+    if (final && acc && this._openDispute(S, task, acc, [...failFiles], { worker_note, check_output })) { saveState(this.dir, S); return; }
     if (final) {
       task.status = 'failed';
       this.ev('task.failed', 'orchestrator', task.id, { cause, attempts: task.attempts, tier: entry.tier, final: true, rule: atTop && task.attempts < task.max_attempts ? 'retry.ladder' : 'retry.max_attempts' });
-      const roots = task.orch.worktree ? [task.orch.worktree, realpathDeepest(task.orch.worktree)] : null;
       const failing = cause === 'check_failed' && check_output ? failingTestsLine(check_output, roots) : null;
-      // a failing test that an acceptance task wrote is read-only for this task: if the TEST is wrong, no retry can pass it, so say whose test it is
-      const accItems = cause === 'check_failed' && check_output ? (this._anti(S.goal).acceptance?.items || []) : [];
-      const failFiles = accItems.length ? new Set(failingTests(check_output, roots).map((f) => f.file).filter(Boolean)) : new Set();
-      const acc = accItems.find((i) => i.task !== task.id && (i.files || []).some((f) => failFiles.has(f)));
       // failFiles come from the check's output (code under test can print TAP lines), so this only points a human at the file, never asserts the test is wrong
-      const accNote = acc ? `; the failing test is reported in ${(acc.files || []).filter((f) => failFiles.has(f)).slice(0, 2).join(', ')}, written by acceptance task ${acc.task} and read-only for ${task.id}: check whether that test or the implementation is wrong before changing either, then fix by hand or re-plan${worker_note ? " (the worker's last note is in the report)" : ''}` : '';
-      S.goal.orch.halt_reason ??= `task ${task.id} failed after ${task.attempts} attempt(s): ${cause}${cause === 'merge_conflict' && note ? ` (${note})` : ''}${accNote}${failing ? ` (failing: ${failing})` : ''}`.slice(0, 800);
+      const used1 = acc && this._anti(S.goal).disputes?.[acc.task] ? `; ${acc.task} was already re-checked once after a dispute (checks.acceptance_dispute allows one per acceptance task)` : '';
+      const accNote = acc ? `; the failing test is reported in ${(acc.files || []).filter((f) => failFiles.has(f)).slice(0, 2).join(', ')}, written by acceptance task ${acc.task} and read-only for ${task.id}${used1}: check whether that test or the implementation is wrong before changing either, then fix by hand or re-plan${worker_note ? " (the worker's last note is in the report)" : ''}` : '';
+      const disp = task.orch.dispute ? this._closeDispute(S, task, cause, note) : null; // this acceptance task's dispute re-check failed: its committed tests stand
+      S.goal.orch.halt_reason ??= (disp || `task ${task.id} failed after ${task.attempts} attempt(s): ${cause}${cause === 'merge_conflict' && note ? ` (${note})` : ''}${accNote}${failing ? ` (failing: ${failing})` : ''}`).slice(0, 800);
       S.goal.orch.halt_at_ms ??= this.now();
       this._dropWorktree(S, task).catch(() => {});
     } else {
@@ -709,6 +712,88 @@ export class Engine {
       this.ev('task.retried', 'orchestrator', task.id, { attempts: task.attempts, max_attempts: task.max_attempts, tier: task.orch.model_tier, reason: cause, rule: rule || (sameTier ? 'retry.same_tier_retries' : escalate ? 'retry.ladder' : 'retry.no_escalate') });
     }
     saveState(this.dir, S);
+  }
+
+  // ------------------------------------------------------------------ acceptance disputes (checks.acceptance_dispute)
+  /**
+   * An implementation task failed finally on a test an acceptance task wrote. Once per acceptance task per goal (A.disputes is keyed by it and never cleared),
+   * that acceptance task is re-opened at a stronger tier to re-check its tests against the goal, and the implementation task waits for it (pending, awaiting_dispute).
+   * Everything changes in memory and is persisted by the caller's single saveState, so a crash leaves either the old or the new state. -> true when the dispute is open.
+   */
+  _openDispute(S, task, acc, failFiles, { worker_note, check_output }) {
+    const goal = S.goal; const A = this._anti(goal);
+    if (this._R(goal).checks.acceptance_dispute === false) return false;
+    const rec = A.disputes?.[acc.task];
+    if (rec && rec.state !== 'open') return false; // already disputed once: blocks as before
+    const at = iso(this.now());
+    const wait = () => { task.status = 'pending'; task.orch.awaiting_dispute = acc.task; task.orch.phase = null; task.updated_at = at; this._dropWorktree(S, task).catch(() => {}); };
+    if (rec) { // the re-check is already open: this task waits for it too
+      if (!rec.impls.includes(task.id)) rec.impls.push(task.id);
+      wait(); this.ev('orch.acceptance.disputed', 'orchestrator', acc.task, { task: task.id, joined: true, rule: 'checks.acceptance_dispute' });
+      return true;
+    }
+    const accT = S.tasks.find((t) => t.id === acc.task);
+    if (!accT || accT.status !== 'done' || accT.orch.role !== 'acceptance') return false;
+    const files = (acc.files || []).filter((f) => failFiles.includes(f));
+    const last = accT.orch.attempt_log.at(-1)?.tier || accT.orch.model_tier;
+    const tier = disputeTier(last, accT.orch.tier_ladder || this._R(goal).retry.ladder);
+    (A.disputes ||= {})[acc.task] = { state: 'open', impls: [task.id], at, files, from_commit: acc.commit, from_tier: last, tier, impl_note: worker_note ? sanitizeUntrusted(worker_note, 1200) : null };
+    accT.status = 'ready'; accT.orch.model_tier = tier; accT.max_attempts = accT.attempts + 1; accT.orch.phase = null; accT.updated_at = at; accT.orch.last_failure = null;
+    accT.orch.dispute = { impl: task.id, files, note: worker_note ? sanitizeUntrusted(worker_note, 1500) : null, check_output: check_output ? tail(check_output, 3000) : null };
+    wait();
+    this.ev('orch.acceptance.disputed', 'orchestrator', acc.task, { task: task.id, files: files.slice(0, 10), from_tier: last, tier, rule: 'checks.acceptance_dispute' });
+    this.ev('task.retried', 'orchestrator', acc.task, { attempts: accT.attempts, max_attempts: accT.max_attempts, tier, reason: 'acceptance_dispute', rule: 'checks.acceptance_dispute' });
+    return true;
+  }
+
+  /** The dispute re-check of acceptance task `accT` failed (changed nothing, refused by anti-cheat, or errored): its committed tests stand, the waiting tasks fail. -> halt reason. */
+  _closeDispute(S, accT, cause, note) {
+    const A = this._anti(S.goal); const rec = A.disputes?.[accT.id] || { impls: [accT.orch.dispute?.impl].filter(Boolean), files: accT.orch.dispute?.files || [] };
+    const unchanged = cause === 'dispute_unchanged'; const at = iso(this.now());
+    Object.assign(rec, { state: unchanged ? 'unchanged' : 'refused', reason: `${cause}${note && !unchanged ? `: ${String(note).replace(/^anti-cheat [\w_]+: /, '')}` : ''}`.slice(0, 300), reply: accT.orch.last_failure?.worker_note || null, ended_at: at });
+    delete accT.orch.dispute;
+    accT.status = 'done'; // the revision was not merged: the tests it committed before stay the acceptance tests
+    for (const id of rec.impls) {
+      const t = S.tasks.find((x) => x.id === id);
+      if (!t || t.orch.awaiting_dispute !== accT.id) continue;
+      delete t.orch.awaiting_dispute; t.status = 'failed'; t.updated_at = at;
+      this.ev('task.failed', 'orchestrator', t.id, { cause: 'check_failed', attempts: t.attempts, final: true, rule: 'checks.acceptance_dispute' });
+    }
+    this.ev(unchanged ? 'orch.acceptance.upheld' : 'orch.acceptance.revision_refused', 'orchestrator', accT.id, { tasks: rec.impls, cause, reason: rec.reason, tier: rec.tier ?? null });
+    return `task ${rec.impls.join(', ')} failed on the acceptance tests in ${(rec.files || []).slice(0, 2).join(', ')} written by acceptance task ${accT.id}; after the dispute ${accT.id} was re-checked at ${rec.tier || 'a stronger tier'} and `
+      + (unchanged ? 'kept its tests unchanged (it found them consistent with the goal)' : `its revision was REFUSED (${rec.reason})`)
+      + ": the committed tests stand. Check whether that test or the implementation is wrong, then fix by hand or re-plan (the workers' notes are in the report)";
+  }
+
+  /** A dispute re-check of an acceptance task: what changed in its test files since the commit under dispute, and whether that may be merged. -> {files, counts, stat, diff} | {fail, note}. */
+  async _disputeDelta(S, task, wt, ac) {
+    const A = this._anti(S.goal); const rec = A.disputes?.[task.id]; const item = (A.acceptance?.items || []).find((i) => i.task === task.id);
+    if (ac.error || !rec?.from_commit || !item) return { fail: 'dispute_unverifiable', note: 'the dispute revision could not be analysed, so it is not accepted' };
+    const files = [...new Set([...(item.files || []), ...(ac.acceptFiles || [])])];
+    const stat = (await G.git(wt, ['diff', '--stat', '--no-color', rec.from_commit, 'HEAD', '--', ...files], { allowFail: true })).stdout.trim();
+    if (!stat) return { fail: 'dispute_unchanged', note: `${task.id} kept its tests unchanged` };
+    const diff = (await G.git(wt, ['diff', '-U2', '--no-color', '--no-ext-diff', rec.from_commit, 'HEAD', '--', ...files], { allowFail: true })).stdout;
+    const counts = await this._acceptanceCounts(S.goal, wt, files);
+    const v = HG.judgePerFile(item.counts, counts); // the per-file test counts of a real run may not go down
+    if (!v.ok) return { fail: v.kind, note: `anti-cheat ${v.kind}: ${v.reason} (an acceptance dispute revision may not drop tests)`.slice(0, 300) };
+    return { files, counts, stat: stat.slice(-1500), diff: diff.length > 6000 ? `${diff.slice(0, 6000)}\n[diff truncated]` : diff };
+  }
+
+  /** The dispute revision was merged: record it for the report, release the waiting implementation tasks with one fresh attempt budget (from their first tier). */
+  _reviseDispute(S, accT, sha, d, reply) {
+    const goal = S.goal; const rec = this._anti(goal).disputes[accT.id]; const at = iso(this.now());
+    Object.assign(rec, { state: 'revised', to_commit: sha, files: d.files, stat: d.stat, diff: sanitizeUntrusted(d.diff), reply: reply ? sanitizeUntrusted(reply, 1500) : null, ended_at: at });
+    delete accT.orch.dispute;
+    for (const id of rec.impls) {
+      const t = S.tasks.find((x) => x.id === id);
+      if (!t || t.orch.awaiting_dispute !== accT.id) continue;
+      delete t.orch.awaiting_dispute;
+      t.max_attempts = t.attempts + goal.orch.budgets.max_attempts; t.orch.model_tier = t.orch.attempt_log.find((a) => a.counted !== false)?.tier || t.orch.model_tier;
+      t.orch.same_tier_used = {}; t.orch.denial_retries = 0; t.updated_at = at;
+      t.orch.last_failure = { kind: 'acceptance_revised', note: `the acceptance tests ${d.files.slice(0, 3).join(', ')} were revised by ${accT.id} after your dispute: read them again and implement what the goal asks`, check_output: null, denials: [] };
+      this.ev('task.retried', 'orchestrator', t.id, { attempts: t.attempts, max_attempts: t.max_attempts, tier: t.orch.model_tier, reason: 'acceptance_revised', rule: 'checks.acceptance_dispute' });
+    }
+    this.ev('orch.acceptance.revised', 'orchestrator', accT.id, { tasks: rec.impls, files: d.files.slice(0, 10), commit: sha.slice(0, 12), tier: rec.tier, diff_stat: d.stat.slice(-600) });
   }
 
   /** Snapshot (scope check) -> commit -> checks -> integrate. Keyed by (task, attempt). */
@@ -737,7 +822,15 @@ export class Engine {
     const headBefore = await G.head(wt);
     // anti-cheat, before any check runs worker-written test code: skipped / deleted tests, test configuration, acceptance tests, copied expectations
     const ac = await this._anticheatDiff(S, task, entry, wt);
-    if (ac.fail) return this._failAttempt(S, task, entry, ac.fail.kind, { escalate: true, note: ac.note });
+    if (ac.fail) return this._failAttempt(S, task, entry, ac.fail.kind, { escalate: true, note: ac.note, worker_note: task.orch.dispute ? c.result?.result : null });
+    let dispute = null; // an acceptance task re-checking its tests after a dispute: it must change something, and may not drop tests (per-file counts of a real run)
+    if (task.orch.dispute) {
+      dispute = await this._disputeDelta(S, task, wt, ac);
+      if (dispute.fail) {
+        if (dispute.fail !== 'dispute_unchanged') { entry.anticheat = attemptRecord({ findings: entry.anticheat?.findings || [], failed: dispute.fail }); this.ev('orch.anticheat.failed', 'orchestrator', task.id, { kind: dispute.fail, attempt: entry.n, reason: dispute.note }); }
+        return this._failAttempt(S, task, entry, dispute.fail, { escalate: false, note: dispute.note, worker_note: c.result?.result });
+      }
+    }
     const checks = await runChecks(task.orch.checks, { cwd: wt, env: checkEnv({ base: this.env, tmpDir: this._tmp(task.id) }), allowlist: this._checkAllowlist(goal), ...this._sandboxOpts(goal, wt, task.id) });
     // the authoritative checks must leave the committed worktree exactly as it was (a leftover self-check process, or the check itself, writing into it = fail)
     const dirty = await G.changedPaths(wt).catch((e) => [`(git status failed: ${String(e.message).slice(0, 80)})`]);
@@ -782,8 +875,10 @@ export class Engine {
     this.ev('orch.integrate.merged', 'orchestrator', task.id, { sha: m.sha, branch: task.orch.branch });
     if (task.orch.role === 'acceptance') { // these test files are now read-only for every other task and re-run from this commit at verify
       const A = this._anti(goal); A.acceptance ||= { items: [] };
-      A.acceptance.items = A.acceptance.items.filter((i) => i.task !== task.id); A.acceptance.items.push({ task: task.id, files: ac.acceptFiles, commit: m.sha, counts: await this._acceptanceCounts(goal, wt, ac.acceptFiles) });
-      this.ev('orch.anticheat.acceptance', 'orchestrator', task.id, { files: ac.acceptFiles.slice(0, 20), commit: m.sha.slice(0, 12) });
+      const files = dispute ? dispute.files : ac.acceptFiles; // a dispute revision's diff holds only the files it changed: the task still owns all of them
+      A.acceptance.items = A.acceptance.items.filter((i) => i.task !== task.id); A.acceptance.items.push({ task: task.id, files, commit: m.sha, counts: dispute ? dispute.counts : await this._acceptanceCounts(goal, wt, files) });
+      this.ev('orch.anticheat.acceptance', 'orchestrator', task.id, { files: files.slice(0, 20), commit: m.sha.slice(0, 12) });
+      if (dispute) this._reviseDispute(S, task, m.sha, dispute, c.result?.result);
     }
     this.ev('task.completed', task.assignee, task.id, { result: task.orch.result_summary.slice(0, 200), tier: entry.tier, attempts: task.attempts });
     await this._dropWorktree(S, task);
@@ -949,6 +1044,12 @@ export class Engine {
     for (const n of v.notes || []) this.ev('orch.plan.deps_added', 'orchestrator', n.task, { added: n.added, rule: 'plan.whole_suite_check' });
     o.tasks_hash_v = 2; // new plans are hashed with their description/output_contract/acceptance too (older goals keep v1 so their approval still verifies)
     S.tasks = toTasks(v.tasks, goal, this.now(), this._R(goal).retry.ladder);
+    for (const t of S.tasks) { // plan.acceptance_min_tier: the test-first task starts on a stronger tier (never above the user's plan.max_start_tier / plan.tiers). The tier is not part of the approved tasks hash.
+      if (t.orch.role !== 'acceptance') continue;
+      const a = acceptanceStartTier(t.orch.model_tier, rv?.compiled ?? null);
+      if (a.tier !== t.orch.model_tier || a.capped) this.ev('orch.plan.acceptance_tier', 'orchestrator', t.id, { from: t.orch.model_tier, to: a.tier, rule: 'plan.acceptance_min_tier', ...(a.capped ? { capped_by: 'plan.max_start_tier' } : {}) });
+      t.orch.model_tier = a.tier;
+    }
     S.agents = S.tasks.map((t) => ({ id: t.assignee, role: 'worker', capabilities: ['edit', 'bash'], can_delegate: false, status: 'idle', current_task: null, last_event_at: null, orch: { tier: t.orch.model_tier } }));
     atomicWrite(this.P.plan, { source, plan });
     for (const t of S.tasks) this.ev('task.created', 'orchestrator', t.id, { depends_on: t.depends_on, tier: t.orch.model_tier });
@@ -1090,19 +1191,19 @@ export class Engine {
       const accTasks = S.tasks.filter((t) => t.orch.role === 'acceptance');
       const items = o.anticheat?.acceptance?.items || [];
       const ctx = { path_scope: task.orch.path_scope, allow_skip: task.orch.allow_skip || [], checks: [...task.orch.checks.map((c) => c.argv), ...goal.success_criteria.filter((c) => c.check).map((c) => c.check.argv)],
-        acceptance: accTasks.length ? { files: items.flatMap((i) => i.files), scopes: accTasks.flatMap((t) => t.orch.path_scope) } : null, is_acceptance: task.orch.role === 'acceptance', literal_copy: o.literal_copy === 'fail' ? 'fail' : 'warn', harness_tamper: o.harness_tamper === 'warn' ? 'warn' : 'fail' };
+        acceptance: accTasks.length ? { files: items.flatMap((i) => i.files), scopes: accTasks.flatMap((t) => t.orch.path_scope) } : null, is_acceptance: task.orch.role === 'acceptance', dispute: !!task.orch.dispute, literal_copy: o.literal_copy === 'fail' ? 'fail' : 'warn', harness_tamper: o.harness_tamper === 'warn' ? 'warn' : 'fail' };
       const io = { before: async (p) => { if (!base) return null; const b = await G.showBlob(o.repo, base, p).catch(() => null); return b ? b.toString('utf8') : null; },
         after: async (p) => { try { return fs.readFileSync(path.join(wt, p), 'utf8'); } catch { return null; } }, tests: () => this._readTestFiles(wt) };
       const { findings } = await analyzeDiff(files, ctx, io);
       const acceptFiles = files.filter((f) => f.status !== 'D' && isTestPath(f.path)).map((f) => f.path);
-      if (ctx.is_acceptance) { // an acceptance task that adds no test is vacuous
+      if (ctx.is_acceptance && !ctx.dispute) { // an acceptance task that adds no test is vacuous (a dispute re-check edits tests it already wrote: its per-file counts are compared instead)
         const texts = []; for (const p of acceptFiles) { const t = await io.after(p); if (t !== null) texts.push({ path: p, text: t }); }
         if (!staticTestCount(['node', '--test'], texts)) findings.push({ kind: 'acceptance_empty', severity: 'fail', detail: 'an acceptance task must add at least one test( / it( declaration in a test file' });
       }
       res = { findings, acceptFiles };
     } catch (e) { // a failure of the analysis itself is not a verdict on the worker: record it and go on (the checks and the final re-runs still apply)
       this.ev('orch.anticheat.warning', 'orchestrator', task.id, { error: `anti-cheat analysis failed: ${String(e.message).slice(0, 200)}` });
-      return { acceptFiles: [] };
+      return { acceptFiles: [], error: true };
     }
     const fails = failsOf(res.findings); const first = fails[0] || null;
     entry.anticheat = attemptRecord({ findings: res.findings, failed: first ? first.kind : null });
@@ -1203,7 +1304,7 @@ export class Engine {
   _promote(S) {
     const byId = new Map(S.tasks.map((t) => [t.id, t]));
     for (const t of S.tasks) {
-      if (t.status === 'pending' && t.depends_on.every((d) => byId.get(d)?.status === 'done')) {
+      if (t.status === 'pending' && !t.orch.awaiting_dispute && t.depends_on.every((d) => byId.get(d)?.status === 'done')) { // awaiting_dispute: waits for its acceptance task's re-check
         t.status = 'ready'; t.updated_at = iso(this.now()); this.ev('task.ready', 'orchestrator', t.id, {});
       }
     }
@@ -1297,7 +1398,7 @@ export class Engine {
     atomicWrite(policyFile, { ...this._policyHead(goal), ctx: { worktree: real, path_scope: task.orch.path_scope, allowed_tools: task.orch.allowed_tools,
       allowed_commands: task.orch.allowed_commands, grants: task.orch.grants, home: this.env.HOME, base_branch: o.base_branch, ...(sc ? { self_check: sc.ctx } : {}) } });
     const deps = task.depends_on.map((d) => S.tasks.find((x) => x.id === d)).filter(Boolean).map((d) => ({ id: d.id, title: d.title, summary: d.orch.result_summary }));
-    const prompt = W.buildWorkerPrompt({ goal, task, deps, previous: task.orch.last_failure ? { check_output: task.orch.last_failure.check_output, denials: task.orch.last_failure.denials, note: task.orch.last_failure.note } : null, selfCheck: sc ? { max: sc.ctx.max } : null });
+    const prompt = W.buildWorkerPrompt({ goal, task, deps, previous: task.orch.last_failure ? { check_output: task.orch.last_failure.check_output, denials: task.orch.last_failure.denials, note: task.orch.last_failure.note } : null, selfCheck: sc ? { max: sc.ctx.max } : null, dispute: task.orch.dispute || null });
     fs.writeFileSync(this.wpath(task.id, seq, 'prompt.txt'), prompt, { mode: 0o600 });
     const args = W.buildArgs({ prompt, tier, sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, settingsFile: path.join(this.P.workers, 'settings.json') });
     const env = W.buildEnv({ base: this.env, goalId: goal.id, taskId: task.id, attempt: task.attempts, worktree: real, policyFile, approvalsDir: this.P.approvals, tmpDir: this._tmp(task.id), decisionLog: path.join(this.P.workers, 'decisions.ndjson'), bin: this.bin, fakeEnv: this.testFakeEnv });

@@ -8,6 +8,8 @@
 //   f) literal copy       expected values of the tests pasted into source lines (heuristic)               -> literal_copy (warn by default)
 //   g) harness tamper     source mentions node:assert / node:test / process.exit ...; at run time the engine preload (lib/harness-preload.mjs) -> harness_tamper
 //   h) weakened tests     a modified test file (or test helper) that drops assertion calls                -> tests_weakened (unless named exactly in path_scope)
+//   i) dispute revision   an acceptance task re-checking its own tests after a dispute (ctx.dispute): no scope or allow_skip exemption, and fewer
+//                         test( / it( declarations in a modified test file                                -> tests_reduced
 // Findings: {kind, severity: 'fail'|'warn'|'allowed', path?, detail}. 'allowed' = a rule would have fired, a human-approved plan field lets it through.
 import path from 'node:path';
 import { isTestPath } from './protect.mjs';
@@ -268,13 +270,14 @@ export function literalCopies(files, lits) {
 // ---------------------------------------------------------------- the analysis of one attempt
 /**
  * files: parseDiff() of the attempt. ctx: {path_scope, allow_skip: [reason], checks: [argv], acceptance: {files:[], scopes:[]} | null (files OTHER tasks own),
- * is_acceptance: bool, literal_copy: 'warn'|'fail'}. io: {before(rel) -> text|null, after(rel) -> text|null, tests() -> [{path, text}] (test files of the attempt's tree)}.
+ * is_acceptance: bool, dispute: bool (an acceptance task revising its own tests after a dispute: nothing may be weakened, whatever the scope), literal_copy: 'warn'|'fail'}. io: {before(rel) -> text|null, after(rel) -> text|null, tests() -> [{path, text}] (test files of the attempt's tree)}.
  * -> {findings[]}.
  */
 export async function analyzeDiff(files, ctx, io) {
   const F = []; const add = (kind, severity, p, detail) => F.push({ kind, severity, ...(p ? { path: p } : {}), detail: String(detail).slice(0, 240) });
   const inputs = new Set(checkInputPaths(ctx.checks));
-  const allow = (ctx.allow_skip || []).filter((r) => typeof r === 'string' && r.trim());
+  const allow = ctx.dispute ? [] : (ctx.allow_skip || []).filter((r) => typeof r === 'string' && r.trim());
+  const scoped = (p) => !ctx.dispute && explicitInScope(ctx.path_scope, p); // a dispute revision gets no exemption for files named in its scope
   for (const f of files) {
     // (d) deleted / renamed test files
     if ((f.status === 'D' || f.status === 'R') && isTestPath(f.from)) add('tests_deleted', 'fail', f.from, f.status === 'D' ? 'test file deleted' : `test file renamed to ${f.path}`);
@@ -286,7 +289,12 @@ export async function analyzeDiff(files, ctx, io) {
     // (h) a modified test file or test helper (anything isTestPath covers: *.test.*, test/ directories) that loses assertion calls
     if ((f.status === 'M' || f.status === 'R') && isTestPath(f.path) && /\.(?:m?js|cjs|jsx|tsx?)$/.test(f.path)) {
       const d = assertionDrop(f);
-      if (d.total > 0 || d.strong > 0) add('tests_weakened', explicitInScope(ctx.path_scope, f.path) ? 'allowed' : 'fail', f.path, `assertion calls dropped (${d.total > 0 ? `${d.total} fewer in total` : ''}${d.total > 0 && d.strong > 0 ? ', ' : ''}${d.strong > 0 ? `${d.strong} fewer value comparisons` : ''})${explicitInScope(ctx.path_scope, f.path) ? ' (file named in path_scope, approved with the plan)' : ' (file not named in path_scope)'}`);
+      if (d.total > 0 || d.strong > 0) add('tests_weakened', scoped(f.path) ? 'allowed' : 'fail', f.path, `assertion calls dropped (${d.total > 0 ? `${d.total} fewer in total` : ''}${d.total > 0 && d.strong > 0 ? ', ' : ''}${d.strong > 0 ? `${d.strong} fewer value comparisons` : ''})${ctx.dispute ? ' (an acceptance dispute revision may not weaken its tests)' : scoped(f.path) ? ' (file named in path_scope, approved with the plan)' : ' (file not named in path_scope)'}`);
+      if (ctx.dispute) { // (i) the static test count of the file may not go down either (the engine also compares the per-file counts of a real run)
+        const n = async (t) => (t === null ? 0 : staticTestCount(['node', '--test'], [{ path: f.path, text: t }]));
+        const was = await n(await io.before(f.from || f.path)); const now = await n(await io.after(f.path));
+        if (now < was) add('tests_reduced', 'fail', f.path, `${now} test declaration(s), fewer than the ${was} before the dispute (an acceptance dispute revision may not drop tests)`);
+      }
     }
     // (c) test configuration
     {

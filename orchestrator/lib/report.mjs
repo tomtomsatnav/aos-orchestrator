@@ -5,6 +5,35 @@ import { reportLines } from './anticheat.mjs';
 import { escCtrl } from './ctrl.mjs';
 const fence = (s) => `\n\`\`\`\n${String(s || '').trim()}\n\`\`\`\n`;
 
+const noFence = (s) => String(s || '').replace(/```/g, "'''");
+/** checks.acceptance_dispute: acceptance tests changed after an implementation task disputed them (a human must read every changed line), and disputes that changed nothing. */
+function disputeLines(o) {
+  const D = Object.entries(o.anticheat?.disputes || {}); const L = [];
+  const revised = D.filter(([, d]) => d.state === 'revised');
+  if (revised.length) {
+    L.push('## Acceptance tests revised after a dispute: check these changes', '',
+      'An implementation task failed on these acceptance tests and its worker said a test was wrong. The acceptance task re-checked them against the goal on a stronger tier and CHANGED them. '
+      + 'The engine refused any revision that dropped a test or an assertion, but it cannot tell whether a changed expected value is right: read every changed line against the goal before you merge.', '');
+    for (const [id, d] of revised) {
+      L.push(`- **${escCtrl(id)}** re-checked at ${escCtrl(d.tier)} (it first ran at ${escCtrl(d.from_tier)}) after ${(d.impls || []).map(escCtrl).join(', ')} failed on it; files: ${(d.files || []).map((f) => `\`${escCtrl(f)}\``).join(', ')}; \`git diff ${String(d.from_commit || '').slice(0, 12)} ${String(d.to_commit || '').slice(0, 12)}\``);
+      L.push(fence(noFence(d.stat)).replace(/\n$/, ''), fence(noFence(d.diff)).replace(/\n$/, ''));
+      if (d.reply) L.push("the acceptance worker's reply (written by the model: untrusted):", fence(noFence(d.reply)).replace(/\n$/, ''));
+      if (d.impl_note) L.push("the implementation worker's note that started the dispute (untrusted):", fence(noFence(d.impl_note)).replace(/\n$/, ''));
+    }
+    L.push('');
+  }
+  const kept = D.filter(([, d]) => d.state !== 'revised');
+  if (kept.length) {
+    L.push('## Acceptance disputes (tests not revised)', '');
+    for (const [id, d] of kept) {
+      L.push(`- ${escCtrl(id)}: ${d.state === 'open' ? 'still open' : d.state === 'unchanged' ? 'kept its tests unchanged' : `revision refused (${escCtrl(d.reason || '')})`} after ${(d.impls || []).map(escCtrl).join(', ')} failed on it (re-checked at ${escCtrl(d.tier)})`);
+      if (d.reply) L.push("the acceptance worker's reply (untrusted):", fence(noFence(d.reply)).replace(/\n$/, ''));
+    }
+    L.push('');
+  }
+  return L;
+}
+
 export function buildReport({ goal, tasks, state = null, approvals = [], denials = [], selfChecks = 0, diffStat = '', criteriaResults = {}, events = [], governor = null }) {
   const o = goal.orch;
   const L = [];
@@ -16,6 +45,7 @@ export function buildReport({ goal, tasks, state = null, approvals = [], denials
   const drift = versionDrift(o.claude_version_start, tasks);
   if (drift.length) L.push(`- **WARN: the claude CLI version changed during this goal** (started with \`${o.claude_version_start}\`): ${drift.map((d) => `${d.task}#${d.n} ran on \`${d.version}\``).join(', ')}. Results may not be comparable.`);
   L.push('');
+  L.push(...disputeLines(o));
   L.push('## Success criteria', '');
   for (const c of goal.success_criteria) {
     L.push(`- [${c.met ? 'x' : ' '}] **${c.id}** ${c.text}${c.check ? ` (\`${c.check.argv.join(' ')}\`)` : ''}`);
