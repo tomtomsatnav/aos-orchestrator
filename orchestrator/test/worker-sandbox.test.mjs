@@ -180,3 +180,28 @@ test('the macOS developer dir (xcode-select -p / DEVELOPER_DIR: git and the tool
   const c = wrapCommand(['/bin/cat', file], { worktree: w.wt, tmpDir: path.join(w.goal, 'tmp/t1'), home: w.home, profileDir: path.join(w.goal, 'sandbox'), developerDirs: cfg.developerDirs });
   const cr = spawnSync(c.bin, c.args, { cwd: w.wt, encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } }); assert.equal(cr.status, 0, cr.stderr); assert.equal(cr.stdout, 'TOOLCHAIN\n');
 });
+
+test('worker sandbox: the self-check response dir is readable but NOT writable by the worker (a swapped inbox cannot redirect engine writes, a forged response cannot land)', S, (t) => {
+  const w = world(); t.after(w.cleanup);
+  const res = path.join(w.goal, 'tmp', 'selfcheck-res-t1'); fs.mkdirSync(res, { recursive: true }); fs.writeFileSync(path.join(res, 'a.res.json'), 'ENGINE');
+  w.cfg.selfCheckResDir = res;
+  let r = w.sh(`cat ${q(path.join(res, 'a.res.json'))}`); assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout, 'ENGINE');
+  assert.notEqual(w.sh(`echo x > ${q(path.join(res, 'forged.res.json'))}`).status, 0); assert.equal(fs.existsSync(path.join(res, 'forged.res.json')), false);
+  assert.notEqual(w.sh(`rm ${q(path.join(res, 'a.res.json'))}`).status, 0); assert.equal(fs.existsSync(path.join(res, 'a.res.json')), true);
+  delete w.cfg.selfCheckResDir;
+  assert.notEqual(w.sh(`cat ${q(path.join(res, 'a.res.json'))}`).status, 0, 'control: not readable without the parameter');
+});
+
+test('S4: `run goal.json` on an EXISTING goal reports the STORED sandbox_workers and warns when the flags differ', S, async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [edit('a.txt', 'alpha')] } });
+  const CLI = path.join(HERE, '..', 'bin', 'aos-orch.mjs');
+  const gf = path.join(sb.root, 'g.json');
+  fs.writeFileSync(gf, JSON.stringify({ id: 'g-stored', title: 'stored', success_criteria: [crit('a.txt', 'alpha')], orch: { repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } }));
+  const run = (...extra) => spawnSync(process.execPath, [CLI, 'run', gf, '--no-wait', ...extra, '--poll-ms', '50', '--interval-s', '0.2'], { env: sb.env(), encoding: 'utf8', timeout: 60000 });
+  let r = run('--no-sandbox-workers');
+  assert.match(r.stderr, /worker OS sandbox DISABLED/); assert.equal(goalOf(path.join(sb.orch, 'goals', 'g-stored')).orch.sandbox_workers, false);
+  r = run(); // flags absent: the default would be ON, but the stored goal is OFF
+  assert.doesNotMatch(r.stderr, /workers run inside the macOS sandbox/, r.stderr); assert.match(r.stderr, /workers run UNSANDBOXED \(stored orch\.sandbox_workers is not true\)/);
+  r = run('--sandbox-workers'); assert.match(r.stderr, /--sandbox-workers is ignored for an existing goal/);
+});

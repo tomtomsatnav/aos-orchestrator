@@ -47,18 +47,18 @@ test('formatResponse fences the output as UNTRUSTED and neutralises a forged del
 
 function hookWorld(t, extra = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aos-schook-'))); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const wt = path.join(root, 'wt'); const inbox = path.join(root, 'tmp', '.aos-selfcheck'); fs.mkdirSync(path.join(wt, 'sub'), { recursive: true }); fs.mkdirSync(inbox, { recursive: true });
+  const wt = path.join(root, 'wt'); const inbox = path.join(root, 'tmp', '.aos-selfcheck'); const resDir = path.join(root, 'tmp-res'); fs.mkdirSync(path.join(wt, 'sub'), { recursive: true }); fs.mkdirSync(inbox, { recursive: true }); fs.mkdirSync(resDir, { recursive: true });
   const policyFile = path.join(root, 'policy.json');
-  fs.writeFileSync(policyFile, JSON.stringify({ policy: {}, ctx: { worktree: wt, path_scope: ['a.txt'], allowed_commands: [], grants: [], self_check: { dir: inbox, checks: CHECKS, max: 5, wait_ms: 1500 }, ...extra } }));
+  fs.writeFileSync(policyFile, JSON.stringify({ policy: {}, ctx: { worktree: wt, path_scope: ['a.txt'], allowed_commands: [], grants: [], self_check: { dir: inbox, res_dir: resDir, checks: CHECKS, max: 5, wait_ms: 1500 }, ...extra } }));
   const env = { AOS_POLICY_FILE: policyFile, AOS_APPROVALS_DIR: path.join(root, 'approvals'), AOS_DECISION_LOG: path.join(root, 'decisions.ndjson'), AOS_APPROVAL_POLL_MS: '20' };
   const call = (command, cwd = wt) => decideForPayload({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd }, env);
-  return { root, wt, inbox, env, call };
+  return { root, wt, inbox, resDir, env, call };
 }
 
 test('hook: an approved argv files a request and returns the engine\'s answer as the deny reason; anything else never reaches the inbox', async (t) => {
   const w = hookWorld(t);
   // a stand-in engine: answers the first request it sees
-  const answer = setInterval(() => { for (const r of readRequests(w.inbox)) { fs.rmSync(r.file); writeResponse(w.inbox, r.id, { ok: true, exit_code: 0, duration_ms: 5, run: 1, max: 5, output: `# pass 3 index=${r.index}` }); } }, 20);
+  const answer = setInterval(() => { for (const r of readRequests(w.inbox)) { fs.rmSync(r.file); writeResponse(w.resDir, r.id, { ok: true, exit_code: 0, duration_ms: 5, run: 1, max: 5, output: `# pass 3 index=${r.index}` }); } }, 20);
   t.after(() => clearInterval(answer));
   let d = await w.call('node --test a.test.mjs');
   assert.equal(d.decision, 'deny'); assert.equal(d.rule_id, 'floor:self_check'); assert.match(d.reason, /exit code 0 \(passed\)/); assert.match(d.reason, /# pass 3 index=0/); assert.match(d.reason, /<<<UNTRUSTED-[0-9a-f]{16} /);

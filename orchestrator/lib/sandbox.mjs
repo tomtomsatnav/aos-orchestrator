@@ -33,6 +33,11 @@ export const SECRET_DIRS = ['.ssh', '.aws', '.config', '.claude', '.gnupg', '.ne
  * select /Applications/Xcode_<v>.app/Contents/Developer, which no other rule covers, so without this `git` fails in the sandbox.
  */
 let devDirCache;
+/** Only a real Xcode / Command Line Tools developer dir may become readable: .../Developer under /Library/Developer or inside any *.app/Contents (DEVELOPER_DIR is attacker-influenceable env: /Users/x/src must never be opened up). */
+export function isDeveloperDirPath(x) {
+  if (typeof x !== 'string' || !path.isAbsolute(x) || x.split('/').includes('..')) return false;
+  return /^\/Library\/Developer(\/|$)/.test(x) || /^(\/[^/]+)+\/[^/]+\.app\/Contents\/Developer$/.test(x); // an Xcode kept elsewhere (/Applications, ~/Applications, CI images) is fine; any other directory is not
+}
 export function developerDirs(env = process.env, platform = process.platform) {
   if (platform !== 'darwin') return [];
   if (env === process.env && devDirCache) return devDirCache;
@@ -40,7 +45,7 @@ export function developerDirs(env = process.env, platform = process.platform) {
   if (!d) { try { d = execFileSync('/usr/bin/xcode-select', ['-p'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim(); } catch { d = null; } }
   const out = [];
   if (d && path.isAbsolute(d) && !/[\0\n]/.test(d)) { out.push(path.resolve(d)); try { out.push(fs.realpathSync(d)); } catch { /* missing: nothing more */ } }
-  const r = [...new Set(out)].filter((x) => x !== '/' && x.split('/').length > 2); // never a whole top-level directory
+  const r = [...new Set(out)].filter(isDeveloperDirPath);
   if (env === process.env) devDirCache = r;
   return r;
 }
@@ -95,6 +100,7 @@ export function buildWorkerProfile() {
     `(allow file-read* ${SYSTEM_READ.map((p) => `(subpath "${p}")`).join(' ')} (literal "/") (literal "/private/tmp") (literal "/private/var/folders"))`,
     '(allow file-read* (subpath (param "NODE_PREFIX")) (subpath (param "CLAUDE_PREFIX")) (literal (param "CLAUDE_LINK")) (subpath (param "HOOK_DIR")) (subpath (param "DEV_DIR0")) (subpath (param "DEV_DIR1"))',
     '  (subpath (param "WORKTREE")) (subpath (param "GIT_COMMON")) (subpath (param "TMPDIR_W")) (subpath (param "APPROVALS"))',
+    '  (subpath (param "SC_RES"))', // worker self-check responses: engine-owned, READ-only for the worker (the hook reads them; only the engine writes)
     '  (literal (param "POLICY_FILE")) (literal (param "SETTINGS_FILE")) (literal (param "DECISION_LOG"))',
     '  (subpath (param "CLAUDE_DIR")) (literal (param "CLAUDE_JSON")) (literal (string-append (param "CLAUDE_JSON") ".backup"))',
     '  (subpath (string-append (param "HOME") "/Library/Keychains")) (literal (param "HOME")) (literal (param "GITCONFIG")))',
@@ -146,7 +152,7 @@ export function wrapWorkerCommand(argv, cfg) {
   const claudeJson = path.join(home, '.claude.json');
   const wt = realDeepest(cfg.worktree);
   const params = {
-    WORKTREE: wt, TMPDIR_W: realDeepest(cfg.tmpDir), APPROVALS: realDeepest(cfg.approvalsDir), DECISION_LOG: realDeepest(cfg.decisionLog),
+    WORKTREE: wt, TMPDIR_W: realDeepest(cfg.tmpDir), APPROVALS: realDeepest(cfg.approvalsDir), SC_RES: cfg.selfCheckResDir ? realDeepest(cfg.selfCheckResDir) : none, DECISION_LOG: realDeepest(cfg.decisionLog),
     POLICY_FILE: realDeepest(cfg.policyFile), SETTINGS_FILE: realDeepest(cfg.settingsFile), HOOK_DIR: realDeepest(cfg.hookDir),
     GIT_COMMON: cfg.gitCommon ? realDeepest(cfg.gitCommon) : none, HOME: home, GITCONFIG: path.join(home, '.gitconfig'),
     NODE_PREFIX: nodePrefix, CLAUDE_PREFIX: claudePrefix, CLAUDE_LINK: link,
