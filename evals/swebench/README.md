@@ -65,7 +65,9 @@ prefix (`pytest -rA`). The hidden tests (test_patch, FAIL_TO_PASS, PASS_TO_PASS)
 
 A fresh temp repo with ONE commit holding the base commit's tree (no history, so the upstream fix cannot be read from git log). Prompt =
 `problem_statement` + `\n\nFix this issue in the repository. Do not modify existing tests.` (identical for every arm). The session runs on the
-host (macOS) with Edit/Bash; it does NOT have the project's Python env (the agent may build one itself). The model patch is the working tree's
+host (macOS) with Edit/Bash; it does NOT have the project's Python env (the agent may build one itself; on 21 Oct sessions installed uv Pythons 3.8/3.9 and ran the
+tests on the host, where forked test processes died with macOS "Python quit unexpectedly" dialogs; since then the session env sets
+`no_proxy=*` and `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`, prompt unchanged). The model patch is the working tree's
 binary diff against the base commit, untracked files included (computed with a temporary index, so the agent's own index is not touched).
 
 ## The guard on Python repos (`pyguard.mjs`)

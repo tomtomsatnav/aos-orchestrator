@@ -60,12 +60,16 @@ async function waitForQuota() {
     console.error(`${new Date().toISOString()} still at the usage limit: ${s.final_message.slice(0, 120)}`);
   }
 }
+// Sessions often run the repo's tests on the host with an old Python. On macOS a forked child that touches the system proxy lookup (urllib's
+// _scproxy) or ObjC initialisation is killed, and each death raises a "Python quit unexpectedly" dialog. A non-empty no_proxy makes urllib skip
+// the system lookup; the ObjC flag covers the rest. Environment only: the prompt is unchanged, so runs stay comparable. Grading is in Docker.
+const SESSION_ENV = { ...process.env, no_proxy: process.env.no_proxy || '*', OBJC_DISABLE_INITIALIZE_FORK_SAFETY: 'YES' };
 /** One `claude -p` session, the same command line as evals/run.mjs's bare/guarded arms. */
 function session(prompt, model, repo, timeoutMs) {
   const t0 = Date.now();
   return new Promise((resolve) => {
     const c = spawn('claude', ['-p', prompt, '--model', model, '--output-format', 'json', '--permission-mode', 'acceptEdits', '--allowedTools', 'Bash Edit Write MultiEdit Read Glob Grep'],
-      { cwd: repo, env: process.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd: repo, env: SESSION_ENV, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = ''; let timedOut = false;
     c.stdout.on('data', (d) => { stdout += d; }); c.stderr.on('data', () => {});
     const t = setTimeout(() => { timedOut = true; try { process.kill(-c.pid, 'SIGKILL'); } catch { /* gone */ } }, timeoutMs);
