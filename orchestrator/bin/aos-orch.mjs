@@ -22,7 +22,7 @@ import { rulesFingerprint } from '../lib/rules.mjs';
 import { renderRulesFor, readRulesSummary, renderUserRules, checkRulesFile, explainCall } from '../lib/rules-store.mjs';
 import { q, escCtrl, escBeyondC0 } from '../lib/ctrl.mjs';
 import { draftGoal, renderDraft, PROFILES } from '../lib/draft.mjs';
-import { orchLocation, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner } from '../lib/state.mjs';
+import { orchLocation, goalDirOf, goalsRoot, paths, readJSON, loadState, loadHeartbeat, enqueueCommand, pidAlive, ensureDir, lockStatus, describeOwner, attachedFile, attachedPid } from '../lib/state.mjs';
 import { selectGoals, moveGoals, archiveRoot, GID_RE } from '../lib/archive.mjs';
 import { listApprovals, decide } from '../lib/approvals.mjs';
 import { workerSandboxAvailable } from '../lib/sandbox.mjs';
@@ -92,14 +92,11 @@ function nextSteps(id, s) {
   if (m) return [`the goal is waiting for YOUR confirmation of: ${m[1]}`, ...m[1].split(',').map((c) => c.trim()).filter((c) => /^[a-z][a-z0-9_-]{0,31}$/.test(c)).map((c) => `confirm it (only if true): aos-orch confirm ${id} ${c}`), `then continue:         aos-orch run ${id}`];
   return [];
 }
-/** A \`run\` waiting for a human (between engine runs it holds no lock) leaves this marker, refreshed twice a second. */
-const attachedFile = (dir) => path.join(dir, 'attached.json');
 /** The live attached \`run\` that will apply a queued command, or null. */
 function attachedRun(dir) {
   const st = lockStatus(dir);
   if (st.owner_alive && st.owner_label === 'run' && !st.wedged) return st.owner_pid;
-  const a = readJSON(attachedFile(dir), null);
-  return a && pidAlive(a.pid) && Date.now() - a.ts < 5000 ? a.pid : null;
+  return attachedPid(dir);
 }
 const engineAlive = (dir) => { const l = readJSON(paths(dir).lock, null); return !!l && pidAlive(l.pid); };
 
@@ -186,7 +183,10 @@ async function main() {
         for (const l of nextSteps(id, s)) console.error(`aos-orch: ${l}`);
         console.error('aos-orch: waiting for your command (Ctrl-C to stop; nothing runs until you give it)...');
         const mark = () => { try { fs.writeFileSync(attachedFile(dir), JSON.stringify({ pid: process.pid, ts: Date.now() })); } catch { /* best effort */ } };
-        while (!(fs.existsSync(paths(dir).commands) && fs.readdirSync(paths(dir).commands).some((n) => n.endsWith('.json')))) { mark(); await sleep(500); }
+        while (!(fs.existsSync(paths(dir).commands) && fs.readdirSync(paths(dir).commands).some((n) => n.endsWith('.json')))) {
+          if (!fs.existsSync(paths(dir).goal)) { console.error(`aos-orch: goal ${id} was moved away (archived?) while this run was waiting; stopping. Unarchive it and run again to continue.`); process.exit(0); }
+          mark(); await sleep(500);
+        }
         mark();
         ({ status, s } = await driveOnce(dir));
       }

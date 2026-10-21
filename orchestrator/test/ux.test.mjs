@@ -8,7 +8,8 @@ import { spawn } from 'node:child_process';
 import { mkSandbox, ptask, crit, HERE, sleep, NO_OS_SANDBOX } from './helpers.mjs';
 import { draftGoal, renderDraft } from '../lib/draft.mjs';
 import { reviewView, renderReview, beyondPrompt, goalPromptText, buildPlannerPrompt } from '../lib/plan.mjs';
-import { paths, readJSON } from '../lib/state.mjs';
+import { paths, readJSON, attachedPid, ID_RE } from '../lib/state.mjs';
+import { GID_RE } from '../lib/archive.mjs';
 
 const CLI = path.join(HERE, '..', 'bin', 'aos-orch.mjs');
 const cli = (args, env) => new Promise((resolve) => { const c = spawn(process.execPath, [CLI, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] }); let out = ''; let err = ''; c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; }); c.on('close', (code) => resolve({ code, out, err })); });
@@ -222,4 +223,19 @@ test('UX8: with worker.self_check on, the worker-commands line says the worker m
   const view = reviewView([{ id: 't1', title: 'x', depends_on: [], orch: { model_tier: 'haiku', path_scope: ['a.txt'], allowed_commands: [], checks: [{ argv: ['node', '--test', 'a.test.mjs'], timeout_s: 30 }] } }]);
   assert.match(renderReview(view, '', { selfCheck: true }), /worker commands: \(none; read-only inspection; self-check: may run its approved checks via the engine\)/);
   assert.match(renderReview(view, ''), /worker commands: \(none; read-only inspection only\)/);
+});
+
+test('cli: an attached run whose goal is archived while it waits exits cleanly with a message; one liveness helper, one id regexp', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  sb.scenario({ planner: { behavior: 'success', plan: { tasks: [ptask('t1', 'a.txt', 'alpha')] } }, tasks: { t1: [{ behavior: 'success', edits: [{ path: 'a.txt', content: 'alpha\n' }] }] } });
+  const spec = { id: 'g-arc', title: 'Create a.txt', success_criteria: [crit('a.txt', 'alpha')], orch: { ...(NO_OS_SANDBOX ? { unsandboxed_checks: true } : {}), repo: sb.repo, base_branch: 'main', check_allowlist: ['node'] } };
+  const gf = path.join(sb.root, 'goal.json'); fs.writeFileSync(gf, JSON.stringify(spec)); const env = sb.env(); const dir = path.join(sb.orch, 'goals', 'g-arc');
+  const c = spawn(process.execPath, [CLI, 'run', gf, '--poll-ms', '50', '--interval-s', '0.2'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let err = ''; c.stderr.on('data', (d) => { err += d; }); const closed = new Promise((res) => c.on('close', res));
+  const end = Date.now() + 20000; while (!/waiting for your command/.test(err) && Date.now() < end) await sleep(50);
+  assert.match(err, /waiting for your command/);
+  assert.ok(attachedPid(dir), 'the live marker is seen by the shared helper');
+  fs.mkdirSync(path.join(sb.orch, 'archive', 'goals'), { recursive: true }); fs.renameSync(dir, path.join(sb.orch, 'archive', 'goals', 'g-arc'));
+  assert.equal(await closed, 0, err); assert.match(err, /was moved away \(archived\?\)/);
+  assert.equal(GID_RE, ID_RE);
 });

@@ -37,7 +37,10 @@ export function buildArgs({ prompt, tier, sessionId, maxTurns = 30, maxBudgetUsd
 }
 
 /** Environment built from scratch (design section 5). `extra` carries AOS_* values; secrets are never inherited. */
-export function buildEnv({ base = process.env, goalId, taskId, attempt, worktree, policyFile, approvalsDir, tmpDir, decisionLog, bin, nodePath = process.execPath, extra = {} }) {
+/** TEST HARNESS ONLY: the scripted fake claude needs AOS_FAKE_* variables. Never reachable from a user's environment: the test helpers set this process-global
+ *  (and preload it into CLI children); an Engine can also be given `testFakeEnv: true` explicitly. */
+export const testFakeEnvDefault = () => globalThis[Symbol.for('aos.testFakeEnv')] === true;
+export function buildEnv({ base = process.env, fakeEnv = testFakeEnvDefault(), goalId, taskId, attempt, worktree, policyFile, approvalsDir, tmpDir, decisionLog, bin, nodePath = process.execPath, extra = {} }) {
   const dirs = ['/usr/bin', '/bin', '/usr/sbin', '/sbin', path.dirname(nodePath)];
   if (bin && path.isAbsolute(bin)) dirs.push(path.dirname(bin));
   else if (!bin) { /* claude resolved through PATH below */ }
@@ -51,7 +54,7 @@ export function buildEnv({ base = process.env, goalId, taskId, attempt, worktree
     AOS_POLICY_FILE: policyFile, AOS_APPROVALS_DIR: approvalsDir });
   if (decisionLog) env.AOS_DECISION_LOG = decisionLog;
   if (base.AOS_APPROVAL_POLL_MS) env.AOS_APPROVAL_POLL_MS = base.AOS_APPROVAL_POLL_MS;
-  if (base.AOS_CLAUDE_BIN) { // test mode: the scripted fake needs its own scenario variables
+  if (fakeEnv && base.AOS_CLAUDE_BIN) { // test mode: the scripted fake needs its own scenario variables
     env.AOS_CLAUDE_BIN = base.AOS_CLAUDE_BIN;
     for (const k of Object.keys(base)) if (k.startsWith('AOS_FAKE_')) env[k] = base[k];
   }
@@ -72,6 +75,7 @@ export function buildWorkerPrompt({ goal, task, deps = [], previous = null, self
   const parts = [{ label: 'task description', text: o.description || '', max: 4000 }];
   for (const d of deps) parts.push({ label: `dependency ${d.id} summary`, text: d.summary || 'done', max: 1000 });
   if (previous?.check_output) parts.push({ label: 'previous check output', text: previous.check_output, max: 4096 });
+  if (previous?.denials?.length) parts.push({ label: 'previous denied tool calls', text: previous.denials.join(', '), max: 500 }); // worker-written (a command's first token, a file path)
   if (previous?.note) parts.push({ label: 'previous note', text: previous.note, max: 1000 });
   const U = untrustedBlocks(parts);
   let i = 0;
@@ -91,7 +95,7 @@ export function buildWorkerPrompt({ goal, task, deps = [], previous = null, self
   for (const d of deps) ctx.push(`dependency ${d.id} (${d.title}): ${U.blocks[i++]}`);
   if (previous) {
     if (previous.check_output) ctx.push(`previous attempt failed the engine checks. Last output:\n${U.blocks[i++]}`);
-    if (previous.denials?.length) ctx.push(`previous attempt had denied tool calls: ${previous.denials.join(', ')}`);
+    if (previous.denials?.length) ctx.push(`previous attempt had denied tool calls: ${U.blocks[i++]}`);
     if (previous.note) ctx.push(U.blocks[i++]);
   }
   if (ctx.length) lines.push(`CONTEXT: ${ctx.join('\n')}`);

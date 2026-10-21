@@ -63,14 +63,14 @@ flowchart LR
 
 | Component | File (proposed) | Responsibility |
 |---|---|---|
-| Engine | `orchestrator/engine.mjs` | AOS-1 tick per goal (§4); owns all state writes |
-| Planner | `orchestrator/planner.mjs` | One Opus call → task DAG JSON → validation → plan approval |
-| Worker runner | `orchestrator/worker.mjs` | Worktree, env, command line, stream parsing, kill, usage |
-| Policy hook | `orchestrator/hooks/policy.mjs` | Deterministic allow / deny / ask for every tool call |
-| Approvals | `orchestrator/approvals.mjs` | Request files, decisions, expiry, audit Events |
-| Governor | `orchestrator/governor.mjs` | Token/wall-clock caps, `rate_limit_event` tracking, pause/resume |
-| Control server | `orchestrator/control.mjs` | Authenticated HTTP API + control UI on `127.0.0.1:4319` |
-| CLI | `scripts/aos.mjs` (extend) | `aos goal …`, `aos approve …`, `aos engine …` |
+| Engine | `orchestrator/lib/engine.mjs` | AOS-1 tick per goal (§4); owns all state writes |
+| Planner | `orchestrator/lib/plan.mjs` | One Opus call → task DAG JSON → validation → plan approval |
+| Worker runner | `orchestrator/lib/worker.mjs` | Worktree, env, command line, stream parsing, kill, usage |
+| Policy hook | `orchestrator/lib/policy-hook.mjs` (rules in `lib/policy.mjs`) | Deterministic allow / deny / ask for every tool call |
+| Approvals | `orchestrator/lib/approvals.mjs` | Request files, decisions, expiry, audit Events |
+| Governor | `orchestrator/lib/governor.mjs` | Token/wall-clock caps, `rate_limit_event` tracking, pause/resume |
+| Control server | `orchestrator/server/index.mjs` | Authenticated HTTP API + control UI on `127.0.0.1:4319` |
+| CLI | `orchestrator/bin/aos-orch.mjs` | `aos-orch run|approve-plan|approvals|…` |
 | Monitor | `monitor.mjs` (small read-only change) | Shows goals, tasks and worker sessions |
 
 Data flow for one goal: create (draft) → plan (Opus, read-only tools) → human approves plan → engine dispatches ready
@@ -483,10 +483,10 @@ A small opt-in `make test-live` runs one real haiku worker (like spike E1) and i
 
 | Phase | Deliverables | Files | Acceptance |
 |---|---|---|---|
-| 1. Engine + fake CLI | State model, tick, lifecycle, ladder, budgets, governor, recovery, fake CLI | `orchestrator/{engine,worker,governor,state}.mjs`, `orchestrator/test/*`, `schemas/orch-task.schema.json` | Every §11 engine test passes in `make test` with zero model calls; conformance validator accepts the new state |
-| 2. Real workers | Worktrees, isolated command line, minimal env, policy hook, telemetry tagging, planner | `orchestrator/hooks/policy.mjs`, `orchestrator/planner.mjs`, `plugin/hooks/aos-hook.mjs` (+goal/task) | `make test-live` (one haiku task in a temp repo) passes; minimal-env OAuth verified; policy unit table green |
-| 3. Control server + CLI | Auth, endpoints, `aos` subcommands, approvals via CLI | `orchestrator/control.mjs`, `scripts/aos.mjs` | A goal runs end to end from the CLI on a temp repo; auth tests green; kill leaves no processes |
-| 4. UI + approvals | Control UI on :4319, goal hub/DAG/meters in the monitor (read-only) | `orchestrator/ui/*`, `monitor.mjs`, `ui/*` | Approve/deny from the browser; monitor shows worker sessions under the goal hub, no per-worktree hubs; theme tests pass |
+| 1. Engine + fake CLI | State model, tick, lifecycle, ladder, budgets, governor, recovery, fake CLI | `orchestrator/lib/{engine,worker,governor,state}.mjs`, `orchestrator/test/*`, `schemas/orch-task.schema.json` | Every §11 engine test passes in `make test` with zero model calls; conformance validator accepts the new state |
+| 2. Real workers | Worktrees, isolated command line, minimal env, policy hook, telemetry tagging, planner | `orchestrator/lib/policy-hook.mjs`, `orchestrator/lib/plan.mjs` | `make test-live` (one haiku task in a temp repo) passes; minimal-env OAuth verified; policy unit table green |
+| 3. Control server + CLI | Auth, endpoints, `aos` subcommands, approvals via CLI | `orchestrator/server/index.mjs`, `orchestrator/bin/aos-orch.mjs` | A goal runs end to end from the CLI on a temp repo; auth tests green; kill leaves no processes |
+| 4. UI + approvals | Control UI on :4319, goal hub/DAG/meters in the monitor (read-only) | `orchestrator/server/*` (control UI); the dashboard plugin lives in a separate repo | Approve/deny from the browser; monitor shows worker sessions under the goal hub, no per-worktree hubs; theme tests pass |
 | 5. Dogfood | First real goal on this repo | `docs/dogfood-1.md` (report) | See below |
 
 **MVP** = phases 1–3: CLI-only, strict defaults, one goal at a time, approvals through the CLI.

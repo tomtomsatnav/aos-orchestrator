@@ -93,7 +93,7 @@ test('BUG 1b units: whole-suite detection, docs-only scopes, transitive dependen
   assert.match(bad.errors.join(' '), /a: its check "npm test" runs the WHOLE test suite.*b run\(s\) after a\. Give a a check on its own test files instead/);
   // two code tasks with whole-suite checks cannot each wait for the other
   const two = validatePlan(onePlan(T('a', ['src/a.js'], [{ argv: ['npm', 'test'], timeout_s: 60 }]), T('b', ['src/b.js'], [{ argv: ['npm', 'test'], timeout_s: 60 }])), opts);
-  assert.equal(two.ok, false); assert.match(two.errors.join(' '), /b: its check "npm test" runs the WHOLE test suite/);
+  assert.equal(two.ok, false); assert.match(two.errors.join(' '), /b: its check "npm test" runs the WHOLE test suite/); assert.match(two.errors.join(' '), /At most ONE task may carry a whole-suite check/);
   // the planner's own plan object is never mutated
   const p = onePlan(T('x', ['src/x.js'], [nodeTest('test/x.test.js')]), T('d', ['README.md'], [{ argv: ['npm', 'test'], timeout_s: 60 }]));
   validatePlan(p, opts); assert.deepEqual(p.tasks[1].depends_on, []);

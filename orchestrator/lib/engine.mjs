@@ -63,6 +63,7 @@ export class Engine {
     this.spawnFn = o.spawnFn;
     this.slotGate = o.slotGate || null; // supervisor: global worker semaphore {acquire(goalId)->token|null, release(token)}
     this.testUnsandboxed = o.testUnsandboxedChecks === true; // TEST HARNESS ONLY (hosts without a sandbox): a constructor option, not a goal/CLI/env setting
+    this.testFakeEnv = o.testFakeEnv ?? W.testFakeEnvDefault(); // TEST HARNESS ONLY: pass AOS_FAKE_* to the scripted fake claude
     this.sandboxBin = o.sandboxBin || DEFAULT_SANDBOX_BIN; // tests may point this at a missing binary
     this.hookScript = o.hookScript || HOOK_SCRIPT; // tests may substitute a stub hook
     this.workerSandbox = o.workerSandbox || null;
@@ -109,7 +110,11 @@ export class Engine {
   }
 
   /** Release the lock; workers keep running (a later engine re-adopts them). */
-  async stop() { this.stopped = true; this._wake(); await this._chain.catch(() => {}); clearInterval(this._lockTimer); clearInterval(this._scTimer); releaseLock(this.dir, { pid: this.pid }); this.started = false; }
+  async stop() {
+    this.stopped = true; this._wake(); await this._chain.catch(() => {}); clearInterval(this._lockTimer); clearInterval(this._scTimer);
+    for (const rec of this.workers.values()) await this._endSelfChecks(rec); // an engine-run self-check (own process group) never outlives the engine
+    releaseLock(this.dir, { pid: this.pid }); this.started = false;
+  }
 
   /** Simulate a hard crash: stop everything in this process, leave lock + workers + files exactly as they are. */
   crash() { this.dead = true; this.stopped = true; clearInterval(this._lockTimer); clearInterval(this._scTimer); this.workers.clear(); this._wake(); }
@@ -550,9 +555,18 @@ export class Engine {
     if (!alive && !tail.result) return this._lost(S, task, entry, 'worker process is gone and left no result');
     const rec = { task: task.id, seq, pid: pf.pid, pgid: pf.pgid, session_id: pf.session_id, tail, handle: null, exited: alive ? null : { exit_code: null, signal: null, adopted: true },
       startedMs: Date.parse(pf.started_at) || this.now(), lastProgressMs: this.now(), killReason: null, termAtReal: 0 };
+    rec.selfCheck = this._adoptSelfCheck(task, seq); // the attempt's self-check state, rebuilt from its policy file
     this.workers.set(task.id, rec);
     this.ev('orch.worker.adopted', 'orchestrator', task.id, { pid: pf.pid, alive: !!alive });
     return rec;
+  }
+
+  /** Self-check state of an adopted attempt, from the policy file the engine wrote at dispatch (inbox, response dir, checks, cap). The run count restarts at 0 (not persisted). */
+  _adoptSelfCheck(task, seq) {
+    const c = readJSON(this.wpath(task.id, seq, 'policy.json'))?.ctx;
+    const sc = c?.self_check;
+    if (!sc || !Array.isArray(sc.checks) || typeof sc.dir !== 'string' || typeof sc.res_dir !== 'string') return null;
+    return { dir: sc.dir, resDir: sc.res_dir, checks: sc.checks, max: sc.max, wt: c.worktree, attempt: task.attempts, busy: false, bad: 0, flooded: false, aborted: false, running: null, kill: null, stats: { runs: 0, capped: 0, ms: 0, output_bytes: 0 } };
   }
 
   _lost(S, task, entry, why) {
@@ -1155,7 +1169,7 @@ export class Engine {
     const stdout = this.wpath('planner', 1, 'stream.ndjson'); const stderr = this.wpath('planner', 1, 'stderr');
     for (const f of [stdout, stderr]) { try { fs.unlinkSync(f); } catch { /* none */ } }
     const args = W.buildArgs({ prompt, tier: pTier, sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, tools: W.READ_ONLY_TOOLS, allowedTools: W.READ_ONLY_TOOLS, appendSystemPrompt: 'You are the planner for an AOS-1 goal. You do not edit files. Output ONLY one JSON object.', settingsFile: path.join(this.P.workers, 'settings.json') });
-    const env = W.buildEnv({ base: this.env, goalId: goal.id, taskId: 'planner', attempt: 1, worktree: wt, policyFile, approvalsDir: this.P.approvals, tmpDir: this._tmp('planner'), decisionLog: path.join(this.P.workers, 'decisions.ndjson'), bin: this.bin });
+    const env = W.buildEnv({ base: this.env, goalId: goal.id, taskId: 'planner', attempt: 1, worktree: wt, policyFile, approvalsDir: this.P.approvals, tmpDir: this._tmp('planner'), decisionLog: path.join(this.P.workers, 'decisions.ndjson'), bin: this.bin, fakeEnv: this.testFakeEnv });
     let cmd;
     try { cmd = this._workerCommand(goal, args, env, { worktree: wt, tmpDir: env.TMPDIR, policyFile }); } catch (e) { return { error: e.message }; }
     const h = W.startWorker({ bin: cmd.bin, args: cmd.args, env, cwd: wt, stdoutFile: stdout, stderrFile: stderr, spawnFn: this.spawnFn });
@@ -1277,7 +1291,7 @@ export class Engine {
     const prompt = W.buildWorkerPrompt({ goal, task, deps, previous: task.orch.last_failure ? { check_output: task.orch.last_failure.check_output, denials: task.orch.last_failure.denials, note: task.orch.last_failure.note } : null, selfCheck: sc ? { max: sc.ctx.max } : null });
     fs.writeFileSync(this.wpath(task.id, seq, 'prompt.txt'), prompt, { mode: 0o600 });
     const args = W.buildArgs({ prompt, tier, sessionId, maxTurns: o.budgets.max_turns, maxBudgetUsd: o.budgets.attempt_usd_cap, settingsFile: path.join(this.P.workers, 'settings.json') });
-    const env = W.buildEnv({ base: this.env, goalId: goal.id, taskId: task.id, attempt: task.attempts, worktree: real, policyFile, approvalsDir: this.P.approvals, tmpDir: this._tmp(task.id), decisionLog: path.join(this.P.workers, 'decisions.ndjson'), bin: this.bin });
+    const env = W.buildEnv({ base: this.env, goalId: goal.id, taskId: task.id, attempt: task.attempts, worktree: real, policyFile, approvalsDir: this.P.approvals, tmpDir: this._tmp(task.id), decisionLog: path.join(this.P.workers, 'decisions.ndjson'), bin: this.bin, fakeEnv: this.testFakeEnv });
     const stdout = this.wpath(task.id, seq, 'stream.ndjson'); const stderr = this.wpath(task.id, seq, 'stderr');
     const cmd = this._workerCommand(goal, args, env, { worktree: real, tmpDir: env.TMPDIR, policyFile, selfCheckResDir: sc?.state.resDir });
     const h = W.startWorker({ bin: cmd.bin, args: cmd.args, env, cwd: wt, stdoutFile: stdout, stderrFile: stderr, spawnFn: this.spawnFn });
@@ -1325,7 +1339,7 @@ export class Engine {
     if (!av.ok) throw new Error(`worker OS sandbox unavailable (${av.reason}): orch.sandbox_workers is set, refusing to start the worker unsandboxed`);
     const w = wrapWorkerCommand([W.resolveBin(this.bin, env.PATH), ...args], { worktree, tmpDir, policyFile, approvalsDir: this.P.approvals, selfCheckResDir,
       decisionLog: path.join(this.P.workers, 'decisions.ndjson'), settingsFile: path.join(this.P.workers, 'settings.json'), hookDir: path.dirname(this.hookScript),
-      gitCommon: path.join(goal.orch.repo, '.git'), claudeBin: W.resolveBin(this.bin, env.PATH), sessionId: args[args.indexOf('--session-id') + 1], sysTmp: env.AOS_FAKE_STATE ? path.dirname(env.AOS_FAKE_STATE) : undefined /* test mode only: the scripted fake's scenario + state */, home: this.env.HOME, profileDir: path.join(this.dir, 'sandbox'), developerDirs: this._devDirs(),
+      gitCommon: path.join(goal.orch.repo, '.git'), claudeBin: W.resolveBin(this.bin, env.PATH), sessionId: args[args.indexOf('--session-id') + 1], sysTmp: this.testFakeEnv && env.AOS_FAKE_STATE ? path.dirname(env.AOS_FAKE_STATE) : undefined /* test mode only: the scripted fake's scenario + state */, home: this.env.HOME, profileDir: path.join(this.dir, 'sandbox'), developerDirs: this._devDirs(),
       bin: this.sandboxBin, ...(this.workerSandbox || {}) });
     return { bin: w.bin, args: w.args, sandboxed: true };
   }
