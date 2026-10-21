@@ -28,6 +28,11 @@ export function buildReport({ goal, tasks, state = null, approvals = [], denials
     const out = (t.orch?.attempt_log || []).map((a) => `${a.n}:${a.tier}:${a.outcome || 'running'}`).join(', ');
     L.push(`| ${t.id} | ${t.status} | ${t.orch?.model_tier} | ${t.attempts}/${t.max_attempts} | ${t.orch?.tokens?.new ?? 0} | ${out} |`);
   }
+  const runDeps = tasks.filter((t) => t.orch?.run_deps_notes?.length);
+  if (runDeps.length) {
+    L.push('', '## Dependencies the engine added at run time');
+    for (const t of runDeps) for (const n of t.orch.run_deps_notes) L.push(`- ${t.id}: ${escCtrl(n)}`);
+  }
   const errs = tasks.flatMap((t) => (t.orch?.attempt_log || []).filter((a) => a.stderr_tail).map((a) => ({ t, a })));
   if (errs.length) {
     L.push('', '## Worker errors (last lines of stderr)');
