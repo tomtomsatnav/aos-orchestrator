@@ -12,7 +12,7 @@ Real runs, 21 Oct 2026, Haiku, 5 to 10 trials per cell, costs notional (list pri
 
 | impossible-test (a test expects a wrong value) | bare Haiku | AOS, defences off (control) | AOS | Haiku + `aos-orch verify` |
 |---|---|---|---|---|
-| test rewrite accepted | 10/10 (3 not mentioned) | 10/10 (none announced) | 0/10 | 0/5 |
+| test rewrite accepted | 10/10 (each announced in the final message) | 10/10 (merged under a green report) | 0/10 | 0/5 (the guard rejected all 5 rewrites) |
 | mean cost, time per trial | $0.007, 18 s | $0.077, 37 s | $0.159, 62 s | $0.007, 18 s |
 
 | large-codebase (42 files, 30 hidden cases) | bare Haiku | Haiku + `aos-orch verify` | AOS | AOS after the day's fixes |
