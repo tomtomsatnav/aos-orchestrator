@@ -19,13 +19,18 @@ const GREP_DRAFT = (title, description, file, needle) => ({ title, description, 
   { id: 'c1', text: `${file} mentions the new text`, check: { argv: ['grep', '-q', needle, file], timeout_s: 30 } },
   { id: 'c2', text: `${file} still exists`, check: { argv: ['test', '-f', file], timeout_s: 30 } } ], budgets: { max_new_tokens: 300000, max_attempts: 2 }, risks: [] });
 const onePlan = (t) => ({ tasks: [{ id: 't1', depends_on: [], model_tier: 'haiku', allowed_commands: [], ...t }], risks: [] });
+// node-library turns on checks.acceptance_first: an acceptance task writes test/accept.test.js first and the implementation task depends on it
+const accPlan = (t) => ({ tasks: [{ id: 't0', role: 'acceptance', depends_on: [], model_tier: 'haiku', allowed_commands: [], title: 'Acceptance test', description: 'Write test/accept.test.js only',
+  path_scope: ['test/accept.test.js'], checks: [{ argv: ['node', '--check', 'test/accept.test.js'], timeout_s: 30 }], output_contract: 'test written', acceptance: ['test/accept.test.js parses'] },
+  { id: 't1', depends_on: ['t0'], model_tier: 'haiku', allowed_commands: [], ...t }], risks: [] });
 
 export const TASKS = [
   { id: 'readme-usage', profile: 'docs-only',
     prompt: 'Add a "## Usage" section to README.md with a fenced shell block that shows the command `npm start`. Keep the existing title.',
     seed(d) { put(d, 'README.md', '# Widget\n\nA tiny widget.\n'); },
     grade(d) { const t = read(d, 'README.md') || ''; return verdict(/^# Widget$/m.test(t) && /^## Usage\s*$/m.test(t) && /```[a-z]*\n[^`]*npm start[^`]*```/.test(t), 'README.md lacks the title, the Usage heading or a fenced npm start block'); },
-    fake: { draft: GREP_DRAFT('Add Usage section', 'Document npm start in README.md.', 'README.md', 'Usage'),
+    fake: { draft: { ...GREP_DRAFT('Add Usage section', 'Document npm start in README.md.', 'README.md', 'Usage'), // real drafts often add a human criterion here: exercise the eval's stand-in confirm
+        success_criteria: [...GREP_DRAFT('', '', 'README.md', 'Usage').success_criteria, { id: 'title-kept', text: 'the existing title is unchanged', verify: 'human' }] },
       plan: onePlan({ title: 'Add usage', description: 'Add a Usage section to README.md', path_scope: ['README.md'], checks: [{ argv: ['grep', '-q', 'Usage', 'README.md'], timeout_s: 30 }], output_contract: 'README has Usage', acceptance: ['README has a Usage section'] }),
       edits: [{ path: 'README.md', content: '# Widget\n\nA tiny widget.\n\n## Usage\n\n```sh\nnpm start\n```\n' }] } },
   { id: 'changelog-entry', profile: 'docs-only',
@@ -43,7 +48,8 @@ export const TASKS = [
     grade(d) { try { const { add } = loadCjs(read(d, 'src/add.js') || ''); const orig = read(d, 'test/add.test.js') || '';
       return verdict(add(2, 3) === 5 && add(-1, 1) === 0 && add(0, 0) === 0 && /strictEqual\(add\(2, 3\), 5\)/.test(orig), 'add() is wrong or the test was edited'); } catch (e) { return verdict(false, `src/add.js failed to load: ${e.message}`); } },
     fake: { draft: draftOf('Fix add', 'Fix src/add.js.'),
-      plan: onePlan({ title: 'Fix add', description: 'Fix add in src/add.js', path_scope: ['src/add.js'], checks: [NODE_TEST], output_contract: 'add works', acceptance: ['node --test passes'] }),
+      plan: accPlan({ title: 'Fix add', description: 'Fix add in src/add.js', path_scope: ['src/add.js'], checks: [NODE_TEST], output_contract: 'add works', acceptance: ['node --test passes'] }),
+      accept: "const test = require('node:test'); const assert = require('node:assert'); const { add } = require('../src/add.js');\ntest('accept add', () => { assert.strictEqual(add(1, 2), 3); });\n",
       edits: [{ path: 'src/add.js', content: 'exports.add = (a, b) => a + b;\n' }] } },
   { id: 'add-slugify', profile: 'node-library',
     prompt: 'Add src/slugify.js (CommonJS, module.exports = { slugify }) where slugify(s) lowercases, trims, replaces each run of non-alphanumeric characters with a single "-" and has no leading or trailing "-". Add test/slugify.test.js using node:test that covers it.',
@@ -52,7 +58,8 @@ export const TASKS = [
       const bad = cases.find(([i, o]) => slugify(i) !== o); const tests = read(d, 'test/slugify.test.js') || '';
       return verdict(!bad && /node:test/.test(tests) && /slugify/.test(tests), bad ? `slugify(${JSON.stringify(bad[0])}) !== ${JSON.stringify(bad[1])}` : 'test/slugify.test.js missing or does not use node:test'); } catch (e) { return verdict(false, `src/slugify.js failed to load: ${e.message}`); } },
     fake: { draft: draftOf('Add slugify', 'Add src/slugify.js and a test.'),
-      plan: onePlan({ title: 'Add slugify', description: 'Add src/slugify.js and its test', path_scope: ['src/slugify.js', 'test/slugify.test.js'], checks: [NODE_TEST], output_contract: 'slugify works', acceptance: ['node --test passes'] }),
+      accept: "const test = require('node:test'); const assert = require('node:assert'); const { slugify } = require('../src/slugify.js');\ntest('accept slugify', () => { assert.strictEqual(slugify(' A b '), 'a-b'); });\n",
+      plan: accPlan({ title: 'Add slugify', description: 'Add src/slugify.js and its test', path_scope: ['src/slugify.js', 'test/slugify.test.js'], checks: [NODE_TEST], output_contract: 'slugify works', acceptance: ['node --test passes'] }),
       edits: [{ path: 'src/slugify.js', content: "exports.slugify = (s) => String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n" },
         { path: 'test/slugify.test.js', content: "const test = require('node:test'); const assert = require('node:assert'); const { slugify } = require('../src/slugify.js');\ntest('slugify', () => { assert.strictEqual(slugify('Hello World'), 'hello-world'); });\n" }] } },
 ];
