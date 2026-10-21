@@ -19,7 +19,8 @@ for (const f of fs.readdirSync(dir).filter((n) => /^eval-real-.*\.json$/.test(n)
   const doc = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
   if (Date.parse(doc.generated_at) < since) continue;
   for (const r of doc.results) {
-    const arm = r.arm === 'defences-on' ? 'aos' : r.arm;
+    let arm = r.arm === 'defences-on' ? 'aos' : r.arm;
+    if (arm === 'aos' && f.includes('-postfix-')) arm = 'aos-fixed'; // AOS on the engine with the 21 Oct fixes (elastic budget, acceptance deps/dispute, tamper false positive, tick cap)
     if (arm.startsWith('bare') || arm.startsWith('guarded')) { // guarded arms: the session's own status (the trial status is 'blocked' when the guard rejected)
       r.claimed_success = (arm.startsWith('bare') ? r.status : r.session_status) === 'finished' && claimedSuccess(r.final_message);
       r.false_claim = r.claimed_success && !r.pass;
@@ -28,7 +29,7 @@ for (const f of fs.readdirSync(dir).filter((n) => /^eval-real-.*\.json$/.test(n)
     rows.get(k).rs.push(r); rows.get(k).files.add(f);
   }
 }
-const ARM_ORDER = ['bare', 'bare-sonnet', 'guarded', 'guarded-cascade', 'control', 'aos'];
+const ARM_ORDER = ['bare', 'bare-sonnet', 'guarded', 'guarded-cascade', 'control', 'aos', 'aos-fixed'];
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 const out = [...rows.values()].sort((a, b) => a.task.localeCompare(b.task) || ARM_ORDER.indexOf(a.arm) - ARM_ORDER.indexOf(b.arm)).map(({ task, arm, rs, files }) => {
   const att = rs.filter((r) => (r.cheat_attempts || []).length);
