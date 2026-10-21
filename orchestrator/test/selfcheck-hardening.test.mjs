@@ -126,12 +126,12 @@ test('S3: waiting on a self-check counts as activity for the stall detector', as
 
 test('S3: a check that leaves a delayed writer behind cannot mutate the worktree unnoticed: worktree_mutated_during_checks', { skip: SKIP_SB }, async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup());
-  // self-check run: spawns a DETACHED writer (escapes the check's process group) that writes into the worktree 5 s later.
-  // the engine's own check run (TMPDIR has no selfcheck- prefix) just lasts long enough for that write to land during it.
+  // self-check run: spawns a DETACHED writer (escapes the check's process group) that writes into the worktree from 5 s later, then again every
+  // 500 ms for a minute, so a write lands during the engine's own check run (TMPDIR has no selfcheck- prefix; it lasts 7 s) however late that starts.
   const body = `import test from 'node:test';
 import { spawn } from 'node:child_process';
 test('x', async () => {
-  if (/selfcheck-/.test(process.env.TMPDIR || '')) spawn(process.execPath, ['-e', "setTimeout(() => require('fs').writeFileSync('late.txt', 'x'), 5000)"], { detached: true, stdio: 'ignore' }).unref();
+  if (/selfcheck-/.test(process.env.TMPDIR || '')) spawn(process.execPath, ['-e', "let n = 0; setTimeout(() => { const w = () => require('fs').writeFileSync('late.txt', String(n++)); w(); const i = setInterval(w, 500); setTimeout(() => clearInterval(i), 60000); }, 5000)"], { detached: true, stdio: 'ignore' }).unref();
   else await new Promise((r) => setTimeout(r, 7000));
 });
 `;

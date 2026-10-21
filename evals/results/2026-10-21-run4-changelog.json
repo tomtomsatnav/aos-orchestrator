@@ -1,0 +1,118 @@
+{
+  "generated_at": "2026-10-21T04:56:47.021Z",
+  "mode": "real",
+  "tier": "haiku",
+  "summary": {
+    "k": 6,
+    "tasks": [
+      {
+        "task": "changelog-entry",
+        "trials": 6,
+        "passes": 6,
+        "pass_all_k": true,
+        "mean_new_tokens": 12307,
+        "mean_wall_s": 28.9
+      }
+    ],
+    "pass_hat_k": 1,
+    "pass_rate": 1,
+    "mean_new_tokens": 12307,
+    "mean_wall_s": 28.9
+  },
+  "results": [
+    {
+      "task": "changelog-entry",
+      "trial": 1,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12500,
+      "notional_usd": 0.063142,
+      "wall_s": 29.6,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c3",
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-3280"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 2,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12319,
+      "notional_usd": 0.060746,
+      "wall_s": 31.6,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-dcde"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 3,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12561,
+      "notional_usd": 0.062004,
+      "wall_s": 30.8,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-4d25"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 4,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 11547,
+      "notional_usd": 0.061605,
+      "wall_s": 25.9,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c3",
+        "c4"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-b61c"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 5,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12284,
+      "notional_usd": 0.059912,
+      "wall_s": 27.7,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4",
+        "c5"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-45f8"
+    },
+    {
+      "task": "changelog-entry",
+      "trial": 6,
+      "pass": true,
+      "why": "ok",
+      "status": "achieved",
+      "new_tokens": 12629,
+      "notional_usd": 0.064218,
+      "wall_s": 27.7,
+      "plan_needed_approval": false,
+      "human_confirm": [
+        "c4",
+        "c5"
+      ],
+      "goal": "g-20261021-add-1-1-0-changelog-entr-e2b1"
+    }
+  ]
+}
