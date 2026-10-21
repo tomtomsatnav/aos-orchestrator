@@ -362,3 +362,5 @@ export const TASKS = [
 // larger tasks live in their own files
 import { PARALLEL_TASK, PARALLEL_TASK_8 } from './tasks-parallel.mjs';
 TASKS.push(PARALLEL_TASK, PARALLEL_TASK_8);
+import { LARGE_TASK } from './tasks-large.mjs';
+TASKS.push(LARGE_TASK);
