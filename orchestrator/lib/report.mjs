@@ -12,6 +12,7 @@ export function buildReport({ goal, tasks, state = null, approvals = [], denials
     `- repo: \`${o.repo}\`  base: \`${o.base_branch}\` @ \`${(o.base_commit || '').slice(0, 10)}\`  integration: \`${o.integration_branch}\``,
     `- new tokens: ${o.usage.new_tokens}  cache-read tokens: ${o.usage.cache_read_tokens}  workers started: ${o.usage.workers_started}`,
     `- notional cost (list price, NOT money spent on a subscription): $${(o.usage.notional_usd || 0).toFixed(4)}`);
+  if (o.budget_extensions?.length) L.push(`- token budget grew ${o.budget_extensions.length}x as tasks merged (${o.budget_extensions.map((x) => `${x.from} to ${x.to}`).join(', ')}); now ${o.budgets.max_new_tokens}`);
   if (o.claude_version_start) L.push(`- claude CLI version at first dispatch: \`${o.claude_version_start}\``);
   const drift = versionDrift(o.claude_version_start, tasks);
   if (drift.length) L.push(`- **WARN: the claude CLI version changed during this goal** (started with \`${o.claude_version_start}\`): ${drift.map((d) => `${d.task}#${d.n} ran on \`${d.version}\``).join(', ')}. Results may not be comparable.`);

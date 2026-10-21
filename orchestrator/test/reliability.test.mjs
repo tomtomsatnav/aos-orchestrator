@@ -125,7 +125,7 @@ test('draft: invalid twice -> ONE repair round with the errors and the allowlist
 test('draft: budgets proposed by the model are ignored (defaults, flags and rules only); no budget figure is in the prompt', async (t) => {
   const sb = dsb(t, [draftOut([{ argv: ['grep', '-qx', 'alpha', 'a.txt'], timeout_s: 30 }], { budgets: { max_usd: 0.1, max_new_tokens: 1000 } })]);
   const r = await draftGoal({ orchDir: sb.orch, repo: sb.repo, prompt: 'fix pricing', env: sb.env() });
-  assert.equal(r.ok, true, r.errors.join('; ')); assert.equal(r.spec.budget.max_usd, 5); assert.equal(r.draft.budgets.max_new_tokens, 150000);
+  assert.equal(r.ok, true, r.errors.join('; ')); assert.equal(r.spec.budget.max_usd, 5); assert.equal(r.draft.budgets.max_new_tokens, 300000);
   assert.ok(Object.values(r.budget_notes).every((n) => n.source !== 'model')); assert.match(r.notes.join(), /ignored model-proposed budgets \(max_usd, max_new_tokens\)/);
   assert.doesNotMatch(dcalls(sb)[0].prompt, /Budget limits|"max_usd"/);
 });

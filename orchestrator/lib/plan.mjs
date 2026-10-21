@@ -323,6 +323,7 @@ export function reviewView(tasks, goal = null) {
   const W = goal?.orch?.plan_warnings || {};
   const view = tasks.map((t) => { const o = t.orch || t; return { ...(text === null ? {} : beyondPrompt(o.path_scope, text)), ...(W[t.id]?.length ? { warnings: [...W[t.id]] } : {}), id: t.id, ...(o.role === 'acceptance' ? { role: 'acceptance' } : {}), ...(o.allow_skip?.length ? { allow_skip: [...o.allow_skip] } : {}), title: t.title ?? '', description: o.description ?? '', output_contract: t.output_contract ?? '', acceptance: [...(t.acceptance || [])], model_tier: o.model_tier, path_scope: [...o.path_scope], depends_on: [...(t.depends_on || [])],
     allowed_commands: [...(o.allowed_commands || [])], checks: (o.checks || []).map((c) => ({ command: c.argv.join(' '), argv: c.argv, timeout_s: c.timeout_s })) }; });
+  view.token_budget_note = goal?.orch?.token_budget_note || null;
   view.goal_warnings = [...(W.goal || [])]; // not serialised with the array: renderReview prints them
   return view;
 }
@@ -356,6 +357,7 @@ export function renderReview(view, rulesText, { selfCheck = false } = {}) {
     L.push(`  worker commands: ${t.allowed_commands.length ? `${t.allowed_commands.map(e).join(' | ')}${sc ? `; ${sc}` : ''}` : sc ? `(none; read-only inspection; ${sc})` : '(none; read-only inspection only)'}`);
     for (const c of t.checks) L.push(`  check (sandboxed, ${e(c.timeout_s)}s): ${c.argv.map(arg).join(' ')}`);
   }
+  if (view.token_budget_note) L.push(`token budget: ${view.token_budget_note}`);
   if (rulesText) L.push(...String(rulesText).split('\n'));
   return L.map(e).join('\n');
 }
