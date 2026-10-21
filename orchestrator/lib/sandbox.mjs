@@ -49,7 +49,19 @@ export function developerDirs(env = process.env, platform = process.platform) {
   if (env === process.env) devDirCache = r;
   return r;
 }
-const devParams = (cfg) => { const [a, b] = cfg.developerDirs || developerDirs(); const none = '/nonexistent-aos-sandbox'; return { DEV_DIR0: a || none, DEV_DIR1: b || a || none }; };
+/** Xcode's git/xcrun shims load frameworks from sibling dirs of Developer (<X>.app/Contents/{SharedFrameworks,Frameworks,PlugIns}): read the whole .app/Contents, nothing above it. */
+export const devReadRoot = (d) => (/^(\/[^/]+)+\/[^/]+\.app\/Contents\/Developer$/.test(d) ? path.dirname(d) : d);
+let xcrunRx;
+/** The xcrun shim caches tool lookups in <confstr DARWIN_USER_TEMP_DIR>/xcrun_db-XXXX (ignores $TMPDIR). Only files with that prefix in that one dir. */
+export function xcrunDbRegex(platform = process.platform) {
+  if (platform !== 'darwin') return '^/nonexistent-aos-sandbox$';
+  if (!xcrunRx) {
+    let d = ''; try { d = execFileSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim(); } catch { /* no cache dir: git may print a cache warning */ }
+    xcrunRx = d && path.isAbsolute(d) ? `^${reEscape(fs.realpathSync(d))}/xcrun_db[^/]*$` : '^/nonexistent-aos-sandbox$';
+  }
+  return xcrunRx;
+}
+const devParams = (cfg) => { const [a0, b0] = cfg.developerDirs || developerDirs(); const a = a0 && devReadRoot(a0), b = b0 && devReadRoot(b0); const none = '/nonexistent-aos-sandbox'; return { DEV_DIR0: a || none, DEV_DIR1: b || a || none, XCRUN_DB_RX: cfg.xcrunDbRx || xcrunDbRegex() }; };
 
 /** Static profile text. `ports` = number of allowed loopback ports (each is the parameter PORT<i>). No caller data goes in here. */
 export function buildProfile({ ports = 0, loopback = false } = {}) {
@@ -62,6 +74,7 @@ export function buildProfile({ ports = 0, loopback = false } = {}) {
     `(allow file-read* ${SYSTEM_READ.map((p) => `(subpath "${p}")`).join(' ')} (literal "/"))`,
     '(allow file-read* (subpath (param "NODE_PREFIX")) (subpath (param "WORKTREE")) (subpath (param "TMPDIR_CHECK")) (subpath (param "TOOL_CACHE")) (subpath (param "GUARD_DIR")))', // GUARD_DIR: the engine's read-only test-harness preload (harness-guard.mjs)
     '(allow file-read* (subpath (param "DEV_DIR0")) (subpath (param "DEV_DIR1")))',
+    '(allow file-read* file-write* (regex (param "XCRUN_DB_RX")))', // xcrun shim lookup cache (git/clang behind /usr/bin shims)
     '(allow file-read* file-write* (subpath (param "WORKTREE")) (subpath (param "TMPDIR_CHECK")))',
     '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))',
     ';; deny AFTER the allows: later rules win',
@@ -108,6 +121,7 @@ export function buildWorkerProfile() {
     '  (subpath (param "SYS_TMP")) (literal (param "SCRATCH_ROOT")) (subpath (param "SCRATCH_DIR")) (subpath (param "SESSION_ENV")) (subpath (param "PROJECT_DIR"))',
     `  ${CLAUDE_WRITE_DIRS.map((d) => `(subpath (string-append (param "CLAUDE_DIR") "/${d}"))`).join(' ')}`,
     '  (subpath (string-append (param "HOME") "/.local/state/claude")))',
+    '(allow file-read* file-write* (regex (param "XCRUN_DB_RX")))', // xcrun shim lookup cache in the per-user temp dir (git behind /usr/bin)
     ';; the Bash tool tracks its cwd in /tmp/claude-<hex>-cwd (hard-coded /tmp, not TMPDIR)',
     '(allow file-read* file-write* (regex #"^/private/tmp/claude-[0-9a-f]+-cwd$"))',
     '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (regex #"^/dev/fd/") (regex #"^/dev/ttys"))',

@@ -147,7 +147,10 @@ test('engine: a worker runs its approved check through the engine (sandboxed, fe
   const results = stream.filter((o) => o.type === 'user').map((o) => String(o.message.content[0].content)).filter((c) => /self-check/.test(c));
   assert.equal(results.length, 3);
   assert.match(results[0], /self-check 1 of 2/); assert.match(results[0], /<<<UNTRUSTED-[0-9a-f]{16} self-check output of node --test a\.test\.mjs\n[\s\S]*MARK-7Q[\s\S]*\nUNTRUSTED-[0-9a-f]{16}>>>$/);
-  assert.match(results[0], /PROBE write=blocked net=(blocked|timeout)/, 'the self-check ran in the check sandbox: no write outside the worktree, no network');
+  // macOS: /tmp is shared, so the write is denied. Linux (bwrap): /tmp is a private tmpfs, so a sibling of the worktree under /tmp can be
+  // "written" inside the sandbox; it never reaches the host, which the existsSync assertion below proves.
+  const writeRe = process.platform === 'linux' ? 'write=(blocked|WROTE)' : 'write=blocked';
+  assert.match(results[0], new RegExp(`PROBE ${writeRe} net=(blocked|timeout)`), 'the self-check ran in the check sandbox: no write outside the worktree, no network');
   assert.match(results[2], /limit reached \(2 self-checks per attempt\)/);
   assert.equal(fs.existsSync(outside), false);
   assert.ok(ev.some((e) => e.type === 'orch.check.passed' && e.task_id === 't1'), 'the engine still ran the authoritative check itself');
