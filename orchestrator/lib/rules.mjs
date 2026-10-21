@@ -7,7 +7,7 @@ import { validateSchema } from './schema.mjs';
 import { CTRL_RE, escCtrl, q } from './ctrl.mjs';
 import { globCompileProblem } from './glob.mjs';
 import { allowlistEntryProblem } from './policy.mjs';
-import { canonical, sha256, UNSAFE_CHECK_CMDS } from './plan.mjs';
+import { canonical, sha256, UNSAFE_CHECK_CMDS, acceptanceStartTier, ACCEPTANCE_MIN_TIER_DEFAULT } from './plan.mjs';
 import { DEFAULT_BUDGETS } from './state.mjs';
 import { PROFILES } from './profiles.mjs';
 import { SELF_CHECKS_MAX_DEFAULT } from './selfcheck.mjs';
@@ -38,9 +38,9 @@ export const DEFAULT_RULES = Object.freeze({
     approval: { wait_in_hook_s: 20, ttl_s: 86400, grant_scopes: ['once', 'task'] },
     sandbox: 'off',
   },
-  plan: { approval: 'required', planner_tier: 'opus', planner_timeout_s: 300, draft_tier: 'haiku', max_tasks: 12, tiers: ['haiku', 'sonnet', 'opus'], max_start_tier: 'opus', scope_deny: [],
+  plan: { approval: 'required', planner_tier: 'opus', planner_timeout_s: 300, draft_tier: 'haiku', max_tasks: 12, tiers: ['haiku', 'sonnet', 'opus'], max_start_tier: 'opus', acceptance_min_tier: 'sonnet', scope_deny: [],
     auto_approvable_checks: [c('grep', 'grep'), c('test', 'test'), c('diff', 'diff'), c('cmp', 'cmp')] },
-  checks: { allowlist: [], max_timeout_s: 3600, sandbox: 'required', localhost_ports: [], allow_loopback: false, protect_existing_tests: true, acceptance_first: false, literal_copy: 'warn', harness_tamper: 'fail' },
+  checks: { allowlist: [], max_timeout_s: 3600, sandbox: 'required', localhost_ports: [], allow_loopback: false, protect_existing_tests: true, acceptance_first: false, acceptance_dispute: true, literal_copy: 'warn', harness_tamper: 'fail' },
   retry: { max_attempts: 3, ladder: ['haiku', 'sonnet', 'opus'], same_tier_retries: { denied: 1 }, no_escalate: ['merge_conflict', 'plan_tampered', 'repo_instructions_changed'], uncertain_limit_max: 2 },
   budgets: { max_new_tokens: 2000000, max_wall_clock_s: 7200, max_ticks: 500, max_usd: 5, attempt_usd_cap: 2, task_wall_clock_s: 900, stall_after_s: 300, max_turns: 30,
     soft_frac: 0.8, hard_grace_s: 60, draft_usd_cap: 0.1 },
@@ -76,8 +76,8 @@ export const RULES_SCHEMA = obj({
     self_check: { type: 'boolean' }, self_checks_max: int(1, 50), // worker.self_check (lib/selfcheck.mjs); absent from DEFAULT_RULES (= off, 5 runs) so the default rules hash is unchanged
   }),
   plan: obj({ approval: enums('required', 'auto'), planner_tier: enums(...TIER), draft_tier: enums('haiku', 'sonnet'), planner_timeout_s: int(1, 1800), max_tasks: int(1, 50),
-    tiers: { ...list(enums(...TIER), 3), minItems: 1 }, max_start_tier: enums(...TIER), scope_deny: globRules, auto_approvable_checks: cmdRules }),
-  checks: obj({ allowlist: cmdRules, max_timeout_s: int(1, 3600), sandbox: enums('required', 'off'), localhost_ports: list(int(1, 65535), 16), allow_loopback: { type: 'boolean' }, protect_existing_tests: { type: 'boolean' }, acceptance_first: { type: 'boolean' }, literal_copy: enums('warn', 'fail'), harness_tamper: enums('warn', 'fail') }),
+    tiers: { ...list(enums(...TIER), 3), minItems: 1 }, max_start_tier: enums(...TIER), acceptance_min_tier: enums(...TIER), scope_deny: globRules, auto_approvable_checks: cmdRules }),
+  checks: obj({ allowlist: cmdRules, max_timeout_s: int(1, 3600), sandbox: enums('required', 'off'), localhost_ports: list(int(1, 65535), 16), allow_loopback: { type: 'boolean' }, protect_existing_tests: { type: 'boolean' }, acceptance_first: { type: 'boolean' }, acceptance_dispute: { type: 'boolean' }, literal_copy: enums('warn', 'fail'), harness_tamper: enums('warn', 'fail') }),
   retry: obj({ max_attempts: int(1, 10), ladder: { ...list(enums(...TIER), 3), minItems: 1 }, same_tier_retries: { type: 'object' }, no_escalate: list(str(48), 32), uncertain_limit_max: int(1, 5) }),
   budgets: obj({ max_new_tokens: int(1, 1e10), max_wall_clock_s: int(1, 31536000), max_ticks: int(1, 1e7), max_usd: pos(10000), attempt_usd_cap: pos(10000), task_wall_clock_s: int(1, 86400),
     stall_after_s: int(1, 86400), max_turns: int(1, 1000), soft_frac: num(0, 1), hard_grace_s: int(0, 3600), draft_usd_cap: pos(100) }),
@@ -217,11 +217,11 @@ const SPEC = [
   ['retry.same_tier_retries', 'minmap'],
   ['worker.paths.on_outside_scope', 'rank', ['ask', 'deny']], ['worker.sandbox', 'rank', ['off', 'required']], ['plan.approval', 'rank', ['auto', 'required']],
   ['checks.sandbox', 'rank', ['off', 'required']], ['plan.planner_tier', 'rank', ['haiku', 'sonnet', 'opus']], ['plan.draft_tier', 'rank', ['haiku', 'sonnet']],
-  ['plan.max_start_tier', 'rank', ['opus', 'sonnet', 'haiku']], ['parallel.soft_budget_blocks_tier', 'rank', ['none', 'opus']],
+  ['plan.max_start_tier', 'rank', ['opus', 'sonnet', 'haiku']], ['plan.acceptance_min_tier', 'rank', ['haiku', 'sonnet', 'opus']], // a stronger acceptance-test writer is the tighter value ['parallel.soft_budget_blocks_tier', 'rank', ['none', 'opus']],
   ['retry.ladder', 'subseq'],
   ['parallel.overlapping_scopes', 'pinned'], ['merge.strategy', 'pinned'], ['merge.on_conflict', 'pinned'], ['done.criteria_when', 'pinned'], ['done.on_unmet', 'pinned'],
   ['ask_human.on_pending_approval', 'pinned'], ['ask_human.on_7d_hold', 'pinned'], ['ask_human.on_budget_hard', 'pinned'], ['ask_human.on_plan_with_commands', 'pinned'], ['ask_human.on_human_criterion', 'pinned'],
-  ['checks.allow_loopback', 'rank', [true, false]], ['checks.protect_existing_tests', 'rank', [false, true]], ['checks.acceptance_first', 'rank', [false, true]], ['checks.literal_copy', 'rank', ['warn', 'fail']], ['checks.harness_tamper', 'rank', ['warn', 'fail']], // true = a check may listen on / connect to 127.0.0.1 (looser); true = original tests are re-run (tighter)
+  ['checks.allow_loopback', 'rank', [true, false]], ['checks.protect_existing_tests', 'rank', [false, true]], ['checks.acceptance_first', 'rank', [false, true]], ['checks.acceptance_dispute', 'rank', [true, false]], ['checks.literal_copy', 'rank', ['warn', 'fail']], ['checks.harness_tamper', 'rank', ['warn', 'fail']], // true = a check may listen on / connect to 127.0.0.1 (looser); true = original tests are re-run (tighter)
   ['repo_config.trust', 'safe', false],
   ['review.advisory', 'safe', false], ['review.tier', 'safe', 'haiku'],
   ['worker.self_check', 'safe', false], ['worker.self_checks_max', 'mincap', SELF_CHECKS_MAX_DEFAULT], // true = the engine runs a worker's approved checks on request (looser)
@@ -518,8 +518,9 @@ export function summarizeRules(snap, goal = null, profile = null, limitsOverride
       ask_on: [...pol.bash.ask_on], approval_wait_s: pol.approval.wait_in_hook_s, approval_ttl_s: pol.approval.ttl_s,
       self_check: c.worker.self_check === true, self_checks_max: c.worker.self_checks_max ?? SELF_CHECKS_MAX_DEFAULT },
     denies: { bash: [...pol.bash.deny], paths: [...pol.paths.deny], patterns: pol.bash.deny_patterns.length, scope_deny: c.plan.scope_deny.map((e) => e.glob), floor: ['.git', '.claude/settings*.json', '.aos', '~/.claude', '~/.ssh', '~/.config'] },
-    checks: { criteria: goal ? (goal.success_criteria || []).filter((x) => Array.isArray(x.check?.argv)).map((x) => x.check.argv.map(q).join(' ')) : [], allowlist: c.checks.allowlist.map((e) => e.cmd), sandbox: c.checks.sandbox, max_timeout_s: c.checks.max_timeout_s, localhost_ports: [...c.checks.localhost_ports], allow_loopback: c.checks.allow_loopback === true, protect_existing_tests: c.checks.protect_existing_tests === true, acceptance_first: c.checks.acceptance_first === true, literal_copy: c.checks.literal_copy === 'fail' ? 'fail' : 'warn', harness_tamper: c.checks.harness_tamper === 'warn' ? 'warn' : 'fail' },
-    plan: { approval: c.plan.approval, max_tasks: goal ? effectiveLimits(goal).max_tasks : c.plan.max_tasks, tiers: [...c.plan.tiers], max_start_tier: c.plan.max_start_tier },
+    checks: { criteria: goal ? (goal.success_criteria || []).filter((x) => Array.isArray(x.check?.argv)).map((x) => x.check.argv.map(q).join(' ')) : [], allowlist: c.checks.allowlist.map((e) => e.cmd), sandbox: c.checks.sandbox, max_timeout_s: c.checks.max_timeout_s, localhost_ports: [...c.checks.localhost_ports], allow_loopback: c.checks.allow_loopback === true, protect_existing_tests: c.checks.protect_existing_tests === true, acceptance_first: c.checks.acceptance_first === true, acceptance_dispute: c.checks.acceptance_dispute !== false, literal_copy: c.checks.literal_copy === 'fail' ? 'fail' : 'warn', harness_tamper: c.checks.harness_tamper === 'warn' ? 'warn' : 'fail' },
+    plan: { approval: c.plan.approval, max_tasks: goal ? effectiveLimits(goal).max_tasks : c.plan.max_tasks, tiers: [...c.plan.tiers], max_start_tier: c.plan.max_start_tier,
+      acceptance_min_tier: c.plan.acceptance_min_tier ?? ACCEPTANCE_MIN_TIER_DEFAULT, acceptance_start_tier: acceptanceStartTier('haiku', c).tier },
     limits: { ...(goal ? effectiveLimits(goal) : { max_usd: c.budgets.max_usd, max_new_tokens: c.budgets.max_new_tokens, max_wall_clock_s: c.budgets.max_wall_clock_s, max_ticks: c.budgets.max_ticks, max_attempts: c.retry.max_attempts, max_parallel: c.parallel.max_parallel }), ...(limitsOverride || {}) }, // after a budget patch, what goal.json enforces
     loosenings: lo, dropped: dr, notes: [...(snap.notes || [])].slice(0, 10),
   };
@@ -538,6 +539,12 @@ export function renderRulesSummary(sm) {
   L.push(`  checks: ${sm.checks.sandbox === 'required' ? 'sandboxed' : 'NOT sandboxed'}; allowlist: ${sm.checks.allowlist.map(q).join(', ') || '(none)'}${sm.checks.criteria?.length ? `; success-criteria checks (${sm.checks.criteria.length}): ${cmdList(sm.checks.criteria, 6)}` : ''}${sm.checks.localhost_ports.length ? `; localhost ports ${sm.checks.localhost_ports.join(',')}` : ''}; loopback (127.0.0.1 listen/connect): ${sm.checks.allow_loopback ? 'ALLOWED (still no external network; on macOS this is HOST-WIDE localhost, so a check can reach local services such as the AOS dashboard; on Linux it is a private namespace)' : 'blocked'}; original tests re-run at verify: ${sm.checks.protect_existing_tests ? 'yes' : 'no'}; max ${sm.checks.max_timeout_s}s`);
   L.push(`  anti-cheat: always on (test counts, skips, config, deleted tests); acceptance tests written first: ${sm.checks.acceptance_first ? 'yes' : 'no'}; literal-copy heuristic: ${sm.checks.literal_copy}; harness tamper (assert/test internals): ${sm.checks.harness_tamper}`);
   L.push(`  plan approval: ${sm.plan.approval}; max ${sm.plan.max_tasks} tasks; tiers ${sm.plan.tiers.map(q).join('/')}; start at most ${q(sm.plan.max_start_tier)}`);
+  { // acceptance tasks (role "acceptance"; required by checks.acceptance_first)
+    const at = sm.plan.acceptance_start_tier; const min = sm.plan.acceptance_min_tier;
+    L.push(`  acceptance tests: written by a task that starts at least at ${q(at)} (plan.acceptance_min_tier ${q(min)}${TIER.indexOf(at) < TIER.indexOf(min) ? `, CAPPED by your tier limits (plan.max_start_tier ${q(sm.plan.max_start_tier)}, plan.tiers): ${q(at)} it is` : ''}); dispute: ${sm.checks.acceptance_dispute
+      ? 'on (checks.acceptance_dispute: when an implementation task finally fails on an acceptance test, that acceptance task is re-checked ONCE at a stronger tier against the goal; it may not drop tests or assertions, and any revision is listed in the report for you to check)'
+      : 'off (an implementation task that fails on an acceptance test blocks the goal)'}`);
+  }
   L.push(`  limits: $${sm.limits.max_usd}, ${sm.limits.max_new_tokens} tokens, ${sm.limits.max_wall_clock_s}s, ${sm.limits.max_attempts} attempts/task, ${sm.limits.max_parallel} parallel`);
   const prof = sm.loosenings.filter((l) => l.kind === 'profile_allowlist'); const real = sm.loosenings.filter((l) => l.kind !== 'profile_allowlist' && l.kind !== 'profile_self_check');
   if (real.length) L.push(`LOOSENINGS YOU ARE APPROVING (${real.length}):`);
