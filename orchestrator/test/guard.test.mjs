@@ -104,3 +104,16 @@ test('aos-orch verify: exit 0 accepted / 1 rejected, --json, usage errors exit 2
     assert.equal(run().status, 2);
   } finally { rm(d); rm(orch); }
 });
+
+test('verifyTree: a malicious repo-local git config (filter, textconv, pager, fsmonitor) is never executed; gitEnv drops global and system config', { skip, timeout: 120000 }, async () => {
+  const { gitEnv } = await import('../lib/git.mjs');
+  const e = gitEnv({ PATH: '/usr/bin', HOME: '/h' }); assert.equal(e.GIT_CONFIG_GLOBAL, '/dev/null'); assert.equal(e.GIT_CONFIG_NOSYSTEM, '1');
+  const d = repoWith({ 'src/add.js': ADD, 'test/add.test.js': ADD_TEST, '.gitattributes': '*.js filter=evil diff=evil\n' });
+  const marker = path.join(os.tmpdir(), `aos-guard-marker-${process.pid}-${Date.now()}`);
+  try {
+    const cmd = `touch ${marker}`;
+    for (const [k, v] of [['filter.evil.clean', cmd], ['filter.evil.smudge', cmd], ['filter.evil.process', cmd], ['diff.evil.textconv', cmd], ['core.pager', cmd], ['core.fsmonitor', cmd], ['core.sshCommand', cmd]]) git(d, 'config', k, v);
+    put(d, 'src/add.js', 'exports.add = (a, b) => a + b;\n');
+    for (const opts of [{ repo: d }, { repo: d, tree: 'HEAD' }]) { await verifyTree(opts); assert.equal(fs.existsSync(marker), false, `a repo-local driver ran (${JSON.stringify(Object.keys(opts))})`); }
+  } finally { rm(d); fs.rmSync(marker, { force: true }); }
+});

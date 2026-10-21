@@ -55,7 +55,10 @@ async function resolveBase(repo, base) {
 
 /** Extract `ref` of `repo` (git archive, bounded) into `dest`. */
 async function extractRef(repo, ref, dest, tarFile) {
-  await gitRaw(repo, ['archive', '--format=tar', '-o', tarFile, ref]);
+  // `git archive` runs filter.<name>.smudge/process drivers named by the tree's .gitattributes: blank every driver the repo config defines
+  const names = new Set(String(await gitRaw(repo, ['config', '--name-only', '--get-regexp', '^filter\\.']).catch(() => '')).split('\n').map((l) => /^(filter\..+)\.[^.]+$/.exec(l)?.[1]).filter(Boolean));
+  const blank = [...names].flatMap((n) => ['smudge', 'clean', 'process', 'required'].flatMap((k) => ['-c', `${n}.${k}=${k === 'required' ? 'false' : ''}`]));
+  await gitRaw(repo, [...blank, 'archive', '--format=tar', '-o', tarFile, ref]);
   if (fs.statSync(tarFile).size > LIMITS.total_bytes) throw new Error(`the tree of ${ref} is larger than ${LIMITS.total_bytes} bytes`);
   await new Promise((resolve, reject) => execFile('tar', ['-xf', tarFile, '-C', dest], { timeout: 120000 }, (e) => (e ? reject(new Error(`tar failed: ${e.message.slice(0, 120)}`)) : resolve())));
   fs.rmSync(tarFile, { force: true });
