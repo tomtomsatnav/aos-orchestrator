@@ -10,6 +10,8 @@ Goals: `<root>/goals/<gid>/`, `gid` matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`
 parseable `goal.json` count; the 50 most recently modified `goal.json` are read. Files are size-capped (2 MB), cached by
 mtime+size, rescanned at most once a second. A partial/corrupt write keeps the last good data; a missing file = empty.
 
+Archived goals: `aos-orch archive` moves a goal dir to `<root>/archive/goals/<gid>/` (atomic rename; `unarchive` moves it back). The monitor/dashboard reads only `<root>/goals/`, never `archive/`, so archived goals are absent from GOALS and "Needs you".
+
 | File | Read as | Fields used |
 |---|---|---|
 | `goal.json` (object) | goal | `title`, `description`, `status` (`achieved\|failed\|cancelled` are terminal), `created_at`, `updated_at`, `blocked_reason`, `success_criteria[{id,text,met}]`, `budget.max_wall_clock_s`, `orch.repo` (absolute; only its basename is exposed, and it maps tagged workers to a project), `orch.plan_state` (`planning\|awaiting_approval\|approved\|rejected\|none`; `supplied` -> `planning`; unknown -> `none`), `orch.plan_awaiting_since_ms`, `orch.paused_reason`, `orch.resume_at`, `orch.started_ms`, `orch.budgets.{max_new_tokens,max_parallel,max_attempts}`, `orch.usage.{new_tokens,notional_usd}` |

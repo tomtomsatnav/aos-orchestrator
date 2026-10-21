@@ -59,6 +59,7 @@ Unset `AOS_CLAUDE_BIN` and the same commands launch the real `claude`.
 - Everything a worker may do, and the retry and budget behaviour, is one versioned rule set: `aos-orch rules show`, design in [docs/rules-design.md](docs/rules-design.md).
 - Engine internals, state layout, goal file and control server: [orchestrator/README.md](orchestrator/README.md), [docs/orchestrator-design.md](docs/orchestrator-design.md). The on-disk layout other tools can rely on: [docs/orch-state-contract.md](docs/orch-state-contract.md).
 - It implements [AOS-1](https://github.com/tomtomsatnav/aos-1-spec); schemas are vendored in `schemas/`.
+- Tidy up: `aos-orch archive <goal-id>... | --blocked | --achieved | --older-than <days> [--dry-run]` moves finished goals to `<state>/archive/goals/` (never deletes; refuses live or active goals), `aos-orch unarchive <goal-id>` moves one back, `aos-orch goals --all` lists archived ones; the dashboard no longer shows archived goals.
 - Read-only live dashboard (goals, tasks, workers, cost): https://github.com/tomtomsatnav/agent-orchestration-standard. Its GOALS panel talks to this repo's control server (`aos-orch serve`, 127.0.0.1:4319).
 
 ## How it stops cheating
