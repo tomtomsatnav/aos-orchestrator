@@ -13,6 +13,7 @@ import { TASKS } from './tasks.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(HERE, '..', 'orchestrator', 'bin', 'aos-orch.mjs');
 const FAKE = path.join(HERE, '..', 'orchestrator', 'test', 'fake-claude.mjs');
+const FAKE_ENV = path.join(HERE, '..', 'orchestrator', 'test', 'enable-fake-env.mjs'); // the engine only forwards the fake's scenario variables when this is preloaded
 
 function parseFlags(argv) {
   const f = { k: 3, tier: 'haiku', 'timeout-s': 900, fake: false, task: null, out: path.join(HERE, 'results') };
@@ -46,7 +47,7 @@ const jsonOf = (s) => { try { return JSON.parse(s); } catch { return null; } };
 async function trial(task, n, flags) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `aos-eval-${task.id}-`)));
   const repo = path.join(root, 'repo'); const orch = path.join(root, 'orch'); fs.mkdirSync(repo); fs.mkdirSync(orch);
-  const t0 = Date.now(); const res = { task: task.id, trial: n, pass: false, why: '', status: null, new_tokens: 0, notional_usd: 0, wall_s: 0, plan_needed_approval: false };
+  const t0 = Date.now(); const res = { task: task.id, trial: n, pass: false, why: '', status: null, new_tokens: 0, notional_usd: 0, wall_s: 0, plan_needed_approval: false, human_confirm: null };
   try {
     git(repo, 'init', '-q', '-b', 'main'); git(repo, 'config', 'user.name', 'eval'); git(repo, 'config', 'user.email', 'eval@example.invalid'); git(repo, 'config', 'commit.gpgsign', 'false');
     task.seed(repo); git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'seed');
@@ -54,30 +55,46 @@ async function trial(task, n, flags) {
     if (flags.fake) {
       const scen = { draft: { behavior: 'success', plan_format: 'fenced', usage: { input_tokens: 100, output_tokens: 200 }, draft: task.fake.draft },
         planner: { behavior: 'success', usage: { input_tokens: 100, output_tokens: 300 }, plan: task.fake.plan }, default: { behavior: 'success' },
-        tasks: { t1: [{ behavior: 'success', edits: task.fake.edits, message: 'Done.', usage: { input_tokens: 100, output_tokens: 200 } }] } };
+        tasks: { t1: [{ behavior: 'success', edits: task.fake.edits, message: 'Done.', usage: { input_tokens: 100, output_tokens: 200 } }],
+          ...(task.fake.accept ? { t0: [{ behavior: 'success', edits: [{ path: 'test/accept.test.js', content: task.fake.accept }], message: 'Done.', usage: { input_tokens: 100, output_tokens: 200 } }] } : {}) } };
       fs.writeFileSync(path.join(root, 'scenario.json'), JSON.stringify(scen)); fs.mkdirSync(path.join(root, 'fake-state'));
-      Object.assign(env, { AOS_CLAUDE_BIN: FAKE, AOS_FAKE_SCENARIO: path.join(root, 'scenario.json'), AOS_FAKE_STATE: path.join(root, 'fake-state') });
+      Object.assign(env, { NODE_OPTIONS: `${env.NODE_OPTIONS ? `${env.NODE_OPTIONS} ` : ''}--import=${FAKE_ENV}`, AOS_CLAUDE_BIN: FAKE, AOS_FAKE_SCENARIO: path.join(root, 'scenario.json'), AOS_FAKE_STATE: path.join(root, 'fake-state') });
     }
     const left = () => Math.max(1000, flags['timeout-s'] * 1000 - (Date.now() - t0));
     const goalFile = path.join(root, 'goal.json');
     const d = await cli(['draft', task.prompt, '--repo', repo, '--out', goalFile, '--profile', task.profile, '--tier', flags.tier], { env, cwd: root, timeoutMs: left() });
     if (d.code !== 0 || !fs.existsSync(goalFile)) { res.why = `draft failed (exit ${d.code}${d.timedOut ? ', timed out' : ''}): ${d.stderr.trim().split('\n').slice(-2).join(' | ').slice(0, 200)}`; return res; }
-    const runArgs = ['run', goalFile, '--auto-approve', '--sandbox-workers', '--poll-ms', flags.fake ? '100' : '2000', '--interval-s', flags.fake ? '1' : '5'];
-    let r = await cli(runArgs, { env, cwd: root, timeoutMs: left() });
+    const flagsFor = () => ['--no-wait', '--poll-ms', flags.fake ? '100' : '2000', '--interval-s', flags.fake ? '1' : '5'];
+    const readGoal = (id) => jsonOf(fs.readFileSync(path.join(orch, 'goals', id, 'goal.json'), 'utf8'));
+    const usageOf = (id) => { try { const g = readGoal(id); res.new_tokens = g?.orch?.usage?.new_tokens ?? 0; res.notional_usd = g?.orch?.usage?.notional_usd ?? 0; } catch { /* no goal dir yet */ } };
+    const checkout = path.join(root, 'result');
+    const extract = (id) => { fs.rmSync(checkout, { recursive: true, force: true }); fs.mkdirSync(checkout);
+      execFileSync('sh', ['-c', 'git archive "$0" | tar -x -C "$1"', `aos/${id}/integration`, checkout], { cwd: repo, stdio: 'ignore' }); };
+    // --no-wait: the eval never stays attached at a human gate; it stands in for the human at each gate and records that it did
+    let r = await cli(['run', goalFile, '--auto-approve', '--sandbox-workers', ...flagsFor()], { env, cwd: root, timeoutMs: left() });
     let info = jsonOf(r.stdout);
-    if (r.code === 4 && info?.goal) { // the engine will not auto-approve a plan with commands: the eval stands in for the human and records that it did
+    if (r.code === 4 && info?.goal) { // the engine will not auto-approve a plan with commands
       res.plan_needed_approval = true;
       await cli(['approve-plan', info.goal], { env, cwd: root, timeoutMs: 60000 });
-      r = await cli(['run', info.goal, '--poll-ms', flags.fake ? '100' : '2000', '--interval-s', flags.fake ? '1' : '5'], { env, cwd: root, timeoutMs: left() });
+      r = await cli(['run', info.goal, ...flagsFor()], { env, cwd: root, timeoutMs: left() });
       info = jsonOf(r.stdout);
     }
+    const pending = /^awaiting human confirmation: (.+)$/.exec(String(info?.blocked_reason || ''));
+    if (!r.timedOut && info?.goal && pending) { // the draft asked for human sign-off: the deterministic grader is the human here. Confirm only if it passes
+      res.human_confirm = pending[1].split(',').map((c) => c.trim());
+      let v; try { extract(info.goal); v = task.grade(checkout); } catch { v = null; }
+      if (v?.ok) {
+        for (const c of res.human_confirm) await cli(['confirm', info.goal, c], { env, cwd: root, timeoutMs: 60000 });
+        r = await cli(['run', info.goal, ...flagsFor()], { env, cwd: root, timeoutMs: left() });
+        info = jsonOf(r.stdout);
+      }
+    }
+    { const ids = (() => { try { return fs.readdirSync(path.join(orch, 'goals')); } catch { return []; } })(); // one goal per trial: its usage is recorded even when the trial times out
+      const id = info?.goal || (ids.length === 1 ? ids[0] : null); if (id) { res.goal = id; usageOf(id); } }
     if (r.timedOut) { res.why = 'trial timed out'; res.status = 'timeout'; return res; }
     if (!info?.goal) { res.why = `run produced no result (exit ${r.code})`; return res; }
     res.status = info.status;
-    const g = jsonOf(fs.readFileSync(path.join(orch, 'goals', info.goal, 'goal.json'), 'utf8'));
-    res.new_tokens = g?.orch?.usage?.new_tokens ?? 0; res.notional_usd = g?.orch?.usage?.notional_usd ?? 0;
-    const checkout = path.join(root, 'result'); fs.mkdirSync(checkout);
-    try { execFileSync('sh', ['-c', 'git archive "$0" | tar -x -C "$1"', `aos/${info.goal}/integration`, checkout], { cwd: repo, stdio: 'ignore' }); } catch { res.why = `no integration branch (status ${info.status})`; return res; }
+    try { extract(info.goal); } catch { res.why = `no integration branch (status ${info.status})`; return res; }
     const v = task.grade(checkout);
     res.pass = v.ok; res.why = v.why;
   } catch (e) { res.why = `harness error: ${String(e.message).slice(0, 200)}`; } finally {
