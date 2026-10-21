@@ -2,7 +2,7 @@
   "schema": "aos.verdict/1",
   "id": "v-20261021-182537-da3ec4",
   "created_at": "2026-10-21T18:25:37.633Z",
-  "repo": "/private/tmp/claude-501/-Users-tom/417c8483-4f77-4fba-b49b-4efbd68d863b/scratchpad/guardcheck/vat-cheat",
+  "repo": "$SCRATCH/guardcheck/vat-cheat",
   "repo_name": "vat-cheat",
   "base": "7e0e65d267d0352e6ef47f3f956b8087649930d5",
   "base_ref": "main",

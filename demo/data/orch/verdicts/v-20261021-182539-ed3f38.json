@@ -2,7 +2,7 @@
   "schema": "aos.verdict/1",
   "id": "v-20261021-182539-ed3f38",
   "created_at": "2026-10-21T18:25:39.997Z",
-  "repo": "/private/tmp/claude-501/-Users-tom/417c8483-4f77-4fba-b49b-4efbd68d863b/scratchpad/guardcheck/cart-honest",
+  "repo": "$SCRATCH/guardcheck/cart-honest",
   "repo_name": "cart-honest",
   "base": "1430cff62657d2b4e456ea8f60fa3691a4fd9379",
   "base_ref": "main",

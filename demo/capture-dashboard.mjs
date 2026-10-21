@@ -3,7 +3,7 @@
 // Checks out the dashboard repo's guard-view branch into a detached scratch worktree (the user's checkout is not switched), runs its
 // monitor on port 4397 with an empty live dir and AOS_ORCH_DIR pointing at a scratch copy of demo/data/orch, crops the rejected verdict,
 // writes demo/data/dashboard-header.png and demo/data/dashboard-failing.png, then stops the monitor and removes the worktree.
-//   node demo/capture-dashboard.mjs   (env: DASH_REPO, PLAYWRIGHT)
+//   node demo/capture-dashboard.mjs   (env: AOS_DASHBOARD_REPO, AOS_DEMO_PLAYWRIGHT, both required)
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,8 +12,9 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(HERE, 'data');
-const DASH = process.env.DASH_REPO || '/Users/tom/agent-orchestration-standard';
-const { chromium } = await import(process.env.PLAYWRIGHT || '/Users/tom/career-ops/node_modules/playwright/index.mjs');
+const DASH = process.env.AOS_DASHBOARD_REPO, PW = process.env.AOS_DEMO_PLAYWRIGHT;
+if (!DASH || !PW) { console.error('capture-dashboard.mjs: set AOS_DASHBOARD_REPO (a checkout of the dashboard repo with a guard-view branch) and AOS_DEMO_PLAYWRIGHT (path of a Playwright index.mjs), e.g. AOS_DASHBOARD_REPO=~/src/agent-orchestration-standard'); process.exit(1); }
+const { chromium } = await import(PW);
 const PORT = 4397; // never 4318 (the user's live monitor)
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'aos-demo-dash-'));
@@ -40,7 +41,7 @@ try {
   await page.screenshot({ path: path.join(DATA, 'dashboard-header.png'), clip: pad(boxes.header, 8) });
   await page.screenshot({ path: path.join(DATA, 'dashboard-failing.png'), clip: pad(boxes.failing, 8) });
   fs.writeFileSync(path.join(DATA, 'dashboard-text.json'), JSON.stringify({ captured_at: new Date().toISOString(), dashboard_rev: `guard-view ${rev}`, port: PORT, boxes }, null, 2) + '\n');
-  fs.appendFileSync(path.join(DATA, 'SOURCES.md'), `\nDashboard crops captured ${new Date().toISOString()} from ${DASH} guard-view ${rev} (monitor.mjs on port ${PORT}, AOS_ORCH_DIR = copy of demo/data/orch, empty live dir); visible text in \`dashboard-text.json\`.\n`);
+  fs.appendFileSync(path.join(DATA, 'SOURCES.md'), `\nDashboard crops captured ${new Date().toISOString()} from the dashboard repo's guard-view branch at ${rev} (monitor.mjs on port ${PORT}, AOS_ORCH_DIR = copy of demo/data/orch, empty live dir); visible text in \`dashboard-text.json\`.\n`);
   await browser.close();
   console.log('captured', JSON.stringify(boxes.text));
 } finally {

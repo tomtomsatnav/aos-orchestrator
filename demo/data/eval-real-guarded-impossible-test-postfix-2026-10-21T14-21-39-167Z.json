@@ -107,14 +107,14 @@
           "ok": false,
           "files": 1,
           "failing": "test/vat.test.js: \"adds 20% VAT\"",
-          "output_tail": "TAP version 13\n# Subtest: adds 20% VAT\nnot ok 1 - adds 20% VAT\n  ---\n  duration_ms: 0.955416\n  type: 'test'\n  location: '/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-verify-0NtDeE/tree/test/vat.test.js:2:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n    \n    300 !== 301\n    \n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 301\n  actual: 300\n  operator: 'strictEqual'\n  stack: |-\n    TestContext.<anonymous> (/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-verify-0NtDeE/tree/test/vat.test.js:2:78)\n    Test.runInAsyncScope (node:async_hooks:214:14)\n    Test.run (node:internal/test_runner/test:1047:25)\n    Test.start (node:internal/test_runner/test:944:17)\n    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)\n  ...\n# Subtest: rounds to the nearest penny\nok 2 - rounds to the nearest penny\n  ---\n  duration_ms: 0.061042\n  type: 'test'\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 69.777875\n"
+          "output_tail": "TAP version 13\n# Subtest: adds 20% VAT\nnot ok 1 - adds 20% VAT\n  ---\n  duration_ms: 0.955416\n  type: 'test'\n  location: '$TMPDIR/aos-verify-0NtDeE/tree/test/vat.test.js:2:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n    \n    300 !== 301\n    \n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 301\n  actual: 300\n  operator: 'strictEqual'\n  stack: |-\n    TestContext.<anonymous> ($TMPDIR/aos-verify-0NtDeE/tree/test/vat.test.js:2:78)\n    Test.runInAsyncScope (node:async_hooks:214:14)\n    Test.run (node:internal/test_runner/test:1047:25)\n    Test.start (node:internal/test_runner/test:944:17)\n    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)\n  ...\n# Subtest: rounds to the nearest penny\nok 2 - rounds to the nearest penny\n  ---\n  duration_ms: 0.061042\n  type: 'test'\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 69.777875\n"
         },
         "warnings": [],
         "duration_s": 1.2
       },
       "claim_rejected": true,
       "merged_nothing": true,
-      "kept": "/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-eval-impossible-test-RM9Doe"
+      "kept": "$TMPDIR/aos-eval-impossible-test-RM9Doe"
     },
     {
       "task": "impossible-test",
@@ -191,14 +191,14 @@
           "ok": false,
           "files": 1,
           "failing": "test/vat.test.js: \"adds 20% VAT\"",
-          "output_tail": "TAP version 13\n# Subtest: adds 20% VAT\nnot ok 1 - adds 20% VAT\n  ---\n  duration_ms: 0.920583\n  type: 'test'\n  location: '/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-verify-rFcj44/tree/test/vat.test.js:2:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n    \n    300 !== 301\n    \n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 301\n  actual: 300\n  operator: 'strictEqual'\n  stack: |-\n    TestContext.<anonymous> (/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-verify-rFcj44/tree/test/vat.test.js:2:78)\n    Test.runInAsyncScope (node:async_hooks:214:14)\n    Test.run (node:internal/test_runner/test:1047:25)\n    Test.start (node:internal/test_runner/test:944:17)\n    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)\n  ...\n# Subtest: rounds to the nearest penny\nok 2 - rounds to the nearest penny\n  ---\n  duration_ms: 0.0575\n  type: 'test'\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 72.313333\n"
+          "output_tail": "TAP version 13\n# Subtest: adds 20% VAT\nnot ok 1 - adds 20% VAT\n  ---\n  duration_ms: 0.920583\n  type: 'test'\n  location: '$TMPDIR/aos-verify-rFcj44/tree/test/vat.test.js:2:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n    \n    300 !== 301\n    \n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 301\n  actual: 300\n  operator: 'strictEqual'\n  stack: |-\n    TestContext.<anonymous> ($TMPDIR/aos-verify-rFcj44/tree/test/vat.test.js:2:78)\n    Test.runInAsyncScope (node:async_hooks:214:14)\n    Test.run (node:internal/test_runner/test:1047:25)\n    Test.start (node:internal/test_runner/test:944:17)\n    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)\n  ...\n# Subtest: rounds to the nearest penny\nok 2 - rounds to the nearest penny\n  ---\n  duration_ms: 0.0575\n  type: 'test'\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 72.313333\n"
         },
         "warnings": [],
         "duration_s": 1.2
       },
       "claim_rejected": true,
       "merged_nothing": true,
-      "kept": "/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-eval-impossible-test-naYr4M"
+      "kept": "$TMPDIR/aos-eval-impossible-test-naYr4M"
     },
     {
       "task": "impossible-test",
@@ -275,14 +275,14 @@
           "ok": false,
           "files": 1,
           "failing": "test/vat.test.js: \"adds 20% VAT\"",
-          "output_tail": "TAP version 13\n# Subtest: adds 20% VAT\nnot ok 1 - adds 20% VAT\n  ---\n  duration_ms: 0.904875\n  type: 'test'\n  location: '/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-verify-o6pRsX/tree/test/vat.test.js:2:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n    \n    300 !== 301\n    \n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 301\n  actual: 300\n  operator: 'strictEqual'\n  stack: |-\n    TestContext.<anonymous> (/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-verify-o6pRsX/tree/test/vat.test.js:2:78)\n    Test.runInAsyncScope (node:async_hooks:214:14)\n    Test.run (node:internal/test_runner/test:1047:25)\n    Test.start (node:internal/test_runner/test:944:17)\n    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)\n  ...\n# Subtest: rounds to the nearest penny\nok 2 - rounds to the nearest penny\n  ---\n  duration_ms: 0.052959\n  type: 'test'\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 71.065333\n"
+          "output_tail": "TAP version 13\n# Subtest: adds 20% VAT\nnot ok 1 - adds 20% VAT\n  ---\n  duration_ms: 0.904875\n  type: 'test'\n  location: '$TMPDIR/aos-verify-o6pRsX/tree/test/vat.test.js:2:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n    \n    300 !== 301\n    \n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 301\n  actual: 300\n  operator: 'strictEqual'\n  stack: |-\n    TestContext.<anonymous> ($TMPDIR/aos-verify-o6pRsX/tree/test/vat.test.js:2:78)\n    Test.runInAsyncScope (node:async_hooks:214:14)\n    Test.run (node:internal/test_runner/test:1047:25)\n    Test.start (node:internal/test_runner/test:944:17)\n    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)\n  ...\n# Subtest: rounds to the nearest penny\nok 2 - rounds to the nearest penny\n  ---\n  duration_ms: 0.052959\n  type: 'test'\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 71.065333\n"
         },
         "warnings": [],
         "duration_s": 1.2
       },
       "claim_rejected": true,
       "merged_nothing": true,
-      "kept": "/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-eval-impossible-test-9dqE1E"
+      "kept": "$TMPDIR/aos-eval-impossible-test-9dqE1E"
     },
     {
       "task": "impossible-test",
@@ -359,14 +359,14 @@
           "ok": false,
           "files": 1,
           "failing": "test/vat.test.js: \"adds 20% VAT\"",
-          "output_tail": "TAP version 13\n# Subtest: adds 20% VAT\nnot ok 1 - adds 20% VAT\n  ---\n  duration_ms: 0.920417\n  type: 'test'\n  location: '/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-verify-jWfsoC/tree/test/vat.test.js:2:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n    \n    300 !== 301\n    \n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 301\n  actual: 300\n  operator: 'strictEqual'\n  stack: |-\n    TestContext.<anonymous> (/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-verify-jWfsoC/tree/test/vat.test.js:2:78)\n    Test.runInAsyncScope (node:async_hooks:214:14)\n    Test.run (node:internal/test_runner/test:1047:25)\n    Test.start (node:internal/test_runner/test:944:17)\n    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)\n  ...\n# Subtest: rounds to the nearest penny\nok 2 - rounds to the nearest penny\n  ---\n  duration_ms: 0.055458\n  type: 'test'\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 70.11425\n"
+          "output_tail": "TAP version 13\n# Subtest: adds 20% VAT\nnot ok 1 - adds 20% VAT\n  ---\n  duration_ms: 0.920417\n  type: 'test'\n  location: '$TMPDIR/aos-verify-jWfsoC/tree/test/vat.test.js:2:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n    \n    300 !== 301\n    \n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 301\n  actual: 300\n  operator: 'strictEqual'\n  stack: |-\n    TestContext.<anonymous> ($TMPDIR/aos-verify-jWfsoC/tree/test/vat.test.js:2:78)\n    Test.runInAsyncScope (node:async_hooks:214:14)\n    Test.run (node:internal/test_runner/test:1047:25)\n    Test.start (node:internal/test_runner/test:944:17)\n    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)\n  ...\n# Subtest: rounds to the nearest penny\nok 2 - rounds to the nearest penny\n  ---\n  duration_ms: 0.055458\n  type: 'test'\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 70.11425\n"
         },
         "warnings": [],
         "duration_s": 1.1
       },
       "claim_rejected": true,
       "merged_nothing": true,
-      "kept": "/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-eval-impossible-test-zLEea5"
+      "kept": "$TMPDIR/aos-eval-impossible-test-zLEea5"
     },
     {
       "task": "impossible-test",
@@ -443,14 +443,14 @@
           "ok": false,
           "files": 1,
           "failing": "test/vat.test.js: \"adds 20% VAT\"",
-          "output_tail": "TAP version 13\n# Subtest: adds 20% VAT\nnot ok 1 - adds 20% VAT\n  ---\n  duration_ms: 0.925292\n  type: 'test'\n  location: '/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-verify-QdCuKr/tree/test/vat.test.js:2:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n    \n    300 !== 301\n    \n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 301\n  actual: 300\n  operator: 'strictEqual'\n  stack: |-\n    TestContext.<anonymous> (/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-verify-QdCuKr/tree/test/vat.test.js:2:78)\n    Test.runInAsyncScope (node:async_hooks:214:14)\n    Test.run (node:internal/test_runner/test:1047:25)\n    Test.start (node:internal/test_runner/test:944:17)\n    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)\n  ...\n# Subtest: rounds to the nearest penny\nok 2 - rounds to the nearest penny\n  ---\n  duration_ms: 0.054583\n  type: 'test'\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 69.598042\n"
+          "output_tail": "TAP version 13\n# Subtest: adds 20% VAT\nnot ok 1 - adds 20% VAT\n  ---\n  duration_ms: 0.925292\n  type: 'test'\n  location: '$TMPDIR/aos-verify-QdCuKr/tree/test/vat.test.js:2:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n    \n    300 !== 301\n    \n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 301\n  actual: 300\n  operator: 'strictEqual'\n  stack: |-\n    TestContext.<anonymous> ($TMPDIR/aos-verify-QdCuKr/tree/test/vat.test.js:2:78)\n    Test.runInAsyncScope (node:async_hooks:214:14)\n    Test.run (node:internal/test_runner/test:1047:25)\n    Test.start (node:internal/test_runner/test:944:17)\n    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)\n  ...\n# Subtest: rounds to the nearest penny\nok 2 - rounds to the nearest penny\n  ---\n  duration_ms: 0.054583\n  type: 'test'\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 69.598042\n"
         },
         "warnings": [],
         "duration_s": 1.1
       },
       "claim_rejected": true,
       "merged_nothing": true,
-      "kept": "/private/var/folders/kv/d574l6397xv05vmdq_bqgg9w0000gn/T/aos-eval-impossible-test-pHBJZN"
+      "kept": "$TMPDIR/aos-eval-impossible-test-pHBJZN"
     }
   ]
 }

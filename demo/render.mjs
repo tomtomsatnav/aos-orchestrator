@@ -2,7 +2,7 @@
 // Step 3 of the demo: render demo/out/aos-demo.mp4 (1080x1350, 30 fps, H.264) and docs/demo.gif from demo/data/ ONLY.
 // Every number, file name, diff line and message on screen is read here from those files; nothing is typed in. Captions are fixed text,
 // but each one is checked against the data below and the render stops if the data does not support it.
-//   node demo/render.mjs   (env: PLAYWRIGHT, FFMPEG)
+//   node demo/render.mjs   (env: AOS_DEMO_PLAYWRIGHT required, FFMPEG)
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(HERE, 'data'), OUT = path.join(HERE, 'out'), GIF = path.join(HERE, '..', 'docs', 'demo.gif');
 const FFMPEG = process.env.FFMPEG || '/opt/homebrew/bin/ffmpeg';
-const { chromium } = await import(process.env.PLAYWRIGHT || '/Users/tom/career-ops/node_modules/playwright/index.mjs');
+if (!process.env.AOS_DEMO_PLAYWRIGHT) { console.error('render.mjs: set AOS_DEMO_PLAYWRIGHT to the path of a Playwright index.mjs, e.g. /path/to/node_modules/playwright/index.mjs'); process.exit(1); }
+const { chromium } = await import(process.env.AOS_DEMO_PLAYWRIGHT);
 const W = 1080, H = 1350, FPS = 30, FADE = 0.35;
 
 const read = (f) => fs.readFileSync(path.join(DATA, f), 'utf8');
