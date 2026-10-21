@@ -10,6 +10,7 @@
 //   aos-orch draft "<prompt>" --repo <path> [--out goal.json] [--profile strict|node-library|docs-only] [--answers "..."] [--branch main] [--max-tokens N] [--max-wall-s N] [--tier haiku|sonnet|opus]
 //   aos-orch archive <goal-id>... | --blocked | --achieved | --older-than <days> [--dry-run] | unarchive <goal-id> | goals --all
 //   aos-orch confirm <goal-id> <criterion-id>
+//   aos-orch verify --repo <path> [--base main] [--check "node --test"]... [--tree <commit>] [--profile name] [--json] [--unsandboxed-checks]
 //   aos-orch rules show [goal-id] | rules check <file> [--layer user|repo|goal] | rules explain <goal-id> <task-id> '<tool json>'
 //   aos-orch approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>
 // State lives under AOS_ORCH_DIR (default ~/.aos/orch, or $XDG_STATE_HOME/aos/orch; an existing ~/.claude/plugins/data/aos-dashboard-aos-local/orch is still used when ~/.aos/orch does not exist).
@@ -46,6 +47,9 @@ const USAGE = `usage: aos-orch <command> ...   (node orchestrator/bin/aos-orch.m
   approvals <goal-id> | approve <goal-id> <A-n> [--for-task] | deny <goal-id> <A-n>   answer a worker permission request
   confirm <goal-id> <criterion-id> sign off a human-verified criterion
   rules show [goal-id] | rules check <file> [--layer user|repo|goal] | rules explain <goal-id> <task-id> '<tool json>'
+  verify --repo <path>             guard mode: judge any agent's finished work without orchestration (anti-cheat diff, sandboxed checks,
+        [--base main] [--check "node --test"]... [--tree <commit>] [--profile node-library|strict|docs-only] [--json] [--unsandboxed-checks]
+                                   ORIGINAL tests re-run) against the base commit. Default check: the profile's test command. Exit 0 accepted, 1 rejected
   doctor [--live]                  preflight: node, git, claude version/flags/login, sandbox, state dir, port (--live: one tiny Haiku call)
   serve [--port 4319] [--max-workers N] [--dashboard-url URL] [--origins a,b] [--leave-workers|--kill-workers] [--drain-s N]
   login-link [--port N] | token [--show]   control server for the dashboard (127.0.0.1:4319)
@@ -56,7 +60,8 @@ if (argv.includes('--help') || argv.includes('-h') || argv[0] === 'help') { cons
 const flags = {}; const pos = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a.startsWith('--')) { const k = a.slice(2); if (['poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s', 'accept-repo-loosening', 'layer', 'repo', 'out', 'profile', 'answers', 'branch', 'max-tokens', 'max-wall-s', 'tier', 'older-than'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
+  if (a === '--check') { (flags.check ||= []).push(argv[++i]); continue; } // repeatable (verify)
+  if (a.startsWith('--')) { const k = a.slice(2); if (['base', 'tree', 'poll-ms', 'interval-s', 'orch-dir', 'port', 'max-workers', 'dashboard-url', 'origins', 'drain-s', 'accept-repo-loosening', 'layer', 'repo', 'out', 'profile', 'answers', 'branch', 'max-tokens', 'max-wall-s', 'tier', 'older-than'].includes(k)) flags[k] = argv[++i]; else flags[k] = true; } else pos.push(a);
 }
 const [cmd, arg1, arg2] = pos;
 const loc = flags['orch-dir'] ? { dir: path.resolve(flags['orch-dir']), legacy: false } : orchLocation();
@@ -331,6 +336,26 @@ async function main() {
       process.on('SIGINT', () => down('SIGINT')); process.on('SIGTERM', () => down('SIGTERM'));
       await new Promise(() => {});
       break;
+    }
+    case 'verify': {
+      const { verifyTree, renderVerify, defaultChecks } = await import('../lib/guard.mjs');
+      const { parseShell } = await import('../lib/shell.mjs');
+      if (typeof flags.repo !== 'string') die('usage: aos-orch verify --repo <path> [--base main] [--check "node --test"]... [--tree <commit>] [--profile name] [--json]', 2);
+      const repo = path.resolve(flags.repo); const base = typeof flags.base === 'string' ? flags.base : 'main'; const profile = typeof flags.profile === 'string' ? flags.profile : 'node-library';
+      const checks = [];
+      for (const s of flags.check || []) {
+        const p = typeof s === 'string' ? parseShell(s) : null;
+        if (!p || p.commands.length !== 1 || p.commands[0].redirects.length || Object.values(p.flags).some(Boolean)) die(`--check must be one plain command (no pipes, redirects, substitutions): ${q(String(s ?? '').slice(0, 80))}`, 2);
+        checks.push({ argv: p.commands[0].argv, timeout_s: 600 });
+      }
+      if (!checks.length) {
+        let d = []; try { d = await defaultChecks(repo, base, profile); } catch (e) { die(e.message, 2); }
+        if (!d.length) die(`no test command is derivable from profile ${profile} for this repo: pass --check "<command>"`, 2);
+      }
+      const r = await verifyTree({ repo, base, tree: typeof flags.tree === 'string' ? flags.tree : null, checks, profile, unsandboxed: !!flags['unsandboxed-checks'] });
+      if (flags['unsandboxed-checks']) console.error('aos-orch: WARNING: --unsandboxed-checks: the checks ran agent-written code WITHOUT the OS sandbox');
+      out(flags.json ? r : renderVerify(r));
+      process.exit(r.accepted ? 0 : 1);
     }
     case 'doctor': { const D = await import('../lib/doctor.mjs'); const rep = await D.runDoctor({ orch, port: parsePort(flags.port ?? process.env.AOS_ORCH_PORT ?? DEFAULT_PORT), live: !!flags.live }); console.log(D.renderDoctor(rep)); process.exit(rep.exitCode); }
     case 'login-link': {

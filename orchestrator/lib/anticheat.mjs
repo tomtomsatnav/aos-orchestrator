@@ -9,6 +9,7 @@
 //   g) harness tamper     source mentions node:assert / node:test / process.exit ...; at run time the engine preload (lib/harness-preload.mjs) -> harness_tamper
 //   h) weakened tests     a modified test file (or test helper) that drops assertion calls                -> tests_weakened (unless named exactly in path_scope)
 // Findings: {kind, severity: 'fail'|'warn'|'allowed', path?, detail}. 'allowed' = a rule would have fired, a human-approved plan field lets it through.
+import fs from 'node:fs';
 import path from 'node:path';
 import { isTestPath } from './protect.mjs';
 import { matchGlob } from './glob.mjs';
@@ -165,6 +166,14 @@ export async function attemptDiff(wt, integrationBranch) {
   if (!mb) return { base: null, files: [] };
   const d = await G.git(wt, ['-c', 'core.quotepath=false', 'diff', '-U0', '-M', '--no-color', '--no-ext-diff', mb, 'HEAD'], { allowFail: true });
   return { base: mb, files: parseDiff(d.stdout) };
+}
+
+/** Test files of a worktree's index: [{path, text}] (bounded: 300 files, 200 KB each). Used by the engine and lib/guard.mjs. */
+export async function readTestFiles(wt) {
+  const out = [];
+  const ls = (await G.git(wt, ['ls-files', '-z'], { allowFail: true })).stdout.split('\0').filter((f) => f && isTestPath(f) && !f.split('/').includes('node_modules'));
+  for (const f of ls.slice(0, 300)) { try { const abs = path.join(wt, f); if (fs.statSync(abs).size <= 200000) out.push({ path: f, text: fs.readFileSync(abs, 'utf8') }); } catch { /* gone */ } }
+  return out;
 }
 
 // ---------------------------------------------------------------- (b) skips
