@@ -34,6 +34,9 @@ const BASELINE_RUNS = 2;
 import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, summaryOfRun, mergeBaselineRuns, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath, failingTestsLine, failingTests } from './anticheat.mjs';
 import { sanitizeUntrusted } from './untrusted.mjs';
 import { isTestPath } from './protect.mjs';
+import { relativeSpecifiers, candidatesFor, safeRel } from './requires.mjs';
+/** What a task waits for: its approved depends_on plus the dependencies the engine added at run time (orch.run_deps, see _acceptanceRequires). */
+const depsOf = (t) => [...(t?.depends_on || []), ...(t?.orch?.run_deps || [])];
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_SCRIPT = path.join(HERE, 'policy-hook.mjs');
@@ -910,7 +913,7 @@ export class Engine {
   _stuckCheck(S) {
     const goal = S.goal;
     const open = S.tasks.some((t) => ['ready', 'running', 'needs_review'].includes(t.status));
-    if (S.tasks.length && !open && !S.tasks.every((t) => t.status === 'done') && !S.tasks.some((t) => t.status === 'pending' && t.depends_on.every((d) => S.tasks.find((x) => x.id === d)?.status === 'done'))) {
+    if (S.tasks.length && !open && !S.tasks.every((t) => t.status === 'done') && !S.tasks.some((t) => t.status === 'pending' && depsOf(t).every((d) => S.tasks.find((x) => x.id === d)?.status === 'done'))) {
       goal.status = 'blocked'; goal.blocked_reason = goal.orch.halt_reason || 'no runnable tasks remain';
       this.ev('goal.blocked', 'orchestrator', null, { reason: goal.blocked_reason });
     }
@@ -1203,10 +1206,77 @@ export class Engine {
   _promote(S) {
     const byId = new Map(S.tasks.map((t) => [t.id, t]));
     for (const t of S.tasks) {
-      if (t.status === 'pending' && t.depends_on.every((d) => byId.get(d)?.status === 'done')) {
+      if (t.status === 'pending' && depsOf(t).every((d) => byId.get(d)?.status === 'done')) {
         t.status = 'ready'; t.updated_at = iso(this.now()); this.ev('task.ready', 'orchestrator', t.id, {});
       }
     }
+  }
+
+  /**
+   * Before dispatching an implementation task whose checks run merged ACCEPTANCE test files: statically scan those files (and test helpers they
+   * require) for relative require/import specifiers. A required file that only another, unfinished task can write (its path_scope) means the check
+   * cannot pass until that task is merged: the task waits for it (orch.run_deps; the approved depends_on is never changed, this only adds waiting).
+   * When that task already runs after this one (a cycle), no attempt could ever pass: the goal is blocked at once instead of burning attempts and tiers.
+   * Test files are model-written: bounded reads of regular files inside the integration tree, never executed. -> false when dispatch must stop.
+   */
+  async _acceptanceRequires(S) {
+    const goal = S.goal; const o = goal.orch;
+    const items = o.anticheat?.acceptance?.items || [];
+    if (!items.length) return true;
+    const accFiles = new Set(items.flatMap((i) => i.files || []).filter(safeRel));
+    const key = items.map((i) => `${i.task}@${i.commit}`).join(',');
+    const wt = this._integrationWt(goal); let root; try { root = fs.realpathSync(wt); } catch { return true; }
+    const read = (rel) => { // a regular file inside the integration tree, <= 256 KiB, else null
+      try { const abs = path.join(wt, rel); const st = fs.lstatSync(abs); if (!st.isFile() || st.size > 256 * 1024) return null; const real = fs.realpathSync(abs); if (!real.startsWith(root + path.sep)) return null; return fs.readFileSync(real, 'utf8'); } catch { return null; }
+    };
+    const byId = new Map(S.tasks.map((t) => [t.id, t]));
+    const reaches = (from, to) => { const seen = new Set(); const st = [...depsOf(byId.get(from))]; while (st.length) { const d = st.pop(); if (d === to) return true; if (seen.has(d) || !byId.has(d)) continue; seen.add(d); st.push(...depsOf(byId.get(d))); } return false; };
+    let changed = false; let ok = true;
+    for (const t of S.tasks) {
+      if (t.status !== 'ready' || t.orch.role === 'acceptance' || t.orch.acc_requires_key === key) continue;
+      t.orch.acc_requires_key = key; changed = true;
+      const tests = [...new Set((t.orch.checks || []).flatMap((c) => (Array.isArray(c.argv) ? c.argv.slice(1) : [])).filter((a) => typeof a === 'string').map((a) => a.replace(/^\.\//, '')).filter((a) => accFiles.has(a)))];
+      if (!tests.length) continue;
+      // breadth-first over the acceptance files and the test helpers they require; non-test files are recorded, not followed (their writer decides their content)
+      const queue = tests.map((f) => ({ file: f, test: f })); const seen = new Set(tests); const reqs = [];
+      for (let n = 0; queue.length && n < 40; n++) {
+        const { file, test } = queue.shift(); const text = read(file);
+        if (text === null) continue;
+        for (const spec of relativeSpecifiers(text)) {
+          const cands = candidatesFor(file, spec); if (!cands.length) continue;
+          const rel = cands.find((c) => read(c) !== null) ?? cands.find((c) => S.tasks.some((x) => matchAny(x.orch.path_scope, c)));
+          if (!rel || seen.has(rel)) continue;
+          seen.add(rel);
+          if (matchAny(t.orch.path_scope, rel)) continue; // the task's own file
+          reqs.push({ test, file: rel });
+          if (isTestPath(rel) && seen.size < 60) queue.push({ file: rel, test });
+        }
+      }
+      const added = []; const why = [];
+      for (const { test, file } of reqs) {
+        for (const ow of S.tasks.filter((x) => x.id !== t.id && x.status !== 'done' && matchAny(x.orch.path_scope, file))) {
+          if (reaches(t.id, ow.id)) continue; // already waits for it
+          if (reaches(ow.id, t.id)) {
+            const reason = `acceptance test dependency cycle: task ${t.id}'s check runs ${test}, which requires ${file}; only task ${ow.id} can write ${file} (its path_scope), and ${ow.id} runs after ${t.id}, so no attempt of ${t.id} can pass. The plan needs a re-plan: \`aos-orch run <goal> --replan\` only re-plans goals blocked at planning, so archive this goal (aos-orch archive ${goal.id}) and run the goal spec again (or fix the plan and tests by hand)`;
+            t.status = 'failed'; t.updated_at = iso(this.now()); t.orch.last_failure = { kind: 'acceptance_dependency_cycle', note: reason.slice(0, 600) };
+            this.ev('task.failed', 'orchestrator', t.id, { cause: 'acceptance_dependency_cycle', attempt: t.attempts, tier: t.orch.model_tier, final: true, test, requires: file, owner: ow.id });
+            o.halt_reason ??= reason.slice(0, 800); o.halt_at_ms ??= this.now();
+            ok = false; break;
+          }
+          (t.orch.run_deps ||= []).push(ow.id); added.push(ow.id); why.push(`${test} requires ${file} (written by ${ow.id})`);
+        }
+        if (!ok) break;
+      }
+      if (!ok) break;
+      if (added.length) {
+        const text = `ACCEPTANCE TEST REQUIRES ANOTHER TASK'S FILE: ${why.slice(0, 5).join('; ')}, so the engine made ${t.id} also wait for ${added.join(', ')} (its check cannot pass before they are merged).`;
+        (t.orch.run_deps_notes ||= []).push(text.slice(0, 600));
+        t.status = 'pending'; t.updated_at = iso(this.now());
+        this.ev('orch.plan.deps_added', 'orchestrator', t.id, { added, rule: 'acceptance.requires', text: text.slice(0, 600) });
+      }
+    }
+    if (changed) saveState(this.dir, S);
+    return ok;
   }
 
   _budgets(S, seq) {
@@ -1228,6 +1298,7 @@ export class Engine {
       return;
     }
     if (!this._planIntact(S)) return;
+    if (S.tasks.some((t) => t.status === 'ready') && !(await this._acceptanceRequires(S))) return;
     if (S.tasks.some((t) => t.status === 'ready')) {
       const wt = await this._ensureIntegration(S);
       const g = await this._repoGuard(S, wt);
