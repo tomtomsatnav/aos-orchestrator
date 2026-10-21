@@ -166,13 +166,13 @@ const runCli = (args, env) => new Promise((resolve) => {
   c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { err += d; });
   c.on('close', (code) => resolve({ code, out, err }));
 });
-test('R5: `aos-orch approve-plan` and `status` print the rules summary and the hash; `approvals` too', async (t) => {
+test('R5: `aos-orch approve-plan` confirms the plan and rules hashes and lists the loosenings; `status` and `approvals` print the rules summary', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup());
   const { dir } = await parked(sb, { id: 'g-cli2', orch: { rules: { rules_version: 1, budgets: { max_usd: 8 } } } });
   const env = sb.env();
   const a = await runCli(['approve-plan', 'g-cli2'], env);
-  assert.match(a.err, /PLAN YOU ARE APPROVING/); assert.match(a.err, /rules [0-9a-f]{12}  profile=strict/); assert.match(a.err, /LOOSENINGS YOU ARE APPROVING \(5\)/); assert.match(a.err, /goal:budgets\.max_usd/);
-  assert.match(a.err, /plan hash [0-9a-f]{12}  rules hash [0-9a-f]{12}/);
+  assert.match(a.err, /approved: plan [0-9a-f]{12}, \d+ task\(s\), rules [0-9a-f]{12}/); assert.match(a.err, /LOOSENINGS YOU ARE APPROVING \(5\)/); assert.match(a.err, /goal:budgets\.max_usd/);
+  assert.doesNotMatch(a.err, /worker commands:/, 'approve-plan does not print the plan again');
   const s = await runCli(['status', 'g-cli2'], env); assert.match(s.err, /LOOSENINGS YOU ARE APPROVING/);
   const p = await runCli(['approvals', 'g-cli2'], env); assert.match(p.err, /rules [0-9a-f]{12}/);
   assert.ok(readJSON(paths(dir).goal).orch.rules.sha256);

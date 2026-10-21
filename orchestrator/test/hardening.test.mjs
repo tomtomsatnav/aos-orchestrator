@@ -311,7 +311,7 @@ for (const [name, tamper] of [
   });
 }
 
-test('condition 3: status / approvals / approve-plan print the exact commands, tier and path scope in plain text; --auto-approve cannot skip review', async (t) => {
+test('condition 3: status / approvals print the exact commands, tier and path scope in plain text, approve-plan confirms the reviewed hash; --auto-approve cannot skip review', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup());
   const task = { ...ptask('t1', 'a.txt', 'alpha', { cmds: ['ls -la'], tier: 'sonnet', scope: ['a.txt', 'docs/**'] }), checks: [{ argv: ['node', '--test', 'test/x.test.mjs'], timeout_s: 120 }] };
   sb.scenario({ planner: { behavior: 'success', plan: onePlan(task) }, tasks: { t1: [edit('a.txt', 'alpha')] } });
@@ -326,7 +326,7 @@ test('condition 3: status / approvals / approve-plan print the exact commands, t
   r = await run(['approvals', 'g-rev'], env);
   assert.match(r.err, /node --test test\/x\.test\.mjs/); assert.match(r.err, /tier=sonnet/);
   r = await run(['approve-plan', 'g-rev'], env);
-  assert.match(r.err, /PLAN YOU ARE APPROVING/); assert.match(r.err, /plan hash [0-9a-f]{12}/); assert.match(r.out, /queued/);
+  assert.match(r.err, /approved: plan [0-9a-f]{12}, 1 task\(s\)/); assert.doesNotMatch(r.err, /PLAN YOU ARE APPROVING|worker commands:/, 'a short confirmation, not the plan again'); assert.match(r.out, /queued/);
   const cmdFile = fs.readdirSync(paths(path.join(sb.orch, 'goals', 'g-rev')).commands)[0];
   assert.match(readJSON(path.join(paths(path.join(sb.orch, 'goals', 'g-rev')).commands, cmdFile)).reviewed.plan_hash, /^[0-9a-f]{64}$/);
   assert.match(renderReview(reviewView(loadState(path.join(sb.orch, 'goals', 'g-rev')).tasks)), /scope=a\.txt, docs/);

@@ -76,6 +76,29 @@ export function summaryOfRun(r) {
 }
 export const checkKey = (argv) => argv.join(' ');
 /**
+ * The failing tests of a TAP run: [{name, file}] (file relative to `root` when it lies under it). Reads `not ok N - name` and the `location:` line of its
+ * YAML block; a parent suite that only fails because of its children is dropped when a child names the same file.
+ */
+export function failingTests(text, root = null) {
+  const out = []; const lines = String(text || '').split('\n');
+  const rel = (f) => { let p = String(f).replace(/^file:\/\//, ''); p = p.replace(/:\d+:\d+$/, ''); for (const R of [root].flat().filter(Boolean)) { const r = path.relative(R, p); if (r && !r.startsWith('..') && !path.isAbsolute(r)) return r; } return p; };
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\s*)not ok \d+ - (.*?)(?: # (?:TODO|SKIP)\b.*)?$/.exec(lines[i]); if (!m) continue;
+    let file = null;
+    for (let j = i + 1; j < Math.min(lines.length, i + 40); j++) { const l = /^\s*location: '(.+)'\s*$/.exec(lines[j]); if (l) { file = rel(l[1]); break; } if (/^\s*\.\.\.\s*$/.test(lines[j])) break; }
+    const name = m[2].trim();
+    if (!file && /\.(?:m?js|cjs|[mc]?ts|tsx?|jsx)$/.test(name)) file = rel(name); // a whole test FILE failed (syntax error, early exit)
+    out.push({ name, file, depth: m[1].length });
+  }
+  return out.filter((t) => !out.some((c) => c !== t && c.depth > t.depth && c.file && c.file === t.file)).map(({ name, file }) => ({ name, file }));
+}
+/** One line naming the failing tests of a TAP run (at most `n`), e.g. `test/a.test.js: "adds" | test/b.test.js: "subtracts" (+2 more)`; null when none can be named. */
+export function failingTestsLine(text, root = null, n = 3) {
+  const f = failingTests(text, root); if (!f.length) return null;
+  const one = (t) => `${t.file && t.file !== t.name ? `${t.file}: ` : ''}"${t.name.slice(0, 120)}"`;
+  return `${f.slice(0, n).map(one).join(' | ')}${f.length > n ? ` (+${f.length - n} more)` : ''}`;
+}
+/**
  * Merge repeated baseline runs of one check ({tests, pass, skipped, todo, source, files?} or null): the LARGEST count wins (per file too), so a test file whose
  * registered tests depend on the clock / randomness cannot record a low baseline by luck. unstable=true when the runs disagreed. -> merged | null
  */
@@ -188,6 +211,8 @@ export function checkInputPaths(argvs) {
       if (LOADERS.has(a) && typeof argv[i + 1] === 'string') v = argv[i + 1]; else { const m = /^(--import|--require|--loader|--experimental-loader|--env-file)=(.+)$/.exec(a); if (m) v = m[2]; }
       if (v && !v.startsWith('/') && !v.split('/').includes('..') && !/^(?:node:|data:|file:)/.test(v) && !/\s/.test(v)) out.add(norm(v));
     }
+    // `node --check <file>` only parses its file (runs nothing): that file is the subject of the check, never a configuration input of it
+    if (base(argv[0]) === 'node' && (argv.includes('--check') || argv.includes('-c'))) continue;
     for (const a of argv.slice(1)) {
       if (typeof a !== 'string' || a.startsWith('-') || a.startsWith('/') || a.split('/').includes('..') || /\s/.test(a)) continue;
       if (/\.(?:m?js|cjs|ts|py|sh|json|rb)$/.test(a) || a.endsWith('/') || a.includes('/')) { const n = norm(a); if (n && !isTestPath(n)) out.add(n); }

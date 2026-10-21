@@ -205,6 +205,8 @@ export function buildDraftPrompt({ request, facts, scripts = [], compiled, error
     'Each success criterion has {"id","text"} and EITHER a "check":{"argv":[...],"timeout_s":n} using an allowed command OR "verify":"human" when no allowed command can verify it (for example prose quality). Use 2-12 criteria.',
     'If you cannot tell what "done" means, output ONLY {"questions":[...]} with at most 3 short questions. Do not guess.',
     'You may not propose rules, trust, sandbox or approval settings: any other field is rejected.',
+    'State ONLY facts given in the REQUEST or the repo facts above. You cannot see the repository contents: never guess at its state (which file holds a bug, whether tests pass, what the code does), neither in the description nor in risks.',
+    'Do NOT add instructions or constraints the REQUEST does not state (for example "do not edit the tests"): the description restates the request. If you think a constraint is needed, put it in "risks" as a suggestion; anything you add anyway is shown to the user as your addition.',
     'OUTPUT SCHEMA: {"title","description","success_criteria":[{"id","text","check":{"argv":[],"timeout_s":n}|"verify":"human"}],"questions":["..."],"risks":["..."]}',
   ];
   if (errors) lines.push(`YOUR PREVIOUS OUTPUT WAS REJECTED (this is the only repair round): ${errors.slice(0, 8).join(' | ')}. Fix exactly these and output the JSON object again. Reminder, the ONLY allowed check commands are: ${JSON.stringify(allow)}; use verify "human" for anything they cannot check.`);
@@ -306,7 +308,26 @@ export async function draftGoal({ orchDir, repo, prompt, profile = 'strict', bra
     for (const m of await serverWarnings(withCheck.map((c) => c.check.argv), rd, { label: (i) => `criterion ${withCheck[i].id}` })) notes.push(`WARNING: ${m}`);
   }
   const limits = { max_new_tokens: budgets.max_new_tokens, max_wall_clock_s: budgets.max_wall_s, max_attempts: budgets.max_attempts, ...(budgets.max_parallel ? { max_parallel: budgets.max_parallel } : {}), ...(budgets.max_usd ? { max_usd: budgets.max_usd } : {}) };
-  return { ok: true, draft, budget_notes, start_tier: startTier, notes, spec: draftToSpec(draft, { root, branch, tier: base.tier, profile, profileRules: dr.profileRules, maxUsdCap: compiled.budgets.max_usd, startTier }), errors: [], questions: [], ...base, rules_text: textFor(limits) };
+  return { ok: true, draft, additions: draftAdditions(prompt, draft.description), budget_notes, start_tier: startTier, notes, spec: draftToSpec(draft, { root, branch, tier: base.tier, profile, profileRules: dr.profileRules, maxUsdCap: compiled.budgets.max_usd, startTier }), errors: [], questions: [], ...base, rules_text: textFor(limits) };
+}
+
+const STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'are', 'was', 'its', 'their', 'them', 'they', 'then', 'than', 'also', 'each', 'both', 'all', 'any', 'can', 'has', 'have', 'will', 'should', 'would', 'which', 'when', 'where', 'there', 'these', 'those', 'such', 'via', 'per']);
+const words = (t) => (String(t).toLowerCase().match(/[a-z0-9_]{3,}/g) || []).filter((w) => !STOP.has(w));
+const stem = (w) => w.replace(/(?:ing|ed|es|s)$/, '');
+const DIRECTIVE = /\b(?:do not|don't|never|must not|must|without|avoid|only|keep|ensure|make sure|leave)\b/i;
+/**
+ * Sentences of the drafted description the REQUEST does not contain (heuristic): a sentence with an instruction word (do not, never, without, must ...) whose
+ * clause from that word on is mostly new words, or a sentence made mostly of new words. The human sees them flagged as the drafter's additions.
+ */
+export function draftAdditions(request, description) {
+  const known = new Set(words(request).map(stem));
+  const novel = (t) => { const w = words(t); return w.length ? w.filter((x) => !known.has(stem(x))).length / w.length : 0; };
+  const out = [];
+  for (const sent of String(description || '').split(/(?<=[.!?])\s+|\n+/).map((x) => x.trim()).filter(Boolean)) {
+    const m = DIRECTIVE.exec(sent);
+    if ((m && novel(sent.slice(m.index)) >= 0.5) || novel(sent) > 0.66) out.push(sent.slice(0, 300));
+  }
+  return out.slice(0, 8);
 }
 
 /** Text of a draft for the CLI, in the style of renderReview: each criterion with its check or HUMAN REVIEW, the budgets, the rules hash and the questions. */
@@ -316,6 +337,7 @@ export function renderDraft(r) {
     const d = r.draft;
     L.push(`DRAFT (proposal only; nothing is created until you run it)  tier=${q(r.tier)}  profile=${q(r.profile)}  rules ${r.rules_hash}`);
     L.push(`title: ${q(d.title)}`); if (d.description) L.push(`description: ${escCtrl(d.description).replace(/\n/g, '\n  ')}`);
+    for (const x of r.additions || []) L.push(`  !! ADDED BY THE DRAFTER (not in your request; keep it or delete it from goal.json): ${q(x)}`);
     for (const c of d.success_criteria) {
       L.push(`  ${q(c.id)}: ${q(c.text)}`); // one line per entry, each escaped on its own: the newline between them is ours, not the model's
       L.push(c.verify === 'human' ? '      HUMAN REVIEW: you must confirm it with `aos-orch confirm` before the goal can finish'
