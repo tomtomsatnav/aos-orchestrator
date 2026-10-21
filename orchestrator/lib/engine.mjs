@@ -31,7 +31,8 @@ import { probeClaudeVersion } from './cli-version.mjs';
 import { runAdvisoryReview } from './review.mjs';
 import * as HG from './harness-guard.mjs';
 const BASELINE_RUNS = 2;
-import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, summaryOfRun, mergeBaselineRuns, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath, failingTestsLine } from './anticheat.mjs';
+import { attemptDiff, analyzeDiff, failsOf, summarizeFindings, attemptRecord, rollup, reviewerNotes, forceTapArgv, parseTestSummary, summaryOfRun, mergeBaselineRuns, judgeRun, checkKey, isTestRunArgv, staticTestCount, checkInputPaths, isConfigPath, failingTestsLine, failingTests } from './anticheat.mjs';
+import { sanitizeUntrusted } from './untrusted.mjs';
 import { isTestPath } from './protect.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -671,13 +672,13 @@ export class Engine {
     await this._verifyAttempt(S, task, entry, c);
   }
 
-  _failAttempt(S, task, entry, cause, { escalate = true, note = null, check_output = null, rule = null } = {}) {
+  _failAttempt(S, task, entry, cause, { escalate = true, note = null, check_output = null, rule = null, worker_note = null } = {}) {
     const R = this._R(S.goal).retry;
     const ladder = task.orch.tier_ladder || R.ladder;
     escalate = escalate && !R.no_escalate.includes(cause); // retry.no_escalate (union-only: a layer can add causes, never remove the built-in ones)
     entry.outcome = cause; entry.counted = true;
     task.orch.phase = null; task.updated_at = iso(this.now());
-    task.orch.last_failure = { kind: cause, note, check_output, denials: cause === 'denied' ? (task.orch.last_denials || []) : [] };
+    task.orch.last_failure = { kind: cause, note, check_output, denials: cause === 'denied' ? (task.orch.last_denials || []) : [], ...(worker_note ? { worker_note: sanitizeUntrusted(worker_note, 1200) } : {}) };
     this.ev('task.failed', task.assignee, task.id, { cause, attempt: task.attempts, tier: entry.tier, final: false });
     // retry.same_tier_retries: cause -> how many times that cause is retried on the same tier before escalating (default {denied: 1})
     const used = (task.orch.same_tier_used ||= {});
@@ -691,8 +692,14 @@ export class Engine {
     if (final) {
       task.status = 'failed';
       this.ev('task.failed', 'orchestrator', task.id, { cause, attempts: task.attempts, tier: entry.tier, final: true, rule: atTop && task.attempts < task.max_attempts ? 'retry.ladder' : 'retry.max_attempts' });
-      const failing = cause === 'check_failed' && check_output ? failingTestsLine(check_output, task.orch.worktree ? [task.orch.worktree, realpathDeepest(task.orch.worktree)] : null) : null;
-      S.goal.orch.halt_reason ??= `task ${task.id} failed after ${task.attempts} attempt(s): ${cause}${cause === 'merge_conflict' && note ? ` (${note})` : ''}${failing ? ` (failing: ${failing})` : ''}`.slice(0, 600);
+      const roots = task.orch.worktree ? [task.orch.worktree, realpathDeepest(task.orch.worktree)] : null;
+      const failing = cause === 'check_failed' && check_output ? failingTestsLine(check_output, roots) : null;
+      // a failing test that an acceptance task wrote is read-only for this task: if the TEST is wrong, no retry can pass it, so say whose test it is
+      const accItems = cause === 'check_failed' && check_output ? (this._anti(S.goal).acceptance?.items || []) : [];
+      const failFiles = accItems.length ? new Set(failingTests(check_output, roots).map((f) => f.file).filter(Boolean)) : new Set();
+      const acc = accItems.find((i) => i.task !== task.id && (i.files || []).some((f) => failFiles.has(f)));
+      const accNote = acc ? `; the failing test is in ${(acc.files || []).filter((f) => failFiles.has(f)).slice(0, 2).join(', ')}, written by acceptance task ${acc.task} and read-only for ${task.id}: if the test itself is wrong, fix it by hand or re-plan (the worker's last note is in the report)` : '';
+      S.goal.orch.halt_reason ??= `task ${task.id} failed after ${task.attempts} attempt(s): ${cause}${cause === 'merge_conflict' && note ? ` (${note})` : ''}${accNote}${failing ? ` (failing: ${failing})` : ''}`.slice(0, 800);
       S.goal.orch.halt_at_ms ??= this.now();
       this._dropWorktree(S, task).catch(() => {});
     } else {
@@ -750,7 +757,7 @@ export class Engine {
     const tam = checks.results.find((r) => r.harness_tamper);
     if (tam) { this.ev('orch.anticheat.failed', 'orchestrator', task.id, { kind: 'harness_tamper', attempt: entry.n, reason: tam.harness_problems.slice(0, 3).join(' | ').slice(0, 200) }); entry.anticheat = attemptRecord({ findings: entry.anticheat?.findings || [], failed: 'harness_tamper' }); return this._failAttempt(S, task, entry, 'harness_tamper', { escalate: true, note: `anti-cheat harness_tamper: ${tam.harness_problems.slice(0, 3).join(' | ')}`.slice(0, 300) }); }
     for (const r of checks.results) if (r.harness_problems && !r.harness_tamper) this.ev('orch.anticheat.warning', 'orchestrator', task.id, { attempt: entry.n, kinds: ['harness_tamper'], detail: r.harness_problems.slice(0, 2).join(' | ').slice(0, 200) });
-    if (!checks.ok) return this._failAttempt(S, task, entry, 'check_failed', { escalate: true, check_output: tail(last?.output || '', 4096) });
+    if (!checks.ok) return this._failAttempt(S, task, entry, 'check_failed', { escalate: true, check_output: tail(last?.output || '', 4096), worker_note: c.result?.result });
     const vac = this._judgeChecks(S.goal, checks.results, entry, task);
     if (vac) return this._failAttempt(S, task, entry, vac.kind, { escalate: true, note: `anti-cheat ${vac.kind}: ${vac.reason}`.slice(0, 300) });
 

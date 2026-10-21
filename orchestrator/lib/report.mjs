@@ -31,6 +31,11 @@ export function buildReport({ goal, tasks, state = null, approvals = [], denials
     L.push('', '## Worker errors (last lines of stderr)');
     for (const { t, a } of errs) L.push('', `${t.id} attempt ${a.n} (${a.tier}): ${a.outcome || 'running'}`, fence(String(a.stderr_tail).replace(/```/g, "'''")).replace(/\n$/, ''));
   }
+  const notes = tasks.filter((t) => t.status === 'failed' && t.orch?.last_failure?.worker_note);
+  if (notes.length) {
+    L.push('', "## Failed tasks: the worker's last note (written by the model: untrusted, check it yourself)");
+    for (const t of notes) L.push('', `${t.id}:`, fence(String(t.orch.last_failure.worker_note).replace(/```/g, "'''")).replace(/\n$/, ''));
+  }
   L.push('', ...reportLines(state || { goal, tasks }));
   L.push('## Approvals', '');
   if (!approvals.length) L.push('none');
