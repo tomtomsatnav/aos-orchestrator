@@ -28,8 +28,12 @@ test('engine: the plan sizes the budget (shown in the plan note), then merges le
   await drive(sb.engine(dir, { budgetGraceMs: 20000 }));
   const g = goalOf(dir); assert.equal(g.status, 'achieved', g.blocked_reason);
   const sized = readEvents(dir).find((e) => e.type === 'orch.budget.sized'); assert.equal(sized.data.from, 1000); assert.equal(sized.data.to, 400000); assert.match(g.orch.token_budget_note, /sized from this plan \(4 tasks/);
-  const ext = readEvents(dir).filter((e) => e.type === 'orch.budget.extended'); assert.equal(ext.length, 1); assert.equal(ext[0].data.from, 400000); assert.equal(ext[0].data.to, 500000); assert.match(ext[0].data.reason, /done/);
-  assert.equal(g.orch.budgets.max_new_tokens, 500000); assert.equal(g.orch.budget_extensions.length, 1);
+  // 4 x 110k against 400k: the first extension (400k -> 500k) always happens; whether usage crosses 80% of 500k again AFTER another merge depends on
+  // the order the parallel tasks finish, so a second step is also correct. Each step must be the engine's +25% (rounded to 10k) of the previous and follow progress.
+  const ext = readEvents(dir).filter((e) => e.type === 'orch.budget.extended'); assert.ok(ext.length >= 1 && ext.length <= 2, `extensions: ${ext.length}`);
+  assert.equal(ext[0].data.from, 400000); assert.equal(ext[0].data.to, 500000);
+  for (const [i, e] of ext.entries()) { assert.match(e.data.reason, /done/); if (i) { assert.equal(e.data.from, ext[i - 1].data.to); assert.equal(e.data.to, grownTokenBudget({ used: Infinity, cap: e.data.from, progress: 1, mark: 0, hard: Infinity })); } } // each step is the engine's own +25%, rounded up to 10k
+  assert.equal(g.orch.budgets.max_new_tokens, ext.at(-1).data.to); assert.equal(g.orch.budget_extensions.length, ext.length);
 });
 test('engine: no progress, no extension: a worker that burns past the working budget before anything merges stops the goal as before', async (t) => {
   const sb = mkSandbox(); t.after(() => sb.cleanup());
