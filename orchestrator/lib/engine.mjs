@@ -698,7 +698,8 @@ export class Engine {
       const accItems = cause === 'check_failed' && check_output ? (this._anti(S.goal).acceptance?.items || []) : [];
       const failFiles = accItems.length ? new Set(failingTests(check_output, roots).map((f) => f.file).filter(Boolean)) : new Set();
       const acc = accItems.find((i) => i.task !== task.id && (i.files || []).some((f) => failFiles.has(f)));
-      const accNote = acc ? `; the failing test is in ${(acc.files || []).filter((f) => failFiles.has(f)).slice(0, 2).join(', ')}, written by acceptance task ${acc.task} and read-only for ${task.id}: if the test itself is wrong, fix it by hand or re-plan (the worker's last note is in the report)` : '';
+      // failFiles come from the check's output (code under test can print TAP lines), so this only points a human at the file, never asserts the test is wrong
+      const accNote = acc ? `; the failing test is reported in ${(acc.files || []).filter((f) => failFiles.has(f)).slice(0, 2).join(', ')}, written by acceptance task ${acc.task} and read-only for ${task.id}: check whether that test or the implementation is wrong before changing either, then fix by hand or re-plan${worker_note ? " (the worker's last note is in the report)" : ''}` : '';
       S.goal.orch.halt_reason ??= `task ${task.id} failed after ${task.attempts} attempt(s): ${cause}${cause === 'merge_conflict' && note ? ` (${note})` : ''}${accNote}${failing ? ` (failing: ${failing})` : ''}`.slice(0, 800);
       S.goal.orch.halt_at_ms ??= this.now();
       this._dropWorktree(S, task).catch(() => {});

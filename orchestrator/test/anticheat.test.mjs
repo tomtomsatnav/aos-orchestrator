@@ -310,7 +310,7 @@ test('e) acceptance: a WRONG acceptance test blocks the goal naming the acceptan
   const { dir } = await sb.goal({ ...merge(ACC, { orch: { budgets: { max_attempts: 1 } } }), plan: onePlan(accTask(), implTask({ checks: [{ argv: ['node', '--test', 'test/accept.test.mjs'], timeout_s: 60 }] })) });
   await drive(sb.engine(dir));
   const g = goalOf(dir); assert.equal(g.status, 'blocked');
-  assert.match(g.blocked_reason, /task impl failed after 1 attempt\(s\): check_failed; the failing test is in test\/accept\.test\.mjs, written by acceptance task acc and read-only for impl/);
+  assert.match(g.blocked_reason, /task impl failed after 1 attempt\(s\): check_failed; the failing test is reported in test\/accept\.test\.mjs, written by acceptance task acc and read-only for impl: check whether that test or the implementation is wrong/);
   assert.equal(tasksOf(dir).find((x) => x.id === 'impl').orch.last_failure.worker_note, note);
   assert.match(fs.readFileSync(paths(dir).report, 'utf8'), /the worker's last note[\s\S]*expects add\(2, 3\) to be 6/);
 });
