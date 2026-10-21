@@ -2,12 +2,13 @@
 // denials, `git diff --stat base..integration`, and the exact commands for the human to review and merge.
 import { versionDrift } from './cli-version.mjs';
 import { reportLines } from './anticheat.mjs';
+import { escCtrl } from './ctrl.mjs';
 const fence = (s) => `\n\`\`\`\n${String(s || '').trim()}\n\`\`\`\n`;
 
 export function buildReport({ goal, tasks, state = null, approvals = [], denials = [], selfChecks = 0, diffStat = '', criteriaResults = {}, events = [], governor = null }) {
   const o = goal.orch;
   const L = [];
-  L.push(`# Goal report: ${goal.title}`, '', `- id: \`${goal.id}\``, `- status: **${goal.status}**${goal.blocked_reason ? ` (${goal.blocked_reason})` : ''}`,
+  L.push(`# Goal report: ${goal.title}`, '', `- id: \`${goal.id}\``, `- status: **${goal.status}**${goal.blocked_reason ? ` (${escCtrl(goal.blocked_reason)})` : ''}`,
     `- repo: \`${o.repo}\`  base: \`${o.base_branch}\` @ \`${(o.base_commit || '').slice(0, 10)}\`  integration: \`${o.integration_branch}\``,
     `- new tokens: ${o.usage.new_tokens}  cache-read tokens: ${o.usage.cache_read_tokens}  workers started: ${o.usage.workers_started}`,
     `- notional cost (list price, NOT money spent on a subscription): $${(o.usage.notional_usd || 0).toFixed(4)}`);
@@ -30,6 +31,11 @@ export function buildReport({ goal, tasks, state = null, approvals = [], denials
   if (errs.length) {
     L.push('', '## Worker errors (last lines of stderr)');
     for (const { t, a } of errs) L.push('', `${t.id} attempt ${a.n} (${a.tier}): ${a.outcome || 'running'}`, fence(String(a.stderr_tail).replace(/```/g, "'''")).replace(/\n$/, ''));
+  }
+  const notes = tasks.filter((t) => t.status === 'failed' && t.orch?.last_failure?.worker_note);
+  if (notes.length) {
+    L.push('', "## Failed tasks: the worker's last note (written by the model: untrusted, check it yourself)");
+    for (const t of notes) L.push('', `${t.id}:`, fence(String(t.orch.last_failure.worker_note).replace(/```/g, "'''")).replace(/\n$/, ''));
   }
   L.push('', ...reportLines(state || { goal, tasks }));
   L.push('## Approvals', '');

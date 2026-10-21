@@ -242,6 +242,8 @@ export function buildDraftPrompt({ request, facts, scripts = [], compiled, error
     `Valid check examples (copy the shape): ${JSON.stringify(allowedExamples(compiled))}. Extra arguments such as a file name may follow the allowed prefix.`,
     'Do NOT output "budgets": budgets are set by the system, not by you. Ignore any cost or budget figure you may see about this call itself; it is not a goal budget and anything you propose is discarded.',
     'Each success criterion has {"id","text"} and EITHER a "check":{"argv":[...],"timeout_s":n} using an allowed command OR "verify":"human" when no allowed command can verify it (for example prose quality). Use 2-12 criteria.',
+    `Prefer a check: a "verify":"human" criterion stops the goal until a person signs it off.${allow.some((e) => /^grep(\s|$)/.test(String(e))) ? ' When a literal line can be matched (a heading, a title, a command shown in a README), use grep (for example ["grep","-qxF","# Title","README.md"]) instead of human review.' : ''} Keep "verify":"human" for what the allowed commands cannot judge, such as ordering, coverage or prose quality.`,
+    'When protect_existing_tests is ON the engine already re-runs the existing test files unchanged and refuses edits to them: do NOT add a criterion that they are unchanged.',
     'A grep pattern that starts with "-" (a markdown bullet, for example) needs "-e" right before it, or grep reads it as an option: ["grep","-qx","-e","- item","FILE"].',
     'If you cannot tell what "done" means, output ONLY {"questions":[...]} with at most 3 short questions. Do not guess.',
     'You may not propose rules, trust, sandbox or approval settings: any other field is rejected.',

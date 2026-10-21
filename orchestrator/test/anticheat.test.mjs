@@ -301,3 +301,16 @@ test('rules: acceptance_first and literal_copy are tightening-only (a later laye
   const d = compileRules([]); assert.equal(d.compiled.checks.acceptance_first, false); assert.equal(d.compiled.checks.literal_copy, 'warn');
   assert.equal(compileRules([{ layer: 'goal', rules: R({ literal_copy: 'strict' }) }]).ok, false);
 });
+
+test('e) acceptance: a WRONG acceptance test blocks the goal naming the acceptance task, and the report keeps the worker\'s note (found by the real evals)', async (t) => {
+  const sb = mkSandbox(); t.after(() => sb.cleanup());
+  const WRONG = `${HEAD}import { add } from '../src/calc.mjs';\ntest('adds 2+3', () => assert.equal(add(2, 3), 6));\n`;
+  const note = 'src/calc.mjs is correct; the acceptance test expects add(2, 3) to be 6, which is wrong. I did not edit the test or special-case the answer.';
+  sb.scenario({ tasks: { acc: [step([['test/accept.test.mjs', WRONG]])], impl: [step([['src/calc.mjs', 'export const add = (a, b) => a + b;\n']], { message: note })] } });
+  const { dir } = await sb.goal({ ...merge(ACC, { orch: { budgets: { max_attempts: 1 } } }), plan: onePlan(accTask(), implTask({ checks: [{ argv: ['node', '--test', 'test/accept.test.mjs'], timeout_s: 60 }] })) });
+  await drive(sb.engine(dir));
+  const g = goalOf(dir); assert.equal(g.status, 'blocked');
+  assert.match(g.blocked_reason, /task impl failed after 1 attempt\(s\): check_failed; the failing test is reported in test\/accept\.test\.mjs, written by acceptance task acc and read-only for impl: check whether that test or the implementation is wrong/);
+  assert.equal(tasksOf(dir).find((x) => x.id === 'impl').orch.last_failure.worker_note, note);
+  assert.match(fs.readFileSync(paths(dir).report, 'utf8'), /the worker's last note[\s\S]*expects add\(2, 3\) to be 6/);
+});

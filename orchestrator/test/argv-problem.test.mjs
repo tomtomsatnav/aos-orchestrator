@@ -10,7 +10,7 @@ import { compileRules } from '../lib/rules.mjs';
 test('argvProblem: a leading-dash grep pattern is flagged; -e, --, flags and other commands are fine', () => {
   assert.match(argvProblem(['grep', '-qx', '- add retry to the fetcher', 'CHANGELOG.md']), /starts with "-".*-e/);
   assert.match(argvProblem(['/usr/bin/grep', '-q', '-- x', 'F']), /starts with "-"/);
-  for (const ok of [['grep', '-qx', '-e', '- add retry', 'F'], ['grep', '-q', '--', '- add', 'F'], ['grep', '-q', 'Usage', 'README.md'], ['grep', '-qE', '^## 1', 'F'],
+  for (const ok of [['grep', '-qx', '-e', '- add retry', 'F'], ['grep', '-qe', '- item', 'F'], ['grep', '-e-item', 'F'], ['grep', '-qxf', 'pats.txt', 'F'], ['grep', '-q', '--', '- add', 'F'], ['grep', '-q', 'Usage', 'README.md'], ['grep', '-qE', '^## 1', 'F'],
     ['grep', '--count', 'x', 'F'], ['rg', '-q', 'x', 'F'], ['node', '--test'], ['test', '-f', 'a b'], ['grep', '-q', 'x', '- file']]) assert.equal(argvProblem(ok), null, ok.join(' '));
 });
 

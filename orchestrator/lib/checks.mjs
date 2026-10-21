@@ -37,7 +37,7 @@ export function argvProblem(argv) {
   if (!Array.isArray(argv) || !PATTERN_CMDS.has(path.basename(String(argv[0])))) return null;
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--' || a === '-e' || a === '--regexp' || a === '-f') return null; // the next argument is the pattern (or a file), never an option
+    if (a === '--' || a === '--regexp' || /^-[A-Za-z0-9]*[ef]/.test(a)) return null; // -e/-f (alone, ending a cluster like -qe, or with the pattern attached like -e-x): the pattern is given explicitly
     if (a.startsWith('-') && a.length > 1 && !/^(-[A-Za-z0-9]+|--[a-z][a-z-]*(=.*)?)$/.test(a)) return `the pattern "${a.slice(0, 60)}" starts with "-", so ${path.basename(argv[0])} would read it as an option and the check could never pass: put "-e" before it (${path.basename(argv[0])} ... -e "${a.slice(0, 30)}" FILE)`;
     if (!a.startsWith('-')) return null; // first positional = the pattern, and it is fine
   }
