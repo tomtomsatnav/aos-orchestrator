@@ -171,6 +171,15 @@ test('governor: limit-failure detection (matcher is UNVERIFIED and configurable)
   goal.orch.usage.notional_usd = 1; assert.match(checkBudgets(goal, { nowMs: 1, seq: 1 }).hard[0], /notional USD/);
 });
 
+test('checkBudgets: max_ticks is a runaway-loop guard, not a time limit: a long goal at a 2s poll stays under it, a tick storm still trips it', () => {
+  // real eval trials (parallel-features-8, large-codebase): 8 tasks, ~17-18 min at the evals' 2s poll -> "tick budget exceeded (501 > 500)" at 1.5% of max_usd
+  const goal = { budget: { max_ticks: 500, max_usd: 5, max_wall_clock_s: 7200 }, orch: { budgets: { max_new_tokens: 2e6 }, usage: { new_tokens: 0, notional_usd: 0 }, started_ms: 1000 } };
+  const at = (s, seq) => checkBudgets(goal, { nowMs: 1000 + s * 1000, seq }).hard;
+  assert.deepEqual(at(18 * 60, 540), [], '18 minutes at a 2s poll'); assert.deepEqual(at(7199, 3600), [], 'the whole wall-clock budget at a 2s poll');
+  assert.match(at(60, 1200)[0], /tick budget exceeded \(1200 > 560\)/, '20 ticks/s for a minute'); assert.match(at(0, 501)[0], /tick budget/);
+  assert.match(checkBudgets({ ...goal, budget: { ...goal.budget, max_ticks: 0 } }, { nowMs: 60000, seq: 0 }).hard[0], /tick budget/, 'a cap of 0 still means nothing allowed');
+});
+
 test('worker: command line, environment, settings and stream parsing (usage dedupe, denials, rate limits)', () => {
   const a = buildArgs({ prompt: 'P', tier: 'sonnet', sessionId: 'sid', settingsFile: '/s.json', maxBudgetUsd: 1.5 });
   assert.deepEqual(a, ['-p', 'P', '--model', 'sonnet', '--output-format', 'stream-json', '--verbose', '--session-id', 'sid', '--max-turns', '30', '--max-budget-usd', '1.5',

@@ -55,7 +55,10 @@ export function prepare(argv, { tmpBase }) {
   if (reporters.length === 1 && reporters[0] === '--test-reporter=tap') { // the engine's own forced TAP run: add the per-file counter next to it
     out.splice(out.indexOf('--test-reporter=tap') + 1, 0, '--test-reporter-destination=stdout', `--test-reporter=${g.reporter}`, `--test-reporter-destination=${perFile}`); counted = true;
   }
-  return { argv: out, env: { AOS_GUARD_DIR: markerDir, AOS_GUARD_NONCE: nonce }, markerDir, nonce, perFile, extraRead: g.dir, counted };
+  // the test files named on the command line: each runs as its own process (unless --test-isolation=none runs them all in one)
+  const oneProcess = argv.some((a) => /^--(?:experimental-)?test-isolation=none$/.test(a));
+  const listed = argv.slice(argv.indexOf('--test') + 1).filter((a) => !a.startsWith('-') && /\.[cm]?[jt]sx?$/.test(a) && !/[*?{[]/.test(a));
+  return { argv: out, env: { AOS_GUARD_DIR: markerDir, AOS_GUARD_NONCE: nonce }, markerDir, nonce, perFile, extraRead: g.dir, counted, listed, oneProcess };
 }
 
 const readJSON = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
@@ -89,9 +92,17 @@ export function collect(prep, cwd, { passed = true } = {}) {
   }
   for (const pid of ends.keys()) if (!starts.has(pid)) problems.push(`end marker without start (pid ${pid})`);
   let files = null; const pf = prep.counted ? readJSON(prep.perFile) : null;
-  if (pf && typeof pf === 'object') {
-    files = {}; for (const [f, r] of Object.entries(pf)) files[toRel(cwd, f)] = r;
-    if (passed && Object.keys(files).length > starts.size) problems.push(`${Object.keys(files).length} test files ran but only ${starts.size} harness markers exist (markers were deleted)`);
+  if (pf && typeof pf === 'object' && pf.files && typeof pf.files === 'object') {
+    files = {}; for (const [f, r] of Object.entries(pf.files)) files[toRel(cwd, f)] = r;
+    // Every file the runner started as a test process must have left its own start marker (a deleted marker = an unverified process). Test counts are keyed by
+    // where test() was called, so a test file that require()s other test files legitimately yields more `files` than processes: match processes, not counts.
+    const procs = new Set((Array.isArray(pf.procs) ? pf.procs : []).map((f) => toRel(cwd, f)));
+    for (const f of prep.listed || []) { try { if (fs.statSync(path.join(cwd, f)).isFile()) procs.add(toRel(cwd, path.resolve(cwd, f))); } catch { /* not a file: node reports it */ } }
+    const marked = new Set([...starts.values()].map((s) => toRel(cwd, s.file)));
+    if (passed && !prep.oneProcess) {
+      if (procs.size) { for (const f of procs) if (!marked.has(f)) problems.push(`${f}: ran as a test process but left no harness marker (markers were deleted)`); }
+      else if (Object.keys(files).length > starts.size) problems.push(`${Object.keys(files).length} test files ran but only ${starts.size} harness markers exist (markers were deleted)`); // no process list from this Node
+    }
   }
   return { ok: problems.length === 0, problems: problems.slice(0, 10), processes: starts.size, checked, files };
 }
