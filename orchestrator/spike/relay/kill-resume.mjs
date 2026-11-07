@@ -1,0 +1,16 @@
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs'; import crypto from 'node:crypto';
+const [cfg, repo] = process.argv.slice(2);
+const env = { ...process.env, CLAUDE_CONFIG_DIR: cfg }; delete env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE;
+const sid = crypto.randomUUID();
+const base = ['--model', 'claude-haiku-5-5', '--output-format', 'json', '--max-budget-usd', '0.05', '--strict-mcp-config', '--permission-mode', 'acceptEdits'];
+const leg = spawn('claude', ['-p', "Task: for each of f1.txt to f10.txt, strictly one at a time (never several tool calls at once): run Bash 'head -c 200 fN.txt', then append a line 'fN.txt: <first word>' to notes.txt with Bash. Then move to the next file.", '--session-id', sid, ...base, '--tools', 'Bash,Write', '--allowedTools', 'Bash Write'], { cwd: repo, env, detached: true, stdio: ['ignore', 'ignore', 'ignore'] });
+const exited = new Promise((r) => leg.on('exit', (code, sig) => r({ code, sig })));
+const lines = () => { try { return fs.readFileSync(`${repo}/notes.txt`, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; } };
+while (lines() < 3) await new Promise((r) => setTimeout(r, 200));
+process.kill(-leg.pid, 'SIGKILL'); const ex = await exited;
+const alive = spawnSync('sh', ['-c', `ps -eo pgid,cmd | awk '$1==${leg.pid}' | grep -v awk`]).stdout.toString().trim();
+console.log('killed:', ex, 'group still alive:', alive || 'no', 'note lines at kill:', lines());
+await new Promise((r) => setTimeout(r, 3000)); console.log('note lines 3 s later:', lines());
+const res = spawnSync('claude', ['-p', 'RELAY: this session was stopped by the relay at its context budget, possibly in the middle of a step. Write HANDOFF.md now with the Write tool, with these sections: ## Done, ## In progress, ## Next steps, ## Known failures, ## Decisions, ## Files touched. Base it only on what you actually did and saw. Then end your turn.', '--resume', sid, '--max-turns', '3', ...base, '--tools', 'Write', '--allowedTools', 'Write'], { cwd: repo, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const j = JSON.parse(res.stdout); console.log('resume usd', j.total_cost_usd.toFixed(4), 'turns', j.num_turns, 'is_error', j.is_error, 'final note lines:', lines());
